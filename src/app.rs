@@ -33,10 +33,26 @@ enum Prefix {
     B,
     /// `k` combinatorics prefix: gcd, lcm, extended gcd, prime test.
     K,
+    /// `s` store and recall. `s s`, `s t`, `s r`, `s u`, or a digit for `q0`–`q9`.
+    S,
+    /// `t` then a digit pops the stack into `q0`–`q9`.
+    T,
+    /// `r` then a digit recalls `q0`–`q9`.
+    R,
     /// Calc's option prefix. `O d` sets a radix in two's complement.
     O,
     /// `O` followed by `d`.
     Od,
+}
+
+#[derive(Clone, Copy)]
+enum VarOp {
+    /// Copy or pop the top of the stack into a variable.
+    Store {
+        pop: bool,
+    },
+    Recall,
+    Unstore,
 }
 
 enum Pending {
@@ -44,6 +60,7 @@ enum Pending {
     Precision(String),
     Radix { digits: String, twos: bool },
     Word(String),
+    Var { op: VarOp, name: String },
 }
 
 pub struct App {
@@ -97,6 +114,7 @@ impl App {
             Pending::Precision(digits) => format!("precision: {digits}"),
             Pending::Radix { digits, .. } => format!("radix: {digits}"),
             Pending::Word(digits) => format!("word: {digits}"),
+            Pending::Var { op, name } => format!("{}: {name}", var_prompt(*op)),
             Pending::None => self.entry.clone(),
         }
     }
@@ -144,6 +162,9 @@ impl App {
             Prefix::D => parts.push("d-".to_string()),
             Prefix::B => parts.push("b-".to_string()),
             Prefix::K => parts.push("k-".to_string()),
+            Prefix::S => parts.push("s-".to_string()),
+            Prefix::T => parts.push("t-".to_string()),
+            Prefix::R => parts.push("r-".to_string()),
             Prefix::O => parts.push("O-".to_string()),
             Prefix::Od => parts.push("Od-".to_string()),
             Prefix::None => {}
@@ -182,7 +203,14 @@ impl App {
         if self.quit {
             return;
         }
-        if matches!(key, Key::Char('q') | Key::Ctrl('c') | Key::Ctrl('C')) {
+        // `q` is a letter while a variable name is being typed. Ctrl-C still quits.
+        let naming = matches!(self.pending, Pending::Var { .. });
+        let quit = match key {
+            Key::Ctrl('c') | Key::Ctrl('C') => true,
+            Key::Char('q') => !naming,
+            _ => false,
+        };
+        if quit {
             self.quit = true;
             return;
         }
@@ -232,6 +260,15 @@ impl App {
     }
 
     fn press_pending(&mut self, key: Key) {
+        if matches!(self.pending, Pending::Var { .. }) {
+            match key {
+                Key::Char(c) => self.push_var_char(c),
+                Key::Backspace => self.pop_pending(),
+                Key::Enter => self.finish_pending(),
+                _ => self.engine.show("type a name, then RET"),
+            }
+            return;
+        }
         match key {
             Key::Char(c) => self.push_pending(c),
             Key::Backspace => self.pop_pending(),
@@ -245,6 +282,7 @@ impl App {
             Pending::Precision(digits) | Pending::Word(digits) | Pending::Radix { digits, .. } => {
                 Some(digits)
             }
+            Pending::Var { name, .. } => Some(name),
             Pending::None => None,
         }
     }
@@ -283,7 +321,46 @@ impl App {
                 Err(_) => self.engine.fail(CalcError::BadRadix),
             },
             Pending::Word(digits) => self.finish_word(&digits),
+            Pending::Var { op, name } => self.apply_var(op, &name),
             Pending::None => {}
+        }
+    }
+
+    fn push_var_char(&mut self, c: char) {
+        let quick = matches!(
+            &self.pending,
+            Pending::Var { name, .. } if name.is_empty() && c.is_ascii_digit()
+        );
+        if quick {
+            let Pending::Var { op, .. } = std::mem::replace(&mut self.pending, Pending::None)
+            else {
+                return;
+            };
+            self.apply_var(op, &format!("q{c}"));
+            return;
+        }
+        let Some(name) = self.pending_text() else {
+            return;
+        };
+        let ok = if name.is_empty() {
+            c.is_ascii_alphabetic()
+        } else {
+            c.is_ascii_alphanumeric()
+        };
+        if ok && name.len() < 32 {
+            name.push(c);
+        }
+    }
+
+    fn apply_var(&mut self, op: VarOp, name: &str) {
+        if name.is_empty() {
+            self.engine.fail(CalcError::Domain("bad variable name"));
+            return;
+        }
+        match op {
+            VarOp::Store { pop } => self.engine.store(name, pop),
+            VarOp::Recall => self.engine.recall(name),
+            VarOp::Unstore => self.engine.unstore(name),
         }
     }
 
@@ -361,6 +438,33 @@ impl App {
             (Prefix::K, 'E') => self.engine.egcd(),
             (Prefix::K, 'p') => self.engine.prime_test(),
             (Prefix::K, 'c') => self.engine.choose(),
+            (Prefix::S, 's') => {
+                self.pending = Pending::Var {
+                    op: VarOp::Store { pop: false },
+                    name: String::new(),
+                };
+            }
+            (Prefix::S, 't') => {
+                self.pending = Pending::Var {
+                    op: VarOp::Store { pop: true },
+                    name: String::new(),
+                };
+            }
+            (Prefix::S, 'r') => {
+                self.pending = Pending::Var {
+                    op: VarOp::Recall,
+                    name: String::new(),
+                };
+            }
+            (Prefix::S, 'u') => {
+                self.pending = Pending::Var {
+                    op: VarOp::Unstore,
+                    name: String::new(),
+                };
+            }
+            (Prefix::S, d) if d.is_ascii_digit() => self.engine.store(&format!("q{d}"), false),
+            (Prefix::T, d) if d.is_ascii_digit() => self.engine.store(&format!("q{d}"), true),
+            (Prefix::R, d) if d.is_ascii_digit() => self.engine.recall(&format!("q{d}")),
             _ => self.engine.show("unknown key"),
         }
     }
@@ -468,6 +572,9 @@ impl App {
             ':' => self.engine.fdiv(),
             '!' => self.engine.factorial(),
             'k' => self.prefix = Prefix::K,
+            's' => self.prefix = Prefix::S,
+            't' => self.prefix = Prefix::T,
+            'r' => self.prefix = Prefix::R,
             'n' => self.engine.negate(),
             '&' => self.engine.reciprocal(),
             'Q' => self.engine.sqrt(),
@@ -501,6 +608,15 @@ impl App {
             '?' => self.help = true,
             _ => self.engine.show("unknown key"),
         }
+    }
+}
+
+fn var_prompt(op: VarOp) -> &'static str {
+    match op {
+        VarOp::Store { pop: false } => "store",
+        VarOp::Store { pop: true } => "into",
+        VarOp::Recall => "recall",
+        VarOp::Unstore => "unstore",
     }
 }
 
@@ -857,6 +973,69 @@ mod tests {
         assert_eq!(top("10\n3\nkc"), "120");
         assert_eq!(top("5\n2\nHkc"), "20");
         assert_eq!(top("_3\n2\nkc"), "6");
+    }
+
+    #[test]
+    fn variables_store_recall_and_undo() {
+        let mut app = App::new();
+        app.keys("12\nssa\n");
+        assert_eq!(app.engine().message(), "stored a");
+        assert_eq!(app.top_string().as_deref(), Some("12"));
+        app.keys("sra\n");
+        assert_eq!(app.engine().stack_lines(), ["12", "12"]);
+        app.keys("u");
+        assert_eq!(app.engine().stack_lines(), ["12"]);
+
+        let mut app = App::new();
+        app.keys("9\nsta\n");
+        assert!(app.engine().stack().is_empty());
+        assert_eq!(app.engine().message(), "stored a");
+        app.keys("u");
+        assert_eq!(app.top_string().as_deref(), Some("9"));
+        app.keys("sra\n");
+        assert!(app.engine().is_error());
+        assert_eq!(app.engine().message(), "void variable");
+
+        let mut app = App::new();
+        app.keys("4\ns0r0");
+        assert_eq!(app.engine().stack_lines(), ["4", "4"]);
+        app.keys("t0");
+        assert_eq!(app.engine().stack_lines(), ["4"]);
+        app.keys("r0");
+        assert_eq!(app.top_string().as_deref(), Some("4"));
+
+        let mut app = App::new();
+        app.keys("8\nss9");
+        assert_eq!(app.engine().message(), "stored q9");
+        assert_eq!(app.top_string().as_deref(), Some("8"));
+        app.keys("sua\n");
+        assert_eq!(app.engine().message(), "void variable");
+        app.keys("ss\n");
+        assert_eq!(app.engine().message(), "bad variable name");
+
+        // A typed `q0` is the same slot as the `s 0` shorthand.
+        let mut app = App::new();
+        app.keys("7\nssq0\n");
+        assert_eq!(app.composer_text(), "");
+        assert_eq!(app.engine().message(), "stored q0");
+        app.keys("r0");
+        assert_eq!(app.engine().stack_lines(), ["7", "7"]);
+        app.keys("suq0\n");
+        assert_eq!(app.engine().message(), "unstored q0");
+        app.keys("u");
+        app.keys("r0");
+        assert_eq!(app.top_string().as_deref(), Some("7"));
+
+        let mut app = App::new();
+        app.keys("5\nssa\n6\nssa\n");
+        app.keys("u");
+        app.keys("sra\n");
+        assert_eq!(app.engine().stack_lines(), ["5", "6", "5"]);
+
+        let mut app = App::new();
+        app.keys("ssa\n");
+        assert_eq!(app.engine().message(), "too few arguments");
+        assert!(app.engine().stack().is_empty());
     }
 
     #[test]

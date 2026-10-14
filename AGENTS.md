@@ -63,7 +63,13 @@ b w       word size, default 32, may be negative
 O d …     two's complement before d 2, d 8, d 6, d 0, or d r
 #digits   current radix; 16#FF is hex in any mode
 c f c F   to float, to fraction
+s s       store the top, leaving it on the stack
+s t       pop the top into a variable
+s r       recall a variable onto the stack
+s u       unstore a variable
+s 0-9     store into q0–q9; t 0-9 pops into one; r 0-9 recalls one
 u         undo           C-r redo
+          undo restores the stack and the variables
 q ? Esc   quit, help, cancel entry or prefixes
 ```
 
@@ -103,5 +109,5 @@ Entry and stack details that are easy to get wrong:
 - `n` while typing toggles a leading `_`. `+` and `-` while typing are exponent signs, or digits inside an unclosed `(…)`. Otherwise they add and subtract. Space inside an unparsed `(…` inserts a space. `:` while typing is a fraction; on an empty entry it is fraction division.
 - Stack index 0 is the oldest value. The top of the stack is the last element, drawn at the bottom, with `.` on the last row. The screen does not print level numbers. Values and the `.` start on the same column as the character after `❯ `.
 - `atan2` of a value on an axis is an exact right angle (`0`, `±90`, `180` in degrees), including `atan2(0, 0) = 0` and `atan2(0, negative) = 180`.
-- Undo stores stacks only, cap 100. Mode changes are not undoable. A new stack change clears redo.
+- Undo stores the stack and the variables, cap 100. Mode changes are not undoable. A new stack change clears redo. `s s` stores without popping, `s t` pops into the variable, `s r` recalls, and `s u` unstores. A digit selects `q0`–`q9` (`s 3`, `t 3`, `r 3`). A name is finished with RET.
 - Radix is display and entry only. A number typed without `#` is decimal. `d 2`, `d 8`, `d 6`, `d 0`, and `d r` set the radix (2–36). `#` uses the current radix; `16#FF` forces one. Letters are digits only after `#` when the radix is above 10. For radix 14 or less, `e` is a power of that radix (`8#1.2e3`). From 15 up, `e` is a digit and the power is `16#1.2*16^3`. `d z` pads integers to the word size. `b w` sets that width (default 32, negative allowed, display uses the absolute value). `O` before a radix command turns on two's complement for radices 2, 8, and 16 (`16##FD` is an 8-bit −3). Setting the radix without `O` turns it off. `radix##digits` reads a two's-complement word.

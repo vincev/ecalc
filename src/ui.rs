@@ -263,9 +263,10 @@ const HELP_GROUPS: [&[(&str, &str)]; 4] = [
         ("A", "abs"),
         ("f A", "abs^2"),
         ("I", "inverse"),
-        ("H", "hyp"),
-        ("J", "conj"),
-        ("G", "arg"),
+        ("s s", "store"),
+        ("s t", "into"),
+        ("s r", "recall"),
+        ("s u", "unstore"),
     ],
     &[
         ("+", "add"),
@@ -284,6 +285,7 @@ const HELP_GROUPS: [&[(&str, &str)]; 4] = [
         ("k c", "choose"),
         ("Hk c", "perm"),
         ("P", "pi"),
+        ("J", "conj"),
     ],
     &[
         ("S", "sin"),
@@ -302,6 +304,7 @@ const HELP_GROUPS: [&[(&str, &str)]; 4] = [
         ("f L", "lnp1"),
         ("f I", "ilog"),
         ("f s", "sign"),
+        ("G", "arg"),
     ],
     &[
         ("p", "prec"),
@@ -320,6 +323,7 @@ const HELP_GROUPS: [&[(&str, &str)]; 4] = [
         ("O d", "twos"),
         ("Esc", "cancel"),
         ("H P", "e"),
+        ("H", "hyp"),
     ],
 ];
 

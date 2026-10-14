@@ -1,8 +1,8 @@
 //! RPN stack, undo, and the operations behind the keys.
 //!
 //! Index 0 is the oldest value. The last element is stack level 1.
-//! A checkpoint is taken only after a computation succeeds, and only the
-//! stack is saved. Mode changes are not undoable. `push` and `dup` leave
+//! A checkpoint is taken only after a computation succeeds. It saves the
+//! stack and the variables. Mode changes are not undoable. `push` and `dup` leave
 //! the inverse and hyperbolic flags alone so `125 RET 3 I ^` works.
 
 use crate::comb;
@@ -12,14 +12,23 @@ use crate::radix::{self, MAX_RADIX, MAX_WORD_SIZE, MIN_RADIX, MIN_WORD_SIZE};
 use crate::value::{self, AngleMode, Mode, Real, Value};
 use num_bigint::BigInt;
 use num_traits::One;
+use std::collections::BTreeMap;
 
 const UNDO_CAP: usize = 100;
+const MAX_VAR_LEN: usize = 32;
+
+#[derive(Clone, Debug)]
+struct Snapshot {
+    stack: Vec<Value>,
+    vars: BTreeMap<String, Value>,
+}
 
 #[derive(Clone, Debug)]
 pub struct Engine {
     stack: Vec<Value>,
-    undo: Vec<Vec<Value>>,
-    redo: Vec<Vec<Value>>,
+    vars: BTreeMap<String, Value>,
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
     mode: Mode,
     inverse: bool,
     hyperbolic: bool,
@@ -37,6 +46,7 @@ impl Engine {
     pub fn new() -> Self {
         Self {
             stack: Vec::new(),
+            vars: BTreeMap::new(),
             undo: Vec::new(),
             redo: Vec::new(),
             mode: Mode::default(),
@@ -171,7 +181,8 @@ impl Engine {
             self.show("nothing to undo");
             return;
         };
-        self.redo.push(std::mem::replace(&mut self.stack, prev));
+        self.redo.push(self.snapshot());
+        self.restore(prev);
         if self.redo.len() > UNDO_CAP {
             self.redo.remove(0);
         }
@@ -184,12 +195,62 @@ impl Engine {
             self.show("nothing to redo");
             return;
         };
-        self.undo.push(std::mem::replace(&mut self.stack, next));
+        self.undo.push(self.snapshot());
+        self.restore(next);
         if self.undo.len() > UNDO_CAP {
             self.undo.remove(0);
         }
         self.clear_message();
         self.clear_flags();
+    }
+
+    /// Copy the top of the stack into `name`. `pop` removes it afterwards.
+    /// A digit variable is stored under `q0`–`q9` by the key map.
+    pub fn store(&mut self, name: &str, pop: bool) {
+        if !valid_var(name) {
+            self.fail(CalcError::Domain("bad variable name"));
+            return;
+        }
+        let Some(value) = self.stack.last().cloned() else {
+            self.fail(CalcError::StackUnderflow);
+            return;
+        };
+        self.checkpoint();
+        if pop {
+            self.stack.pop();
+        }
+        self.vars.insert(name.to_string(), value);
+        self.show(format!("stored {name}"));
+    }
+
+    /// Push the stored value. A missing variable is an error.
+    pub fn recall(&mut self, name: &str) {
+        if !valid_var(name) {
+            self.fail(CalcError::Domain("bad variable name"));
+            return;
+        }
+        let Some(value) = self.vars.get(name).cloned() else {
+            self.fail(CalcError::Domain("void variable"));
+            return;
+        };
+        self.checkpoint();
+        self.stack.push(value);
+        self.show(format!("recalled {name}"));
+    }
+
+    /// Drop a stored value. Recalling it afterwards is an error.
+    pub fn unstore(&mut self, name: &str) {
+        if !valid_var(name) {
+            self.fail(CalcError::Domain("bad variable name"));
+            return;
+        }
+        if !self.vars.contains_key(name) {
+            self.fail(CalcError::Domain("void variable"));
+            return;
+        }
+        self.checkpoint();
+        self.vars.remove(name);
+        self.show(format!("unstored {name}"));
     }
 
     pub fn add(&mut self) {
@@ -512,8 +573,20 @@ impl Engine {
         self.clear_flags();
     }
 
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            stack: self.stack.clone(),
+            vars: self.vars.clone(),
+        }
+    }
+
+    fn restore(&mut self, snap: Snapshot) {
+        self.stack = snap.stack;
+        self.vars = snap.vars;
+    }
+
     fn checkpoint(&mut self) {
-        self.undo.push(self.stack.clone());
+        self.undo.push(self.snapshot());
         if self.undo.len() > UNDO_CAP {
             self.undo.remove(0);
         }
@@ -557,6 +630,16 @@ impl Engine {
             Err(err) => self.fail(err),
         }
     }
+}
+
+fn valid_var(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    name.len() <= MAX_VAR_LEN
+        && first.is_ascii_alphabetic()
+        && chars.all(|c| c.is_ascii_alphanumeric())
 }
 
 fn exact_int(value: &Value) -> Option<BigInt> {
