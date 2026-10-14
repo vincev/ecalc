@@ -189,17 +189,23 @@ fn paint_info(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
     let last_x = area.x + area.width - 1;
     let caption = format!("{} ", app.mode_line().replace("  ", " · "));
     let pad_style = Style::default().bg(BG);
-    for i in 1..=PROMPT_INNER {
-        paint_char(buf, area.x + i, y, ' ', pad_style);
-        if last_x >= i {
-            paint_char(buf, last_x - i, y, ' ', pad_style);
-        }
-    }
+    // One blank cell inside the left corner, so the mode line does not sit on it.
+    paint_char(buf, area.x + 1, y, ' ', pad_style);
+
     let message = app.engine().message();
+    // The corner stays `─╯`. A message leaves one blank cell to the left of that dash.
+    // With no message the border runs unbroken into the corner.
+    let msg_end = if message.is_empty() {
+        last_x
+    } else {
+        let pad_x = last_x.saturating_sub(PROMPT_INNER + 1);
+        paint_char(buf, pad_x, y, ' ', pad_style);
+        pad_x
+    };
     let msg = if message.is_empty() {
         String::new()
     } else {
-        format!(" {message} ")
+        format!(" {message}")
     };
     let msg_style = if app.engine().is_error() {
         Style::default().fg(ERROR).bg(BG)
@@ -207,15 +213,13 @@ fn paint_info(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
         Style::default().fg(GRAY).bg(BG)
     };
 
-    let inner_right = last_x.saturating_sub(PROMPT_INNER);
-    let msg_room =
-        (inner_right as usize).saturating_sub(area.x as usize + 1 + PROMPT_INNER as usize);
+    let msg_room = (msg_end as usize).saturating_sub(area.x as usize + 1 + PROMPT_INNER as usize);
     let msg_text: String = msg.chars().take(msg_room).collect();
     let msg_w = msg_text.chars().count() as u16;
-    let msg_x = inner_right.saturating_sub(msg_w);
+    let msg_x = msg_end.saturating_sub(msg_w);
 
     let caption_end = if msg_text.is_empty() {
-        inner_right
+        msg_end
     } else {
         msg_x.saturating_sub(1)
     };
@@ -230,8 +234,8 @@ fn paint_info(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
             Style::default().fg(GRAY).bg(BG),
         );
     }
-    if !msg_text.is_empty() && msg_x < inner_right {
-        paint_str(buf, msg_x, y, inner_right, &msg_text, msg_style);
+    if !msg_text.is_empty() && msg_x < msg_end {
+        paint_str(buf, msg_x, y, msg_end, &msg_text, msg_style);
     }
 }
 
@@ -917,6 +921,25 @@ mod tests {
         app.keys("+");
         let rows = lines(&render(&app, 40, 12));
         assert!(rows.iter().any(|row| row.contains("too few arguments")));
+        let info = rows
+            .iter()
+            .position(|row| row.contains('╰'))
+            .expect("prompt bottom");
+        let corner = col(&rows[info], '╯');
+        let info_chars: Vec<char> = rows[info].chars().collect();
+        assert_eq!(info_chars[corner - 1], '─');
+        assert_eq!(info_chars[corner - 2], ' ', "one blank cell left of the dash");
+        assert_eq!(info_chars[corner - 3], 's');
+
+        let idle = lines(&render(&App::new(), 40, 12));
+        let idle_y = idle
+            .iter()
+            .position(|row| row.contains('╰'))
+            .expect("prompt bottom");
+        let idle_corner = col(&idle[idle_y], '╯');
+        let idle_chars: Vec<char> = idle[idle_y].chars().collect();
+        assert_eq!(idle_chars[idle_corner - 1], '─');
+        assert_eq!(idle_chars[idle_corner], '╯');
 
         app.keys("?");
         let buffer = render(&app, 50, 18);
