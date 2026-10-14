@@ -3,7 +3,7 @@
 //! Colors are the GrokNight palette from Grok Build: gray canvas, a focused
 //! prompt border, bold secondary keys, and muted labels.
 
-use crate::app::{App, Key};
+use crate::app::{App, Key, VAR_COLUMN};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -89,6 +89,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_shortcuts(frame.buffer_mut(), chunks[3], app);
     if app.help_open() {
         draw_help(frame.buffer_mut(), area);
+    }
+    if app.vars_open() {
+        draw_variables(frame.buffer_mut(), area, app);
     }
 }
 
@@ -267,6 +270,7 @@ const HELP_GROUPS: [&[(&str, &str)]; 4] = [
         ("s t", "into"),
         ("s r", "recall"),
         ("s u", "unstore"),
+        ("s l", "list"),
     ],
     &[
         ("+", "add"),
@@ -481,11 +485,15 @@ fn draw_help_grid(
 }
 
 fn draw_help_footer(buf: &mut Buffer, x: u16, y: u16, width: u16) {
-    let hints = [("esc", " close"), ("q", " quit")];
+    draw_centered_hints(buf, x, y, width, &[("esc", "close"), ("q", "quit")]);
+}
+
+/// `key label` groups, centered, separated by `  |  `.
+fn draw_centered_hints(buf: &mut Buffer, x: u16, y: u16, width: u16, hints: &[(&str, &str)]) {
     let sep = "  |  ";
     let total = hints
         .iter()
-        .map(|(key, label)| key.chars().count() + label.chars().count())
+        .map(|(key, label)| key.chars().count() + 1 + label.chars().count())
         .sum::<usize>()
         + sep.chars().count() * hints.len().saturating_sub(1);
     if total > width as usize {
@@ -503,8 +511,201 @@ fn draw_help_footer(buf: &mut Buffer, x: u16, y: u16, width: u16) {
             col = paint_str(buf, col, y, end, sep, Style::default().fg(GRAY_DIM).bg(BG));
         }
         col = paint_str(buf, col, y, end, key, key_style);
+        col = paint_str(buf, col, y, end, " ", label_style);
         col = paint_str(buf, col, y, end, label, label_style);
     }
+}
+
+/// Stored variables, ten to a page: five down the left column, five down the right.
+fn draw_variables(buf: &mut Buffer, area: Rect, app: &App) {
+    let rows = app.variable_rows();
+    let grid_rows = if rows.is_empty() {
+        1
+    } else {
+        let left = rows.len().min(VAR_COLUMN);
+        let right = rows.len().saturating_sub(VAR_COLUMN);
+        left.max(right) as u16
+    };
+    let chrome_y = 2 + HELP_V_PAD + HELP_FOOTER;
+    let width = 68u16.min(area.width);
+    let inner_w = width.saturating_sub(2 + HELP_H_PAD * 2);
+    if inner_w < 8 || area.height < chrome_y {
+        return;
+    }
+    let height = (grid_rows + chrome_y).min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+
+    let fill = Style::default().bg(BG);
+    for y in rect.y..rect.y + rect.height {
+        for x in rect.x..rect.x + rect.width {
+            paint_char(buf, x, y, ' ', fill);
+        }
+    }
+
+    let border = Style::default().fg(GRAY_DIM).bg(BG);
+    let last_x = rect.x + rect.width - 1;
+    let last_y = rect.y + rect.height - 1;
+    for x in rect.x..rect.x + rect.width {
+        let (top_ch, bot_ch) = if x == rect.x {
+            ('┌', '└')
+        } else if x == last_x {
+            ('┐', '┘')
+        } else {
+            ('─', '─')
+        };
+        paint_char(buf, x, rect.y, top_ch, border);
+        paint_char(buf, x, last_y, bot_ch, border);
+    }
+    for y in rect.y + 1..last_y {
+        paint_char(buf, rect.x, y, '│', border);
+        paint_char(buf, last_x, y, '│', border);
+    }
+
+    let title_end = last_x.saturating_sub(8);
+    let mut title_x = rect.x + 1;
+    title_x = paint_str(buf, title_x, rect.y, title_end, "─ ", border);
+    title_x = paint_str(
+        buf,
+        title_x,
+        rect.y,
+        title_end,
+        "Variables",
+        Style::default().fg(FG).bg(BG).add_modifier(Modifier::BOLD),
+    );
+    paint_str(buf, title_x, rect.y, title_end, " ─", border);
+
+    let close = " [x] ";
+    let close_x = rect.x + rect.width - close.chars().count() as u16 - 2;
+    if close_x > title_x + 1 {
+        paint_str(
+            buf,
+            close_x,
+            rect.y,
+            last_x,
+            close,
+            Style::default().fg(GRAY).bg(BG),
+        );
+    }
+
+    let inner_x = rect.x + 1 + HELP_H_PAD;
+    let text_w = rect.width.saturating_sub(2 + HELP_H_PAD * 2);
+    let note = if app.var_note().is_empty() {
+        "letter or digit recalls"
+    } else {
+        app.var_note()
+    };
+    let note_style = if app.var_note().is_empty() {
+        Style::default().fg(GRAY).bg(BG)
+    } else {
+        Style::default().fg(ERROR).bg(BG)
+    };
+    let page = if app.var_pages() > 1 {
+        format!("{}/{}", app.var_page() + 1, app.var_pages())
+    } else {
+        String::new()
+    };
+    let page_w = page.chars().count() as u16;
+    let page_x = inner_x + text_w.saturating_sub(page_w);
+    let note_end = if page_w == 0 {
+        inner_x + text_w
+    } else {
+        page_x.saturating_sub(1)
+    };
+    paint_str(buf, inner_x, rect.y + 1, note_end, note, note_style);
+    if page_w > 0 {
+        paint_str(
+            buf,
+            page_x,
+            rect.y + 1,
+            inner_x + text_w,
+            &page,
+            Style::default().fg(GRAY).bg(BG),
+        );
+    }
+
+    let content_y = rect.y + 1 + HELP_V_PAD;
+    let content_h = rect.height.saturating_sub(chrome_y);
+    if rows.is_empty() {
+        paint_str(
+            buf,
+            inner_x,
+            content_y,
+            inner_x + text_w,
+            "nothing stored",
+            Style::default().fg(GRAY).bg(BG),
+        );
+    } else if content_h > 0 {
+        let col_w = (text_w as usize - HELP_GAP) / 2;
+        for (index, (name, value)) in rows.iter().enumerate() {
+            let col = index / VAR_COLUMN;
+            let row = index % VAR_COLUMN;
+            if col > 1 || row >= content_h as usize || col_w == 0 {
+                continue;
+            }
+            let x = inner_x + (col * (col_w + HELP_GAP)) as u16;
+            paint_var_cell(
+                buf,
+                x,
+                content_y + row as u16,
+                x + col_w as u16,
+                name,
+                value,
+            );
+        }
+    }
+
+    let hints = var_footer_hints(app);
+    draw_centered_hints(buf, inner_x, last_y - 1, text_w, &hints);
+}
+
+fn var_footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
+    let mut hints = Vec::new();
+    if app.var_pages() > 1 && app.var_page() + 1 < app.var_pages() {
+        hints.push(("tab", "next"));
+    }
+    if app.var_page() > 0 {
+        hints.push(("TAB", "prev"));
+    }
+    hints.push(("esc", "close"));
+    hints
+}
+
+/// `name: value`, cutting the value with `..` when the cell is too narrow.
+fn paint_var_cell(buf: &mut Buffer, x: u16, y: u16, end: u16, name: &str, value: &str) {
+    if end <= x {
+        return;
+    }
+    let width = (end - x) as usize;
+    let name_style = Style::default()
+        .fg(FG_SECONDARY)
+        .bg(BG)
+        .add_modifier(Modifier::BOLD);
+    let punct = Style::default().fg(GRAY).bg(BG);
+    let value_style = Style::default().fg(FG).bg(BG);
+    let name_len = name.chars().count();
+    if name_len + 2 >= width {
+        let keep = width.saturating_sub(2);
+        let head: String = name.chars().take(keep).collect();
+        let col = paint_str(buf, x, y, end, &head, name_style);
+        paint_str(buf, col, y, end, "..", punct);
+        return;
+    }
+    let mut col = paint_str(buf, x, y, end, name, name_style);
+    col = paint_str(buf, col, y, end, ": ", punct);
+    let room = (end - col) as usize;
+    if value.chars().count() <= room {
+        paint_str(buf, col, y, end, value, value_style);
+        return;
+    }
+    let keep = room.saturating_sub(2);
+    let head: String = value.chars().take(keep).collect();
+    col = paint_str(buf, col, y, end, &head, value_style);
+    paint_str(buf, col, y, end, "..", punct);
 }
 
 fn draw_shortcuts(buf: &mut Buffer, area: Rect, app: &App) {
@@ -517,8 +718,11 @@ fn draw_shortcuts(buf: &mut Buffer, area: Rect, app: &App) {
         paint_char(buf, x, y, ' ', Style::default().fg(GRAY).bg(BG));
     }
 
+    let var_hints = var_footer_hints(app);
     let hints: &[(&str, &str)] = if app.help_open() {
         &[("esc", "close"), ("q", "quit")]
+    } else if app.vars_open() {
+        &var_hints
     } else {
         SHORTCUTS
     };
@@ -757,5 +961,46 @@ mod tests {
             }),
             "the four topic columns share a row"
         );
+    }
+
+    #[test]
+    fn variable_list_is_two_columns() {
+        let mut app = App::new();
+        for name in 'a'..='j' {
+            app.keys(&format!("1\nss{name}\n"));
+        }
+        app.keys("11\nssk\nsl");
+        let rows = lines(&render(&app, 64, 20));
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("a:") && row.contains("f:")),
+            "five names down each column"
+        );
+        assert!(rows.iter().any(|row| row.contains("Variables")));
+        assert!(rows.iter().any(|row| row.contains("1/2")));
+        assert!(rows.iter().any(|row| row.contains("tab:next")));
+        assert!(rows.iter().all(|row| !row.contains("k:")));
+        assert!(rows.iter().all(|row| !row.contains("ret:push")));
+
+        app.press(Key::Tab);
+        let rows = lines(&render(&app, 64, 20));
+        assert!(rows.iter().any(|row| row.contains("k:")));
+        assert!(rows.iter().any(|row| row.contains("2/2")));
+        assert!(rows.iter().any(|row| row.contains("TAB:prev")));
+        assert!(rows.iter().all(|row| !row.contains("a:")));
+
+        let mut app = App::new();
+        app.keys("2\n100^ssa\nsl");
+        let rows = lines(&render(&app, 64, 20));
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("a:") && row.contains("..")),
+            "a long value is cut"
+        );
+
+        let mut app = App::new();
+        app.keys("sl");
+        let rows = lines(&render(&app, 64, 20));
+        assert!(rows.iter().any(|row| row.contains("nothing stored")));
     }
 }

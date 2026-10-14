@@ -253,6 +253,22 @@ impl Engine {
         self.show(format!("unstored {name}"));
     }
 
+    pub fn has_variable(&self, name: &str) -> bool {
+        self.vars.contains_key(name)
+    }
+
+    pub fn variable_count(&self) -> usize {
+        self.vars.len()
+    }
+
+    /// Stored names in alphabetical order, with values in the current radix.
+    pub fn variable_lines(&self) -> Vec<(String, String)> {
+        self.vars
+            .iter()
+            .map(|(name, value)| (name.clone(), radix::format_value(value, &self.mode)))
+            .collect()
+    }
+
     pub fn add(&mut self) {
         self.binop(value::add);
     }

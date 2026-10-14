@@ -33,7 +33,7 @@ enum Prefix {
     B,
     /// `k` combinatorics prefix: gcd, lcm, extended gcd, prime test.
     K,
-    /// `s` store and recall. `s s`, `s t`, `s r`, `s u`, or a digit for `q0`–`q9`.
+    /// `s` store and recall. `s s`, `s t`, `s r`, `s u`, `s l`, or a digit for `q0`–`q9`.
     S,
     /// `t` then a digit pops the stack into `q0`–`q9`.
     T,
@@ -63,12 +63,20 @@ enum Pending {
     Var { op: VarOp, name: String },
 }
 
+/// Rows down one column of the variables dialog. Two columns fill a page.
+pub(crate) const VAR_COLUMN: usize = 5;
+pub(crate) const VAR_PAGE: usize = VAR_COLUMN * 2;
+
 pub struct App {
     engine: Engine,
     entry: String,
     prefix: Prefix,
     pending: Pending,
     help: bool,
+    /// `s l` dialog. Letters and digits recall; Tab moves a page.
+    vars_open: bool,
+    var_page: usize,
+    var_note: String,
     quit: bool,
 }
 
@@ -86,6 +94,9 @@ impl App {
             prefix: Prefix::None,
             pending: Pending::None,
             help: false,
+            vars_open: false,
+            var_page: 0,
+            var_note: String::new(),
             quit: false,
         }
     }
@@ -100,6 +111,33 @@ impl App {
 
     pub fn help_open(&self) -> bool {
         self.help
+    }
+
+    pub fn vars_open(&self) -> bool {
+        self.vars_open
+    }
+
+    pub fn var_page(&self) -> usize {
+        self.var_page
+    }
+
+    pub fn var_pages(&self) -> usize {
+        self.engine.variable_count().div_ceil(VAR_PAGE).max(1)
+    }
+
+    pub fn var_note(&self) -> &str {
+        &self.var_note
+    }
+
+    /// Names and values on the current page of the variables dialog.
+    pub fn variable_rows(&self) -> Vec<(String, String)> {
+        let start = self.var_page * VAR_PAGE;
+        self.engine
+            .variable_lines()
+            .into_iter()
+            .skip(start)
+            .take(VAR_PAGE)
+            .collect()
     }
 
     pub fn top_string(&self) -> Option<String> {
@@ -203,11 +241,12 @@ impl App {
         if self.quit {
             return;
         }
-        // `q` is a letter while a variable name is being typed. Ctrl-C still quits.
+        // `q` is a letter while a name is typed or the variable list is open.
+        // Ctrl-C still quits.
         let naming = matches!(self.pending, Pending::Var { .. });
         let quit = match key {
             Key::Ctrl('c') | Key::Ctrl('C') => true,
-            Key::Char('q') => !naming,
+            Key::Char('q') => !naming && !self.vars_open,
             _ => false,
         };
         if quit {
@@ -220,6 +259,10 @@ impl App {
         }
         if self.help {
             self.help = false;
+            return;
+        }
+        if self.vars_open {
+            self.press_var_list(key);
             return;
         }
         if !matches!(self.pending, Pending::None) {
@@ -255,8 +298,52 @@ impl App {
         self.prefix = Prefix::None;
         self.pending = Pending::None;
         self.help = false;
+        self.vars_open = false;
+        self.var_page = 0;
+        self.var_note.clear();
         self.engine.clear_flags();
         self.engine.clear_message();
+    }
+
+    fn open_variables(&mut self) {
+        self.vars_open = true;
+        self.var_page = 0;
+        self.var_note.clear();
+        self.engine.clear_flags();
+        self.engine.clear_message();
+    }
+
+    fn press_var_list(&mut self, key: Key) {
+        match key {
+            Key::Tab => {
+                if self.var_page + 1 < self.var_pages() {
+                    self.var_page += 1;
+                    self.var_note.clear();
+                }
+            }
+            Key::ShiftTab => {
+                if self.var_page > 0 {
+                    self.var_page -= 1;
+                    self.var_note.clear();
+                }
+            }
+            Key::Char(c) if c.is_ascii_digit() => self.pick_variable(&format!("q{c}")),
+            Key::Char(c) if c.is_ascii_alphabetic() => self.pick_variable(&c.to_string()),
+            _ => {}
+        }
+    }
+
+    /// A letter recalls that one-letter name. A digit recalls `q0`–`q9`.
+    /// A missing name stays on the list. Longer names are only shown.
+    fn pick_variable(&mut self, name: &str) {
+        if !self.engine.has_variable(name) {
+            self.var_note = "void variable".to_string();
+            return;
+        }
+        self.vars_open = false;
+        self.var_page = 0;
+        self.var_note.clear();
+        self.engine.recall(name);
     }
 
     fn press_pending(&mut self, key: Key) {
@@ -462,6 +549,7 @@ impl App {
                     name: String::new(),
                 };
             }
+            (Prefix::S, 'l') => self.open_variables(),
             (Prefix::S, d) if d.is_ascii_digit() => self.engine.store(&format!("q{d}"), false),
             (Prefix::T, d) if d.is_ascii_digit() => self.engine.store(&format!("q{d}"), true),
             (Prefix::R, d) if d.is_ascii_digit() => self.engine.recall(&format!("q{d}")),
@@ -1035,6 +1123,52 @@ mod tests {
         let mut app = App::new();
         app.keys("ssa\n");
         assert_eq!(app.engine().message(), "too few arguments");
+        assert!(app.engine().stack().is_empty());
+    }
+
+    #[test]
+    fn variable_list_pages_and_picks() {
+        let mut app = App::new();
+        for (i, name) in ('a'..='k').enumerate() {
+            app.keys(&format!("{}\nss{}\n", i + 1, name));
+        }
+        app.keys("sl");
+        assert!(app.vars_open());
+        assert_eq!(app.var_page(), 0);
+        assert_eq!(app.var_pages(), 2);
+        app.press(Key::Tab);
+        assert_eq!(app.var_page(), 1);
+        app.press(Key::Tab);
+        assert_eq!(app.var_page(), 1);
+        app.press(Key::ShiftTab);
+        assert_eq!(app.var_page(), 0);
+
+        // `k` is on the other page. A letter still recalls it.
+        app.press(Key::Char('k'));
+        assert!(!app.vars_open());
+        assert_eq!(app.engine().message(), "recalled k");
+        assert_eq!(app.top_string().as_deref(), Some("11"));
+
+        let mut app = App::new();
+        app.keys("1\nssa\n2\nssab\nsl");
+        app.press(Key::Char('a'));
+        assert_eq!(app.top_string().as_deref(), Some("1"));
+        assert_eq!(app.engine().message(), "recalled a");
+
+        let mut app = App::new();
+        app.keys("4\ns0sl");
+        app.press(Key::Char('0'));
+        assert!(!app.vars_open());
+        assert_eq!(app.engine().stack_lines(), ["4", "4"]);
+
+        let mut app = App::new();
+        app.keys("sl");
+        app.press(Key::Char('q'));
+        assert!(!app.should_quit());
+        assert!(app.vars_open());
+        assert_eq!(app.var_note(), "void variable");
+        app.press(Key::Esc);
+        assert!(!app.vars_open());
         assert!(app.engine().stack().is_empty());
     }
 
