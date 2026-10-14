@@ -30,6 +30,8 @@ pub struct Mode {
     pub leading_zeros: bool,
     /// Two's complement display for radices 2, 8, and 16.
     pub twos_complement: bool,
+    /// Separate displayed integer digits with commas. The fractional part stays plain.
+    pub group_digits: bool,
     /// Binary word width. The sign selects the range for a later bitwise
     /// operation; display uses the absolute value. `0` means no fixed width.
     pub word_size: i64,
@@ -44,6 +46,7 @@ impl Default for Mode {
             radix: 10,
             leading_zeros: false,
             twos_complement: false,
+            group_digits: false,
             word_size: 32,
         }
     }

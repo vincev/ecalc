@@ -327,6 +327,7 @@ const HELP_GROUPS: [&[(&str, &str)]; 4] = [
         ("d 0", "dec"),
         ("d r", "radix"),
         ("d z", "zeros"),
+        ("d g", "group"),
         ("b w", "word"),
         ("O d", "twos"),
         ("Esc", "cancel"),
@@ -928,7 +929,11 @@ mod tests {
         let corner = col(&rows[info], '╯');
         let info_chars: Vec<char> = rows[info].chars().collect();
         assert_eq!(info_chars[corner - 1], '─');
-        assert_eq!(info_chars[corner - 2], ' ', "one blank cell left of the dash");
+        assert_eq!(
+            info_chars[corner - 2],
+            ' ',
+            "one blank cell left of the dash"
+        );
         assert_eq!(info_chars[corner - 3], 's');
 
         let idle = lines(&render(&App::new(), 40, 12));

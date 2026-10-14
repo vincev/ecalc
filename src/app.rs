@@ -27,7 +27,7 @@ enum Prefix {
     F,
     M,
     C,
-    /// `d` display prefix: radix, leading zeros.
+    /// `d` display prefix: radix, leading zeros, digit grouping.
     D,
     /// `b` binary prefix. Only `b w` (word size) is used.
     B,
@@ -186,6 +186,9 @@ impl App {
         }
         if mode.twos_complement {
             parts.push("twos".to_string());
+        }
+        if mode.group_digits {
+            parts.push("group".to_string());
         }
         if self.engine.inverse() {
             parts.push("inv".to_string());
@@ -519,6 +522,7 @@ impl App {
                 };
             }
             (Prefix::D | Prefix::Od, 'z') => self.engine.toggle_leading_zeros(),
+            (Prefix::D | Prefix::Od, 'g') => self.engine.toggle_group_digits(),
             (Prefix::B, 'w') => self.pending = Pending::Word(String::new()),
             (Prefix::K, 'g') => self.engine.gcd(),
             (Prefix::K, 'l') => self.engine.lcm(),
@@ -1226,6 +1230,35 @@ mod tests {
         app.keys("bw_8\n");
         assert_eq!(app.engine().mode().word_size, -8);
         assert_eq!(app.top_string().as_deref(), Some("16#C8"));
+
+        let mut app = App::new();
+        app.keys("p13\n1234567.123454\ndg");
+        assert_eq!(app.top_string().as_deref(), Some("1,234,567.123454"));
+        assert_eq!(app.engine().message(), "grouping");
+        assert!(app.mode_line().contains("group"));
+        app.keys("dg");
+        assert_eq!(app.top_string().as_deref(), Some("1234567.123454"));
+        assert_eq!(app.engine().message(), "no grouping");
+        assert!(!app.engine().mode().group_digits);
+
+        let mut app = App::new();
+        app.keys("1000\n2000\n+dg");
+        assert_eq!(app.top_string().as_deref(), Some("3,000"));
+        app.keys("u");
+        assert!(app.engine().mode().group_digits);
+        assert_eq!(app.engine().stack_lines(), ["1,000", "2,000"]);
+
+        let mut app = App::new();
+        app.keys("(1234, 5678)\ndg");
+        assert_eq!(app.top_string().as_deref(), Some("(1,234, 5,678)"));
+
+        let mut app = App::new();
+        app.keys("12345\nd2dg");
+        assert_eq!(app.top_string().as_deref(), Some("2#11,0000,0011,1001"));
+        app.keys("d8");
+        assert_eq!(app.top_string().as_deref(), Some("8#30,071"));
+        app.keys("d6");
+        assert_eq!(app.top_string().as_deref(), Some("16#3039"));
 
         let mut app = App::new();
         app.keys("1\n2\n+d2");

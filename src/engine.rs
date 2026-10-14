@@ -563,6 +563,18 @@ impl Engine {
         self.clear_flags();
     }
 
+    /// `d g`. Integer digits are clumped; the fractional part stays plain.
+    pub fn toggle_group_digits(&mut self) {
+        self.mode.group_digits = !self.mode.group_digits;
+        self.message = if self.mode.group_digits {
+            "grouping".to_string()
+        } else {
+            "no grouping".to_string()
+        };
+        self.error = false;
+        self.clear_flags();
+    }
+
     pub fn set_word_size(&mut self, size: i64) {
         if !(MIN_WORD_SIZE..=MAX_WORD_SIZE).contains(&size) {
             self.fail(CalcError::BadWordSize);

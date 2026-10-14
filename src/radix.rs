@@ -37,15 +37,93 @@ pub(crate) fn format_value(value: &Value, mode: &Mode) -> String {
 }
 
 fn format_real(real: &Real, mode: &Mode) -> String {
-    if mode.radix == 10 && !mode.leading_zeros {
-        return real.to_string();
+    let text = if mode.radix == 10 && !mode.leading_zeros {
+        real.to_string()
+    } else {
+        match real {
+            Real::Int(n) => format_int(n, mode),
+            Real::Rat(r) if mode.radix == 10 => Real::Rat(r.clone()).to_string(),
+            Real::Rat(r) => format_rat(r, mode),
+            Real::Float(f) if mode.radix == 10 => f.to_string(),
+            Real::Float(f) => format_float(f, mode),
+        }
+    };
+    if mode.group_digits {
+        group_formatted(&text, mode.radix)
+    } else {
+        text
     }
-    match real {
-        Real::Int(n) => format_int(n, mode),
-        Real::Rat(r) if mode.radix == 10 => Real::Rat(r.clone()).to_string(),
-        Real::Rat(r) => format_rat(r, mode),
-        Real::Float(f) if mode.radix == 10 => f.to_string(),
-        Real::Float(f) => format_float(f, mode),
+}
+
+/// Binary and hex clump every 4 digits. Every other radix clumps every 3.
+fn group_width(radix: u32) -> usize {
+    if radix == 2 || radix == 16 { 4 } else { 3 }
+}
+
+/// Insert commas into integer digit runs of a finished display string.
+/// The fractional part and the exponent are left as they are. A fraction
+/// groups its numerator and its denominator separately.
+fn group_formatted(text: &str, radix: u32) -> String {
+    let size = group_width(radix);
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    let mut out = String::new();
+    if chars.first() == Some(&'-') {
+        out.push('-');
+        i = 1;
+    }
+    if let Some(hash) = chars[i..].iter().position(|&c| c == '#') {
+        let mut end = i + hash + 1;
+        if chars.get(end) == Some(&'#') {
+            end += 1;
+        }
+        out.extend(chars[i..end].iter().copied());
+        i = end;
+    }
+    group_body(&chars[i..], size, radix, &mut out);
+    out
+}
+
+fn group_body(chars: &[char], size: usize, radix: u32, out: &mut String) {
+    let mut rest = chars;
+    loop {
+        let split = rest
+            .iter()
+            .position(|&c| !is_grouped_digit(c, radix))
+            .unwrap_or(rest.len());
+        push_grouped(&rest[..split], size, out);
+        if split == rest.len() {
+            return;
+        }
+        let sep = rest[split];
+        out.push(sep);
+        rest = &rest[split + 1..];
+        if sep != ':' {
+            out.extend(rest.iter().copied());
+            return;
+        }
+    }
+}
+
+/// `e` is an exponent marker through radix 14. Above that it is a digit.
+fn is_grouped_digit(c: char, radix: u32) -> bool {
+    if radix <= 14 && matches!(c, 'e' | 'E') {
+        return false;
+    }
+    c.is_ascii_alphanumeric()
+}
+
+fn push_grouped(digits: &[char], size: usize, out: &mut String) {
+    if size == 0 || digits.len() <= size {
+        out.extend(digits.iter().copied());
+        return;
+    }
+    let rem = digits.len() % size;
+    for (i, c) in digits.iter().enumerate() {
+        if i > 0 && i % size == rem {
+            out.push(',');
+        }
+        out.push(*c);
     }
 }
 
@@ -451,5 +529,72 @@ mod tests {
         assert_eq!(text, "16#5.6BC75E2D6*16^16");
         let back = crate::parse::parse_value(&text, &Mode::default()).unwrap();
         assert_eq!(back.to_string(), "9.99999999999e19");
+    }
+
+    #[test]
+    fn grouping_clumps_integer_digits_only() {
+        let mut mode = Mode::default();
+        mode.group_digits = true;
+        assert_eq!(format_value(&Value::from_int(123), &mode), "123");
+        assert_eq!(format_value(&Value::from_int(1234), &mode), "1,234");
+        assert_eq!(
+            format_value(&Value::from_int(12_345_678_901_i64), &mode),
+            "12,345,678,901"
+        );
+        assert_eq!(
+            format_value(&Value::from_int(-1_234_567), &mode),
+            "-1,234,567"
+        );
+
+        let ratio = BigRational::new(BigInt::from(1_234_567), BigInt::from(89_012));
+        assert_eq!(
+            format_value(&Value::from_rational(ratio), &mode),
+            "1,234,567:89,012"
+        );
+
+        let mixed = Value::real(Real::Float(float_at(1_234_567_123_454, -6, 13)));
+        assert_eq!(format_value(&mixed, &mode), "1,234,567.123454");
+        let frac_only = Value::real(Real::Float(float_at(123_454, -6, 12)));
+        assert_eq!(format_value(&frac_only, &mode), "0.123454");
+        let scientific = Value::real(Real::Float(float_at(1, 100, 12)));
+        assert_eq!(format_value(&scientific, &mode), "1e100");
+
+        let mut hex = mode_radix(16);
+        hex.group_digits = true;
+        assert_eq!(
+            format_value(&Value::from_int(12_345_678_901_i64), &hex),
+            "16#2,DFDC,1C35"
+        );
+        assert_eq!(format_value(&Value::from_int(0xFFFF), &hex), "16#FFFF");
+        let wide = Value::real(Real::Float(float_at(655_365, -1, 12)));
+        assert_eq!(format_value(&wide, &hex), "16#1,0000.8");
+
+        let mut oct = mode_radix(8);
+        oct.group_digits = true;
+        assert_eq!(
+            format_value(&Value::from_int(12_345_678_901_i64), &oct),
+            "8#133,767,016,065"
+        );
+
+        let mut bin = mode_radix(2);
+        bin.group_digits = true;
+        assert_eq!(
+            format_value(&Value::from_int(12_345), &bin),
+            "2#11,0000,0011,1001"
+        );
+        bin.leading_zeros = true;
+        bin.word_size = 8;
+        assert_eq!(format_value(&Value::from_int(1), &bin), "2#0000,0001");
+
+        let mut twos = mode_radix(16);
+        twos.group_digits = true;
+        twos.twos_complement = true;
+        twos.word_size = 32;
+        assert_eq!(format_value(&Value::from_int(-3), &twos), "16##FFFF,FFFD");
+
+        let mut zeros = Mode::default();
+        zeros.group_digits = true;
+        zeros.leading_zeros = true;
+        assert_eq!(format_value(&Value::from_int(1), &zeros), "0,000,000,001");
     }
 }
