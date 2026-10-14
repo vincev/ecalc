@@ -1,0 +1,16 @@
+//! RPN calculator in the shape of GNU Emacs Calc.
+//!
+//! Numbers are exact integers, exact rationals, decimal floats, or
+//! rectangular complex values built from those.
+
+pub mod app;
+pub mod engine;
+pub mod error;
+pub mod float;
+pub mod parse;
+pub mod ui;
+pub mod value;
+
+pub use app::App;
+pub use engine::Engine;
+pub use error::CalcError;

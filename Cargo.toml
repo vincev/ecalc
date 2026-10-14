@@ -1,0 +1,15 @@
+[package]
+name = "calc"
+version = "0.1.0"
+edition = "2024"
+description = "Terminal RPN calculator"
+license = "Apache-2.0"
+authors = ["Vince <vince.vasta@gmail.com>"]
+
+[dependencies]
+crossterm = "0.29.0"
+num-bigint = "0.4.8"
+num-integer = "0.1.47"
+num-rational = "0.4.2"
+num-traits = "0.2.19"
+ratatui = "0.30.2"
