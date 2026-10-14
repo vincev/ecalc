@@ -5,8 +5,10 @@
 //! stack is saved. Mode changes are not undoable. `push` and `dup` leave
 //! the inverse and hyperbolic flags alone so `125 RET 3 I ^` works.
 
+use crate::comb;
 use crate::error::CalcError;
 use crate::float::{MAX_PRECISION, MIN_PRECISION};
+use crate::radix::{self, MAX_RADIX, MAX_WORD_SIZE, MIN_RADIX, MIN_WORD_SIZE};
 use crate::value::{self, AngleMode, Mode, Real, Value};
 use num_bigint::BigInt;
 use num_traits::One;
@@ -75,7 +77,10 @@ impl Engine {
 
     /// Oldest first. The last line is the top of the stack.
     pub fn stack_lines(&self) -> Vec<String> {
-        self.stack.iter().map(|value| value.to_string()).collect()
+        self.stack
+            .iter()
+            .map(|value| radix::format_value(value, &self.mode))
+            .collect()
     }
 
     pub fn clear_flags(&mut self) {
@@ -147,6 +152,20 @@ impl Engine {
         self.succeed();
     }
 
+    /// Rotate the top three upward: level 3 becomes the top, and the old top
+    /// two each drop one level. This is Calc's `M-TAB` (`calc-roll-up`).
+    pub fn roll_up(&mut self) {
+        let n = self.stack.len();
+        if n < 3 {
+            self.fail(CalcError::StackUnderflow);
+            return;
+        }
+        self.checkpoint();
+        let buried = self.stack.remove(n - 3);
+        self.stack.push(buried);
+        self.succeed();
+    }
+
     pub fn undo(&mut self) {
         let Some(prev) = self.undo.pop() else {
             self.show("nothing to undo");
@@ -199,6 +218,59 @@ impl Engine {
 
     pub fn modulo(&mut self) {
         self.binop(value::modulo);
+    }
+
+    pub fn gcd(&mut self) {
+        self.binop(comb::gcd);
+    }
+
+    pub fn lcm(&mut self) {
+        self.binop(comb::lcm);
+    }
+
+    /// `k c` chooses. `H k c` counts permutations. The count is on top.
+    pub fn choose(&mut self) {
+        if self.hyperbolic {
+            self.binop(comb::perm);
+        } else {
+            self.binop(comb::choose);
+        }
+    }
+
+    /// Pop `y` then `x`. Push `a`, `b`, and `g` so `g` is on top and `g = a*x + b*y`.
+    pub fn egcd(&mut self) {
+        let n = self.stack.len();
+        if n < 2 {
+            self.fail(CalcError::StackUnderflow);
+            return;
+        }
+        let outcome = comb::extended_gcd(&self.stack[n - 2], &self.stack[n - 1]);
+        match outcome {
+            Ok((a, b, g)) => {
+                self.checkpoint();
+                self.stack.pop();
+                self.stack.pop();
+                self.stack.push(Value::from_int(a));
+                self.stack.push(Value::from_int(b));
+                self.stack.push(Value::from_int(g));
+                self.succeed();
+            }
+            Err(err) => self.fail(err),
+        }
+    }
+
+    pub fn factorial(&mut self) {
+        self.unary(comb::factorial);
+    }
+
+    /// Report whether the top integer is prime. The stack stays as it is.
+    pub fn prime_test(&mut self) {
+        let outcome = self.top().map(comb::prime_message);
+        match outcome {
+            None => self.fail(CalcError::StackUnderflow),
+            Some(Ok(message)) => self.show(message),
+            Some(Err(err)) => self.fail(err),
+        }
     }
 
     pub fn power(&mut self) {
@@ -377,6 +449,59 @@ impl Engine {
             "fraction mode".to_string()
         } else {
             "float mode".to_string()
+        };
+        self.error = false;
+        self.clear_flags();
+    }
+
+    /// `twos` is Calc's `O` prefix: two's complement for the radix being set.
+    pub fn set_radix(&mut self, radix: u32, twos: bool) {
+        if !(MIN_RADIX..=MAX_RADIX).contains(&radix) {
+            self.fail(CalcError::BadRadix);
+            return;
+        }
+        self.mode.radix = radix;
+        self.mode.twos_complement = twos;
+        let name = match radix {
+            2 => "binary",
+            8 => "octal",
+            10 => "decimal",
+            16 => "hexadecimal",
+            other => {
+                self.note_mode(format!("radix {other}"), twos);
+                return;
+            }
+        };
+        self.note_mode(name.to_string(), twos);
+    }
+
+    pub fn toggle_leading_zeros(&mut self) {
+        self.mode.leading_zeros = !self.mode.leading_zeros;
+        self.message = if self.mode.leading_zeros {
+            "leading zeros".to_string()
+        } else {
+            "no leading zeros".to_string()
+        };
+        self.error = false;
+        self.clear_flags();
+    }
+
+    pub fn set_word_size(&mut self, size: i64) {
+        if !(MIN_WORD_SIZE..=MAX_WORD_SIZE).contains(&size) {
+            self.fail(CalcError::BadWordSize);
+            return;
+        }
+        self.mode.word_size = size;
+        self.message = format!("word size {size}");
+        self.error = false;
+        self.clear_flags();
+    }
+
+    fn note_mode(&mut self, name: String, twos: bool) {
+        self.message = if twos {
+            format!("{name}, two's complement")
+        } else {
+            name
         };
         self.error = false;
         self.clear_flags();

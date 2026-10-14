@@ -38,6 +38,7 @@ digits . e E _ - + : ( ) ,     entry
 RET SPC   push, or duplicate the top if the entry is empty
 DEL       backspace, or pop
 TAB       swap the top two
+S-Tab     roll the top three upward (level 3 becomes the top)
 + - * / ^ \ %                  arithmetic, power, idiv, mod
 n & Q A   negate, reciprocal, sqrt, abs
 I Q       square        I ^     nth root
@@ -46,10 +47,21 @@ L E       ln / exp       H L log10      H E 10^x
 B         log (base on top)     I B antilog
 f T f h f Q f A f s f I f E f L
           atan2, hypot, isqrt, abs^2, sign, ilog, expm1, lnp1
+k g k l   gcd, lcm of the top two (integers or fractions)
+k E       extended gcd: g on top, then b, then a, with g = a*x + b*y
+k p       prime test; the number stays on the stack
+k c       choose, M on top: N! / (M! (N-M)!)
+H k c     permutations: N! / (N-M)!
+!         factorial (exact for integers, gamma otherwise)
 J G       conjugate, argument
 P         pi             H P  e
 p         set precision (then digits, RET)
 m d m r m f                degrees, radians, fraction mode
+d 2 d 8 d 6 d 0            binary, octal, hex, decimal
+d r       radix 2–36       d z   leading zeros
+b w       word size, default 32, may be negative
+O d …     two's complement before d 2, d 8, d 6, d 0, or d r
+#digits   current radix; 16#FF is hex in any mode
 c f c F   to float, to fraction
 u         undo           C-r redo
 q ? Esc   quit, help, cancel entry or prefixes
@@ -92,3 +104,4 @@ Entry and stack details that are easy to get wrong:
 - Stack index 0 is the oldest value. The top of the stack is the last element, drawn at the bottom, with `.` on the last row. The screen does not print level numbers. Values and the `.` start on the same column as the character after `❯ `.
 - `atan2` of a value on an axis is an exact right angle (`0`, `±90`, `180` in degrees), including `atan2(0, 0) = 0` and `atan2(0, negative) = 180`.
 - Undo stores stacks only, cap 100. Mode changes are not undoable. A new stack change clears redo.
+- Radix is display and entry only. A number typed without `#` is decimal. `d 2`, `d 8`, `d 6`, `d 0`, and `d r` set the radix (2–36). `#` uses the current radix; `16#FF` forces one. Letters are digits only after `#` when the radix is above 10. For radix 14 or less, `e` is a power of that radix (`8#1.2e3`). From 15 up, `e` is a digit and the power is `16#1.2*16^3`. `d z` pads integers to the word size. `b w` sets that width (default 32, negative allowed, display uses the absolute value). `O` before a radix command turns on two's complement for radices 2, 8, and 16 (`16##FD` is an 8-bit −3). Setting the radix without `O` turns it off. `radix##digits` reads a two's-complement word.

@@ -4,10 +4,12 @@
 //! rectangular complex values built from those.
 
 pub mod app;
+mod comb;
 pub mod engine;
 pub mod error;
 pub mod float;
 pub mod parse;
+mod radix;
 pub mod ui;
 pub mod value;
 

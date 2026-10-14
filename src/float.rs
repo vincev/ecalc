@@ -70,6 +70,11 @@ impl DecFloat {
         self.prec
     }
 
+    /// `(mantissa, exponent)` with the sign still on the mantissa.
+    pub(crate) fn signed_decimal(&self) -> (BigInt, i64) {
+        (self.mantissa.clone(), self.exponent)
+    }
+
     /// Floor of log10(|x|). Zero maps to 0.
     pub fn order(&self) -> i64 {
         if self.mantissa.is_zero() {

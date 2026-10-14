@@ -24,6 +24,15 @@ pub struct Mode {
     pub prec: u32,
     pub fraction: bool,
     pub angle: AngleMode,
+    /// Display radix, from 2 to 36. Entry without `#` stays decimal.
+    pub radix: u32,
+    /// Pad integers out to the current word size.
+    pub leading_zeros: bool,
+    /// Two's complement display for radices 2, 8, and 16.
+    pub twos_complement: bool,
+    /// Binary word width. The sign selects the range for a later bitwise
+    /// operation; display uses the absolute value. `0` means no fixed width.
+    pub word_size: i64,
 }
 
 impl Default for Mode {
@@ -32,6 +41,10 @@ impl Default for Mode {
             prec: DEFAULT_PRECISION,
             fraction: false,
             angle: AngleMode::Degrees,
+            radix: 10,
+            leading_zeros: false,
+            twos_complement: false,
+            word_size: 32,
         }
     }
 }

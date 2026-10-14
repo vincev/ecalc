@@ -245,58 +245,82 @@ const HELP_GAP: usize = 2;
 /// Narrowest column that still fits `key` plus a short label.
 const HELP_COL_MIN: usize = 12;
 /// Key field width. Every binding here is at most this many characters.
-const HELP_KEY_W: usize = 3;
+const HELP_KEY_W: usize = 4;
 
-/// Column-major: twelve down the first column, then the next, so each column stays one topic.
-const HELP_ENTRIES: &[(&str, &str)] = &[
-    ("ret", "push"),
-    ("del", "pop"),
-    ("tab", "swap"),
-    ("u", "undo"),
-    ("C-r", "redo"),
-    ("n", "negate"),
-    ("&", "recip"),
-    ("Q", "sqrt"),
-    ("I Q", "square"),
-    ("A", "abs"),
-    ("I", "inverse"),
-    ("H", "hyp"),
-    ("+", "add"),
-    ("-", "sub"),
-    ("*", "mul"),
-    ("/", "div"),
-    ("^", "power"),
-    ("\\", "idiv"),
-    ("%", "mod"),
-    (":", "fraction"),
-    ("P", "pi"),
-    ("H P", "e"),
-    ("J", "conj"),
-    ("G", "arg"),
-    ("S", "sin"),
-    ("C", "cos"),
-    ("T", "tan"),
-    ("L", "ln"),
-    ("E", "exp"),
-    ("B", "log"),
-    ("I B", "antilog"),
-    ("H L", "log10"),
-    ("H E", "10^x"),
-    ("f T", "atan2"),
-    ("f h", "hypot"),
-    ("f Q", "isqrt"),
-    ("p", "prec"),
-    ("m d", "deg"),
-    ("m r", "rad"),
-    ("m f", "fractions"),
-    ("c f", "float"),
-    ("c F", "fraction"),
-    ("f A", "abs^2"),
-    ("f s", "sign"),
-    ("f I", "ilog"),
-    ("f E", "expm1"),
-    ("f L", "lnp1"),
-    ("Esc", "cancel"),
+/// One topic per column. Lengths differ by at most one row. A narrow terminal stacks later topics under earlier ones.
+const HELP_GROUPS: [&[(&str, &str)]; 4] = [
+    &[
+        ("ret", "push"),
+        ("del", "pop"),
+        ("tab", "swap"),
+        ("TAB", "roll"),
+        ("u", "undo"),
+        ("C-r", "redo"),
+        ("n", "negate"),
+        ("&", "recip"),
+        ("Q", "sqrt"),
+        ("I Q", "square"),
+        ("A", "abs"),
+        ("f A", "abs^2"),
+        ("I", "inverse"),
+        ("H", "hyp"),
+        ("J", "conj"),
+        ("G", "arg"),
+    ],
+    &[
+        ("+", "add"),
+        ("-", "sub"),
+        ("*", "mul"),
+        ("/", "div"),
+        ("^", "power"),
+        ("\\", "idiv"),
+        ("%", "mod"),
+        (":", "fraction"),
+        ("!", "fact"),
+        ("k g", "gcd"),
+        ("k l", "lcm"),
+        ("k E", "egcd"),
+        ("k p", "prime"),
+        ("k c", "choose"),
+        ("Hk c", "perm"),
+        ("P", "pi"),
+    ],
+    &[
+        ("S", "sin"),
+        ("C", "cos"),
+        ("T", "tan"),
+        ("L", "ln"),
+        ("E", "exp"),
+        ("B", "log"),
+        ("I B", "antilog"),
+        ("H L", "log10"),
+        ("H E", "10^x"),
+        ("f T", "atan2"),
+        ("f h", "hypot"),
+        ("f Q", "isqrt"),
+        ("f E", "expm1"),
+        ("f L", "lnp1"),
+        ("f I", "ilog"),
+        ("f s", "sign"),
+    ],
+    &[
+        ("p", "prec"),
+        ("m d", "deg"),
+        ("m r", "rad"),
+        ("m f", "fractions"),
+        ("c f", "float"),
+        ("c F", "fraction"),
+        ("d 2", "bin"),
+        ("d 8", "oct"),
+        ("d 6", "hex"),
+        ("d 0", "dec"),
+        ("d r", "radix"),
+        ("d z", "zeros"),
+        ("b w", "word"),
+        ("O d", "twos"),
+        ("Esc", "cancel"),
+        ("H P", "e"),
+    ],
 ];
 
 /// Centered shortcuts box, in the shape of Grok Build's cheatsheet: gray frame,
@@ -309,7 +333,8 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
         return;
     }
     let (cols, col_w) = help_layout(inner_w);
-    let grid_rows = HELP_ENTRIES.len().div_ceil(cols) as u16;
+    let columns = help_columns(cols);
+    let grid_rows = columns.iter().map(|column| column.len()).max().unwrap_or(0) as u16;
     let height = (grid_rows + chrome_y).min(area.height);
     let rect = Rect {
         x: area.x + (area.width - width) / 2,
@@ -388,7 +413,7 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
             width: inner_w,
             height: content_h,
         };
-        draw_help_grid(buf, content, cols, col_w, content_h);
+        draw_help_grid(buf, content, &columns, col_w, content_h);
     }
 
     let inner_x = rect.x + 1 + HELP_H_PAD;
@@ -399,7 +424,7 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
 /// `(columns, column width)` for the shortcut grid. Prefers four columns.
 fn help_layout(width: u16) -> (usize, usize) {
     let width = width as usize;
-    let mut cols = HELP_COLS.min(HELP_ENTRIES.len()).max(1);
+    let mut cols = HELP_COLS.min(HELP_GROUPS.len()).max(1);
     while cols > 1 && cols * HELP_COL_MIN + (cols - 1) * HELP_GAP > width {
         cols -= 1;
     }
@@ -407,21 +432,35 @@ fn help_layout(width: u16) -> (usize, usize) {
     (cols, col_w.max(1))
 }
 
-fn draw_help_grid(buf: &mut Buffer, area: Rect, cols: usize, col_w: usize, rows_fit: u16) {
-    let grid_rows = HELP_ENTRIES.len().div_ceil(cols);
-    let show = grid_rows.min(rows_fit as usize);
+fn help_columns(cols: usize) -> Vec<Vec<(&'static str, &'static str)>> {
+    let cols = cols.max(1);
+    if cols >= HELP_GROUPS.len() {
+        return HELP_GROUPS.iter().map(|group| group.to_vec()).collect();
+    }
+    let mut columns = vec![Vec::new(); cols];
+    for (index, group) in HELP_GROUPS.iter().enumerate() {
+        columns[index % cols].extend_from_slice(group);
+    }
+    columns
+}
+
+fn draw_help_grid(
+    buf: &mut Buffer,
+    area: Rect,
+    columns: &[Vec<(&str, &str)>],
+    col_w: usize,
+    rows_fit: u16,
+) {
+    let show = rows_fit as usize;
     let key_style = Style::default()
         .fg(FG_SECONDARY)
         .bg(BG)
         .add_modifier(Modifier::BOLD);
     let label_style = Style::default().fg(GRAY).bg(BG);
     let pad_style = Style::default().bg(BG);
-    for row in 0..show {
-        let y = area.y + row as u16;
-        for col in 0..cols {
-            let Some((key, label)) = HELP_ENTRIES.get(col * grid_rows + row) else {
-                continue;
-            };
+    for (col, entries) in columns.iter().enumerate() {
+        for (row, (key, label)) in entries.iter().enumerate().take(show) {
+            let y = area.y + row as u16;
             let x = area.x + (col * (col_w + HELP_GAP)) as u16;
             let end = x + col_w as u16;
             let mut cursor = paint_str(buf, x, y, end, key, key_style);
@@ -534,6 +573,8 @@ fn map_key(key: &KeyEvent) -> Option<Key> {
     match key.code {
         KeyCode::Enter => Some(Key::Enter),
         KeyCode::Backspace | KeyCode::Delete => Some(Key::Backspace),
+        KeyCode::BackTab => Some(Key::ShiftTab),
+        KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => Some(Key::ShiftTab),
         KeyCode::Tab => Some(Key::Tab),
         KeyCode::Esc => Some(Key::Esc),
         KeyCode::Char(c) if ctrl => Some(Key::Ctrl(normalize_ctrl(c))),
@@ -685,6 +726,17 @@ mod tests {
         assert_eq!(cell.symbol(), "┌");
         assert_eq!(cell.fg, GRAY_DIM);
         assert_eq!(cell.bg, BG);
+    }
+
+    #[test]
+    fn help_columns_match_in_length() {
+        let columns = help_columns(4);
+        let shortest = columns.iter().map(|column| column.len()).min().unwrap();
+        let longest = columns.iter().map(|column| column.len()).max().unwrap();
+        assert!(
+            longest - shortest <= 1,
+            "help columns should differ by at most one row"
+        );
     }
 
     #[test]
