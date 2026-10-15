@@ -682,6 +682,37 @@ fn float_hypot(a: &DecFloat, b: &DecFloat, prec: u32) -> Result<DecFloat, CalcEr
     Ok(sum.sqrt(work)?.mul(&scale, prec).polished(prec))
 }
 
+/// Integer toward minus infinity. An integer stays that integer.
+/// `45.3` is `45` and `-45.3` is `-46`.
+pub fn floor(v: &Value, _mode: &Mode) -> Result<Value, CalcError> {
+    let Value::Real(real) = v else {
+        return Err(CalcError::Domain("floor needs a real number"));
+    };
+    Ok(Value::from_int(floor_real(real)?))
+}
+
+fn floor_real(real: &Real) -> Result<BigInt, CalcError> {
+    match real {
+        Real::Int(n) => Ok(n.clone()),
+        Real::Rat(r) => Ok(floor_rat(r)),
+        Real::Float(f) => floor_float(f),
+    }
+}
+
+fn floor_float(f: &DecFloat) -> Result<BigInt, CalcError> {
+    if f.is_zero() || (!f.is_negative() && f.order() < 0) {
+        return Ok(BigInt::zero());
+    }
+    if f.order() < 0 {
+        return Ok(BigInt::from(-1));
+    }
+    // Same size bound as an exact integer conversion.
+    if f.order() > 100_000 {
+        return Err(CalcError::Overflow);
+    }
+    Ok(f.floor_to_bigint())
+}
+
 pub fn isqrt(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     let Value::Real(r) = v else {
         return Err(CalcError::Domain("isqrt needs a real number"));
@@ -1440,6 +1471,54 @@ mod tests {
             "(0, 1)"
         );
         assert_eq!(abs(&parse_cplx(), &mode()).unwrap().to_string(), "5");
+    }
+
+    #[test]
+    fn floor_toward_minus_infinity() {
+        let pos = Real::Float(DecFloat::from_decimal(BigInt::from(453), -1, 12));
+        let neg = Real::Float(DecFloat::from_decimal(BigInt::from(-453), -1, 12));
+        assert_eq!(floor(&Value::Real(pos), &mode()).unwrap().to_string(), "45");
+        assert_eq!(
+            floor(&Value::Real(neg), &mode()).unwrap().to_string(),
+            "-46"
+        );
+        assert!(matches!(
+            floor(&Value::from_int(-45), &mode()).unwrap(),
+            Value::Real(Real::Int(n)) if n == BigInt::from(-45)
+        ));
+
+        let half = Value::from_rational(BigRational::new(BigInt::from(-91), BigInt::from(2)));
+        assert_eq!(floor(&half, &mode()).unwrap().to_string(), "-46");
+
+        // More digits than the working precision, so this has to stay rational.
+        let numer = BigInt::from(10).pow(30) + 1u32;
+        let thirds = (BigInt::from(10).pow(30) - 1u32) / 3u32;
+        let q = Value::from_rational(BigRational::new(numer.clone(), BigInt::from(3)));
+        assert!(matches!(
+            floor(&q, &mode()).unwrap(),
+            Value::Real(Real::Int(n)) if n == thirds
+        ));
+        let nq = Value::from_rational(BigRational::new(-numer, BigInt::from(3)));
+        let neg_expected = -(&thirds + 1u32);
+        assert!(matches!(
+            floor(&nq, &mode()).unwrap(),
+            Value::Real(Real::Int(n)) if n == neg_expected
+        ));
+
+        let tiny = Real::Float(DecFloat::from_decimal(BigInt::from(-1), -20, 12));
+        assert_eq!(
+            floor(&Value::Real(tiny), &mode()).unwrap().to_string(),
+            "-1"
+        );
+        let huge = Real::Float(DecFloat::from_decimal(BigInt::one(), 100_001, 12));
+        assert!(matches!(
+            floor(&Value::Real(huge), &mode()),
+            Err(CalcError::Overflow)
+        ));
+        assert!(matches!(
+            floor(&parse_cplx(), &mode()),
+            Err(CalcError::Domain("floor needs a real number"))
+        ));
     }
 
     fn parse_cplx() -> Value {

@@ -671,6 +671,7 @@ impl App {
             '&' => self.engine.reciprocal(),
             'Q' => self.engine.sqrt(),
             'A' => self.engine.abs(),
+            'F' => self.engine.floor(),
             'S' => self.engine.sine(),
             'C' => self.engine.cosine(),
             'T' => self.engine.tangent(),
@@ -934,6 +935,34 @@ mod tests {
         assert_eq!(top("_5\n3\\"), "-2");
         assert_eq!(top("_5\n3%"), "1");
         assert_eq!(top("1\n3/cF"), "1:3");
+    }
+
+    #[test]
+    fn floor_rounds_down() {
+        assert_eq!(top("45.3F"), "45");
+        assert_eq!(top("_45.3F"), "-46");
+        assert_eq!(top("45F"), "45");
+        assert_eq!(top("_45F"), "-45");
+        assert_eq!(top("4:3F"), "1");
+        assert_eq!(top("_4:3F"), "-2");
+        assert_eq!(top("0.1F"), "0");
+        assert_eq!(top("_0.1F"), "-1");
+        assert_eq!(top("1.23e1F"), "12");
+        assert_eq!(top("_1.23e1F"), "-13");
+
+        let mut app = App::new();
+        app.keys("45.3F");
+        app.keys("u");
+        assert_eq!(app.top_string().as_deref(), Some("45.3"));
+
+        let mut app = App::new();
+        app.keys("(1.5, _2.5)F");
+        assert_eq!(app.top_string().as_deref(), Some("(1.5, -2.5)"));
+        assert_eq!(app.engine().message(), "floor needs a real number");
+
+        let mut app = App::new();
+        app.keys("F");
+        assert_eq!(app.engine().message(), "too few arguments");
     }
 
     #[test]

@@ -390,6 +390,10 @@ impl Engine {
         self.unary(value::abs);
     }
 
+    pub fn floor(&mut self) {
+        self.unary(value::floor);
+    }
+
     pub fn sine(&mut self) {
         self.unary(match (self.inverse, self.hyperbolic) {
             (false, false) => value::sin,

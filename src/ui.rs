@@ -283,6 +283,7 @@ const HELP_GROUPS: [&[(&str, &str)]; 4] = [
         ("/", "div"),
         ("^", "power"),
         ("\\", "idiv"),
+        ("F", "floor"),
         ("%", "mod"),
         (":", "fraction"),
         ("!", "fact"),

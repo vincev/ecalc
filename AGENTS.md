@@ -40,6 +40,7 @@ DEL       backspace, or pop
 TAB       swap the top two
 S-Tab     roll the top three upward (level 3 becomes the top)
 + - * / ^ \ %                  arithmetic, power, idiv, mod
+F         floor toward minus infinity (`45.3` is `45`, `-45.3` is `-46`)
 n & Q A   negate, reciprocal, sqrt, abs
 I Q       square        I ^     nth root
 S C T     sin cos tan    I … inverse    H … hyperbolic
@@ -89,6 +90,7 @@ Tutorial shapes live in `src/app.rs`. Parser cases are in `src/parse.rs`. The sc
 - `i * i` = `-1`
 - `sin(90 deg)` = `1`, `atan(1)` = `45` in degrees
 - `10 \ 3` = `3`, `10 % 3` = `1`, `-5 \ 3` = `-2`, `-5 % 3` = `1`
+- `45.3 F` = `45`, `-45.3 F` = `-46`
 
 Transcendentals are checked by known prefixes (pi, e, ln 2), not by matching Emacs Calc digit for digit.
 
@@ -110,6 +112,7 @@ Entry and stack details that are easy to get wrong:
 - `L` flips inverse in `app.rs`, then calls `Engine::exp_family`. `E` does not flip. `push` and duplicate do not clear `I` or `H`.
 - `n` while typing toggles a leading `_`. `+` and `-` while typing are exponent signs, or digits inside an unclosed `(…)`. Otherwise they add and subtract. Space inside an unparsed `(…` inserts a space. `:` while typing is a fraction; on an empty entry it is fraction division.
 - Stack index 0 is the oldest value. The top of the stack is the last element, drawn at the bottom, with `.` on the last row. The screen does not print level numbers. Values and the `.` start on the same column as the character after `❯ `.
+- `F` is floor toward minus infinity and returns an exact integer. An integer is unchanged. A fraction or a decimal float is exact (`-4:3` is `-2`). A complex number is an error. `f` is still the function prefix.
 - `atan2` of a value on an axis is an exact right angle (`0`, `±90`, `180` in degrees), including `atan2(0, 0) = 0` and `atan2(0, negative) = 180`.
 - Undo stores the stack and the variables, cap 100. Mode changes are not undoable. A new stack change clears redo. `s s` stores without popping, `s t` pops into the variable, `s r` recalls, and `s u` unstores. A digit selects `q0`–`q9` (`s 3`, `t 3`, `r 3`). A name is finished with RET. `s l` lists them, five per column. Tab and Shift-Tab page. A letter recalls that one-letter name, and a digit recalls `q0`–`q9`. Longer names are visible there and still recalled with `s r`.
 - Radix is display and entry only. A number typed without `#` is decimal. `d 2`, `d 8`, `d 6`, `d 0`, and `d r` set the radix (2–36). `#` uses the current radix; `16#FF` forces one. Letters are digits only after `#` when the radix is above 10. For radix 14 or less, `e` is a power of that radix (`8#1.2e3`). From 15 up, `e` is a digit and the power is `16#1.2*16^3`. `d z` pads integers to the word size. `b w` sets that width (default 32, negative allowed, display uses the absolute value). `O` before a radix command turns on two's complement for radices 2, 8, and 16 (`16##FD` is an 8-bit −3). Setting the radix without `O` turns it off. `radix##digits` reads a two's-complement word. `d g` groups integer digits with commas: 4 in binary and hex, 3 otherwise. The fractional part and the exponent stay plain, so `1234567.123454` displays as `1,234,567.123454`. Grouping is display only.
