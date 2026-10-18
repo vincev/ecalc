@@ -5,6 +5,7 @@
 
 pub mod app;
 mod comb;
+mod consts;
 pub mod engine;
 pub mod error;
 pub mod float;

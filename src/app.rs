@@ -4,6 +4,7 @@
 //! An operator commits a finished entry first. `n` while typing toggles a
 //! leading `_` and does not commit. Space inside an unparsed `(…` is inserted.
 
+use crate::consts;
 use crate::engine::Engine;
 use crate::error::CalcError;
 use crate::parse::parse_value;
@@ -66,6 +67,8 @@ enum Pending {
 /// Rows down one column of the variables dialog. Two columns fill a page.
 pub(crate) const VAR_COLUMN: usize = 5;
 pub(crate) const VAR_PAGE: usize = VAR_COLUMN * 2;
+/// Rows down one column of the constants dialog. Two columns fill a page.
+pub(crate) use consts::COLUMN as CONST_COLUMN;
 
 pub struct App {
     engine: Engine,
@@ -77,6 +80,10 @@ pub struct App {
     vars_open: bool,
     var_page: usize,
     var_note: String,
+    /// `K` dialog. `0`–`F` inserts a constant; Tab moves a page.
+    consts_open: bool,
+    const_page: usize,
+    const_note: String,
     quit: bool,
 }
 
@@ -97,6 +104,9 @@ impl App {
             vars_open: false,
             var_page: 0,
             var_note: String::new(),
+            consts_open: false,
+            const_page: 0,
+            const_note: String::new(),
             quit: false,
         }
     }
@@ -127,6 +137,27 @@ impl App {
 
     pub fn var_note(&self) -> &str {
         &self.var_note
+    }
+
+    pub fn consts_open(&self) -> bool {
+        self.consts_open
+    }
+
+    pub fn const_page(&self) -> usize {
+        self.const_page
+    }
+
+    pub fn const_pages(&self) -> usize {
+        consts::pages()
+    }
+
+    pub fn const_note(&self) -> &str {
+        &self.const_note
+    }
+
+    /// Hex key, symbol, and short name on the current constants page.
+    pub fn const_rows(&self) -> Vec<(char, &'static str, &'static str)> {
+        consts::rows(self.const_page)
     }
 
     /// Names and values on the current page of the variables dialog.
@@ -244,12 +275,12 @@ impl App {
         if self.quit {
             return;
         }
-        // `q` is a letter while a name is typed or the variable list is open.
+        // `q` is a letter while a name is typed or a list dialog is open.
         // Ctrl-C still quits.
         let naming = matches!(self.pending, Pending::Var { .. });
         let quit = match key {
             Key::Ctrl('c') | Key::Ctrl('C') => true,
-            Key::Char('q') => !naming && !self.vars_open,
+            Key::Char('q') => !naming && !self.vars_open && !self.consts_open,
             _ => false,
         };
         if quit {
@@ -266,6 +297,10 @@ impl App {
         }
         if self.vars_open {
             self.press_var_list(key);
+            return;
+        }
+        if self.consts_open {
+            self.press_const_list(key);
             return;
         }
         if !matches!(self.pending, Pending::None) {
@@ -304,6 +339,9 @@ impl App {
         self.vars_open = false;
         self.var_page = 0;
         self.var_note.clear();
+        self.consts_open = false;
+        self.const_page = 0;
+        self.const_note.clear();
         self.engine.clear_flags();
         self.engine.clear_message();
     }
@@ -314,6 +352,51 @@ impl App {
         self.var_note.clear();
         self.engine.clear_flags();
         self.engine.clear_message();
+    }
+
+    fn open_constants(&mut self) {
+        self.consts_open = true;
+        self.const_page = 0;
+        self.const_note.clear();
+        self.engine.clear_flags();
+        self.engine.clear_message();
+    }
+
+    fn press_const_list(&mut self, key: Key) {
+        match key {
+            Key::Tab => {
+                if self.const_page + 1 < self.const_pages() {
+                    self.const_page += 1;
+                    self.const_note.clear();
+                }
+            }
+            Key::ShiftTab => {
+                if self.const_page > 0 {
+                    self.const_page -= 1;
+                    self.const_note.clear();
+                }
+            }
+            Key::Char(c) => self.pick_constant(c),
+            _ => {}
+        }
+    }
+
+    /// `0`–`9` and `a`–`f` insert that slot on the current page.
+    /// A slot past the end of the page stays on the list.
+    fn pick_constant(&mut self, key: char) {
+        let Some(slot) = hex_slot(key) else {
+            return;
+        };
+        let index = self.const_page * consts::PAGE + slot;
+        let Some((message, value)) = consts::get(index) else {
+            self.const_note = "no constant".to_string();
+            return;
+        };
+        self.consts_open = false;
+        self.const_page = 0;
+        self.const_note.clear();
+        self.engine.push(value);
+        self.engine.show(message);
     }
 
     fn press_var_list(&mut self, key: Key) {
@@ -685,6 +768,7 @@ impl App {
             'J' => self.engine.conj(),
             'G' => self.engine.arg(),
             'P' => self.engine.push_pi_or_e(),
+            'K' => self.open_constants(),
             'p' => {
                 self.engine.clear_flags();
                 self.engine.clear_message();
@@ -710,6 +794,15 @@ fn var_prompt(op: VarOp) -> &'static str {
         VarOp::Store { pop: true } => "into",
         VarOp::Recall => "recall",
         VarOp::Unstore => "unstore",
+    }
+}
+
+fn hex_slot(c: char) -> Option<usize> {
+    match c {
+        '0'..='9' => Some(usize::from(c as u8 - b'0')),
+        'a'..='f' => Some(usize::from(c as u8 - b'a') + 10),
+        'A'..='F' => Some(usize::from(c as u8 - b'A') + 10),
+        _ => None,
     }
 }
 
@@ -1202,6 +1295,72 @@ mod tests {
         assert_eq!(app.var_note(), "void variable");
         app.press(Key::Esc);
         assert!(!app.vars_open());
+        assert!(app.engine().stack().is_empty());
+    }
+
+    #[test]
+    fn constants_list_pages_and_picks() {
+        let mut app = App::new();
+        app.keys("K");
+        assert!(app.consts_open());
+        assert_eq!(app.const_pages(), 3);
+        app.press(Key::Tab);
+        app.press(Key::Tab);
+        assert_eq!(app.const_page(), 2);
+        app.press(Key::Tab);
+        assert_eq!(app.const_page(), 2);
+        app.press(Key::Char('8'));
+        assert!(app.consts_open());
+        assert_eq!(app.const_note(), "no constant");
+        assert!(app.engine().stack().is_empty());
+        app.press(Key::ShiftTab);
+        assert_eq!(app.const_page(), 1);
+        assert_eq!(app.const_note(), "");
+
+        app.press(Key::Char('0'));
+        assert!(!app.consts_open());
+        assert_eq!(app.top_string().as_deref(), Some("8.854187817e-12"));
+        assert_eq!(app.engine().message(), "eps0  F/m");
+        app.keys("u");
+        assert!(app.engine().stack().is_empty());
+
+        assert_eq!(top("K0"), "299792458");
+        let mut app = App::new();
+        app.keys("K0");
+        assert_eq!(app.engine().message(), "c  m/s");
+
+        assert_eq!(top("K1"), "9.80665");
+        assert_eq!(top("Ka"), "1.88353109e-28");
+        assert_eq!(top("KF"), "5.291772083e-11");
+
+        let mut app = App::new();
+        app.keys("K");
+        app.press(Key::Tab);
+        app.keys("8");
+        assert_eq!(app.top_string().as_deref(), Some("-9.28476362e-24"));
+        assert_eq!(app.engine().message(), "mue  J/T");
+
+        let mut app = App::new();
+        app.keys("K");
+        app.press(Key::Tab);
+        app.press(Key::Tab);
+        app.keys("0");
+        assert_eq!(app.top_string().as_deref(), Some("0.007297352533"));
+        assert_eq!(app.engine().message(), "alpha");
+        app.keys("K");
+        app.press(Key::Tab);
+        app.press(Key::Tab);
+        app.keys("3");
+        assert_eq!(app.top_string().as_deref(), Some("101325"));
+        assert_eq!(app.engine().message(), "atm  Pa");
+
+        let mut app = App::new();
+        app.keys("K");
+        app.press(Key::Char('q'));
+        assert!(!app.should_quit());
+        assert!(app.consts_open());
+        app.press(Key::Esc);
+        assert!(!app.consts_open());
         assert!(app.engine().stack().is_empty());
     }
 

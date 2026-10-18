@@ -3,7 +3,7 @@
 //! Colors are the GrokNight palette from Grok Build: gray canvas, a focused
 //! prompt border, bold secondary keys, and muted labels.
 
-use crate::app::{App, Key, VAR_COLUMN};
+use crate::app::{App, CONST_COLUMN, Key, VAR_COLUMN};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -92,6 +92,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     if app.vars_open() {
         draw_variables(frame.buffer_mut(), area, app);
+    }
+    if app.consts_open() {
+        draw_constants(frame.buffer_mut(), area, app);
     }
 }
 
@@ -314,6 +317,7 @@ const HELP_GROUPS: [&[(&str, &str)]; 4] = [
         ("f I", "ilog"),
         ("f s", "sign"),
         ("G", "arg"),
+        ("K", "const"),
     ],
     &[
         ("p", "prec"),
@@ -669,16 +673,201 @@ fn draw_variables(buf: &mut Buffer, area: Rect, app: &App) {
     draw_centered_hints(buf, inner_x, last_y - 1, text_w, &hints);
 }
 
+/// Physics constants, sixteen to a page: eight down each column.
+fn draw_constants(buf: &mut Buffer, area: Rect, app: &App) {
+    let rows = app.const_rows();
+    let left = rows.len().min(CONST_COLUMN);
+    let right = rows.len().saturating_sub(CONST_COLUMN);
+    let grid_rows = left.max(right) as u16;
+    let chrome_y = 2 + HELP_V_PAD + HELP_FOOTER;
+    let width = 68u16.min(area.width);
+    let inner_w = width.saturating_sub(2 + HELP_H_PAD * 2);
+    if inner_w < 8 || area.height < chrome_y || grid_rows == 0 {
+        return;
+    }
+    let height = (grid_rows + chrome_y).min(area.height);
+    let rect = Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    };
+
+    let fill = Style::default().bg(BG);
+    for y in rect.y..rect.y + rect.height {
+        for x in rect.x..rect.x + rect.width {
+            paint_char(buf, x, y, ' ', fill);
+        }
+    }
+
+    let border = Style::default().fg(GRAY_DIM).bg(BG);
+    let last_x = rect.x + rect.width - 1;
+    let last_y = rect.y + rect.height - 1;
+    for x in rect.x..rect.x + rect.width {
+        let (top_ch, bot_ch) = if x == rect.x {
+            ('┌', '└')
+        } else if x == last_x {
+            ('┐', '┘')
+        } else {
+            ('─', '─')
+        };
+        paint_char(buf, x, rect.y, top_ch, border);
+        paint_char(buf, x, last_y, bot_ch, border);
+    }
+    for y in rect.y + 1..last_y {
+        paint_char(buf, rect.x, y, '│', border);
+        paint_char(buf, last_x, y, '│', border);
+    }
+
+    let title_end = last_x.saturating_sub(8);
+    let mut title_x = rect.x + 1;
+    title_x = paint_str(buf, title_x, rect.y, title_end, "─ ", border);
+    title_x = paint_str(
+        buf,
+        title_x,
+        rect.y,
+        title_end,
+        "Constants",
+        Style::default().fg(FG).bg(BG).add_modifier(Modifier::BOLD),
+    );
+    paint_str(buf, title_x, rect.y, title_end, " ─", border);
+
+    let close = " [x] ";
+    let close_x = rect.x + rect.width - close.chars().count() as u16 - 2;
+    if close_x > title_x + 1 {
+        paint_str(
+            buf,
+            close_x,
+            rect.y,
+            last_x,
+            close,
+            Style::default().fg(GRAY).bg(BG),
+        );
+    }
+
+    let inner_x = rect.x + 1 + HELP_H_PAD;
+    let text_w = rect.width.saturating_sub(2 + HELP_H_PAD * 2);
+    let note = if app.const_note().is_empty() {
+        "0-F inserts"
+    } else {
+        app.const_note()
+    };
+    let note_style = if app.const_note().is_empty() {
+        Style::default().fg(GRAY).bg(BG)
+    } else {
+        Style::default().fg(ERROR).bg(BG)
+    };
+    let page = if app.const_pages() > 1 {
+        format!("{}/{}", app.const_page() + 1, app.const_pages())
+    } else {
+        String::new()
+    };
+    let page_w = page.chars().count() as u16;
+    let page_x = inner_x + text_w.saturating_sub(page_w);
+    let note_end = if page_w == 0 {
+        inner_x + text_w
+    } else {
+        page_x.saturating_sub(1)
+    };
+    paint_str(buf, inner_x, rect.y + 1, note_end, note, note_style);
+    if page_w > 0 {
+        paint_str(
+            buf,
+            page_x,
+            rect.y + 1,
+            inner_x + text_w,
+            &page,
+            Style::default().fg(GRAY).bg(BG),
+        );
+    }
+
+    let content_y = rect.y + 1 + HELP_V_PAD;
+    let content_h = rect.height.saturating_sub(chrome_y);
+    if content_h > 0 {
+        let col_w = (text_w as usize - HELP_GAP) / 2;
+        for (index, (key, symbol, name)) in rows.iter().enumerate() {
+            let col = index / CONST_COLUMN;
+            let row = index % CONST_COLUMN;
+            if col > 1 || row >= content_h as usize || col_w == 0 {
+                continue;
+            }
+            let x = inner_x + (col * (col_w + HELP_GAP)) as u16;
+            paint_const_cell(
+                buf,
+                x,
+                content_y + row as u16,
+                x + col_w as u16,
+                *key,
+                symbol,
+                name,
+            );
+        }
+    }
+
+    let hints = const_footer_hints(app);
+    draw_centered_hints(buf, inner_x, last_y - 1, text_w, &hints);
+}
+
 fn var_footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
+    page_hints(app.var_page(), app.var_pages())
+}
+
+fn const_footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
+    page_hints(app.const_page(), app.const_pages())
+}
+
+fn page_hints(page: usize, pages: usize) -> Vec<(&'static str, &'static str)> {
     let mut hints = Vec::new();
-    if app.var_pages() > 1 && app.var_page() + 1 < app.var_pages() {
+    if pages > 1 && page + 1 < pages {
         hints.push(("tab", "next"));
     }
-    if app.var_page() > 0 {
+    if page > 0 {
         hints.push(("TAB", "prev"));
     }
     hints.push(("esc", "close"));
     hints
+}
+
+/// `0 c     light`, cutting the name with `..` when the cell is too narrow.
+fn paint_const_cell(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    end: u16,
+    key: char,
+    symbol: &str,
+    name: &str,
+) {
+    if end <= x {
+        return;
+    }
+    let key_style = Style::default()
+        .fg(FG_SECONDARY)
+        .bg(BG)
+        .add_modifier(Modifier::BOLD);
+    let symbol_style = Style::default().fg(FG).bg(BG).add_modifier(Modifier::BOLD);
+    let name_style = Style::default().fg(FG).bg(BG);
+    let punct = Style::default().fg(GRAY).bg(BG);
+    let mut col = paint_str(buf, x, y, end, &key.to_string(), key_style);
+    if col >= end {
+        return;
+    }
+    col = paint_str(buf, col, y, end, " ", punct);
+    col = paint_str(buf, col, y, end, symbol, symbol_style);
+    let gap = 5usize.saturating_sub(symbol.chars().count()) + 1;
+    col = paint_str(buf, col, y, end, &" ".repeat(gap), punct);
+    if col >= end {
+        return;
+    }
+    let room = (end - col) as usize;
+    if name.chars().count() <= room {
+        paint_str(buf, col, y, end, name, name_style);
+        return;
+    }
+    let keep = room.saturating_sub(2);
+    let head: String = name.chars().take(keep).collect();
+    col = paint_str(buf, col, y, end, &head, name_style);
+    paint_str(buf, col, y, end, "..", punct);
 }
 
 /// `name: value`, cutting the value with `..` when the cell is too narrow.
@@ -725,10 +914,13 @@ fn draw_shortcuts(buf: &mut Buffer, area: Rect, app: &App) {
     }
 
     let var_hints = var_footer_hints(app);
+    let const_hints = const_footer_hints(app);
     let hints: &[(&str, &str)] = if app.help_open() {
         &[("esc", "close"), ("q", "quit")]
     } else if app.vars_open() {
         &var_hints
+    } else if app.consts_open() {
+        &const_hints
     } else {
         SHORTCUTS
     };
@@ -1031,5 +1223,36 @@ mod tests {
         app.keys("sl");
         let rows = lines(&render(&app, 64, 20));
         assert!(rows.iter().any(|row| row.contains("nothing stored")));
+    }
+
+    #[test]
+    fn constants_list_is_two_columns() {
+        let mut app = App::new();
+        app.keys("K");
+        let rows = lines(&render(&app, 64, 24));
+        assert!(rows.iter().any(|row| row.contains("Constants")));
+        assert!(rows.iter().any(|row| row.contains("1/3")));
+        assert!(rows.iter().any(|row| row.contains("0-F inserts")));
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("c") && row.contains("light") && row.contains("mp")),
+            "eight names down each column"
+        );
+        assert!(rows.iter().any(|row| row.contains("tab:next")));
+        assert!(rows.iter().all(|row| !row.contains("ret:push")));
+        assert!(rows.iter().all(|row| !row.contains("eps0")));
+
+        app.press(Key::Tab);
+        app.press(Key::Tab);
+        let rows = lines(&render(&app, 64, 24));
+        assert!(rows.iter().any(|row| row.contains("3/3")));
+        assert!(rows.iter().any(|row| row.contains("TAB:prev")));
+        assert!(rows.iter().all(|row| !row.contains("tab:next")));
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("alpha") && row.contains("fine")),
+            "the last page keeps the remaining eight"
+        );
+        assert!(rows.iter().all(|row| !row.contains("light")));
     }
 }
