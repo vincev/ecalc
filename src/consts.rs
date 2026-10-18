@@ -1,7 +1,9 @@
-//! Physics constants from the HP 35s CONST menu (CODATA 1998).
+//! Physics constants from the HP 35s CONST menu (CODATA 1998), then Earth,
+//! the Sun, the Moon, and the astronomical unit from the NASA planetary
+//! fact sheets.
 //!
-//! Each value is the number printed in that menu. The unit is a label only.
-//! `e` is not here; `H P` already pushes it.
+//! Each value is the printed number, converted to SI for the planets. The
+//! unit is a label only. `e` is not here; `H P` already pushes it.
 
 use crate::float::MAX_PRECISION;
 use crate::parse::parse_value;
@@ -18,7 +20,8 @@ struct Constant {
     literal: &'static str,
 }
 
-/// Manual order, with the final `e` removed. Sixteen per page, then eight.
+/// Manual order, with the final `e` removed. Sixteen per page. The last
+/// page ends with Earth, the Moon, the Sun, and the astronomical unit.
 const CATALOG: &[Constant] = &[
     c("c", "light", "m/s", "299792458"),
     c("g", "gravity", "m/s^2", "9.80665"),
@@ -60,6 +63,17 @@ const CATALOG: &[Constant] = &[
     c("c1", "radiation 1", "W m^2", "3.74177107e-16"),
     c("c2", "radiation 2", "m K", "0.014387752"),
     c("G0", "conductance", "S", "7.748091696e-5"),
+    // NASA fact sheets, in SI. Radii are equatorial. Sun radius is 695700 km.
+    // The AU is the exact IAU metre. Moon distance is the mean orbit,
+    // 0.3844 million km.
+    c("Me", "Earth mass", "kg", "5.9722e24"),
+    c("Re", "Earth radius", "m", "6378137"),
+    c("Mm", "Moon mass", "kg", "7.346e22"),
+    c("Rm", "Moon radius", "m", "1738100"),
+    c("dm", "Moon distance", "m", "384400000"),
+    c("Ms", "Sun mass", "kg", "1.9884e30"),
+    c("Rs", "Sun radius", "m", "695700000"),
+    c("AU", "astronomical", "m", "149597870700"),
 ];
 
 const fn c(
@@ -123,14 +137,18 @@ mod tests {
 
     #[test]
     fn catalog_is_three_pages_without_e() {
-        assert_eq!(CATALOG.len(), 40);
+        assert_eq!(CATALOG.len(), 48);
         assert_eq!(pages(), 3);
         assert!(CATALOG.iter().all(|item| item.symbol != "e"));
         assert_eq!(rows(0).len(), 16);
         assert_eq!(rows(1).len(), 16);
-        assert_eq!(rows(2).len(), 8);
+        assert_eq!(rows(2).len(), 16);
         assert_eq!(rows(2)[0].0, '0');
         assert_eq!(rows(2)[7].0, '7');
+        assert_eq!(rows(2)[8], ('8', "Me", "Earth mass"));
+        assert_eq!(rows(2)[10], ('A', "Mm", "Moon mass"));
+        assert_eq!(rows(2)[12], ('C', "dm", "Moon distance"));
+        assert_eq!(rows(2)[15], ('F', "AU", "astronomical"));
     }
 
     #[test]

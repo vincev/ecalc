@@ -809,19 +809,17 @@ fn draw_constants(buf: &mut Buffer, area: Rect, app: &App) {
 }
 
 fn var_footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
-    page_hints(app.var_page(), app.var_pages())
+    page_hints(app.var_pages())
 }
 
 fn const_footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
-    page_hints(app.const_page(), app.const_pages())
+    page_hints(app.const_pages())
 }
 
-fn page_hints(page: usize, pages: usize) -> Vec<(&'static str, &'static str)> {
+fn page_hints(pages: usize) -> Vec<(&'static str, &'static str)> {
     let mut hints = Vec::new();
-    if pages > 1 && page + 1 < pages {
+    if pages > 1 {
         hints.push(("tab", "next"));
-    }
-    if page > 0 {
         hints.push(("TAB", "prev"));
     }
     hints.push(("esc", "close"));
@@ -1200,6 +1198,7 @@ mod tests {
         assert!(rows.iter().any(|row| row.contains("Variables")));
         assert!(rows.iter().any(|row| row.contains("1/2")));
         assert!(rows.iter().any(|row| row.contains("tab:next")));
+        assert!(rows.iter().any(|row| row.contains("TAB:prev")));
         assert!(rows.iter().all(|row| !row.contains("k:")));
         assert!(rows.iter().all(|row| !row.contains("ret:push")));
 
@@ -1207,6 +1206,7 @@ mod tests {
         let rows = lines(&render(&app, 64, 20));
         assert!(rows.iter().any(|row| row.contains("k:")));
         assert!(rows.iter().any(|row| row.contains("2/2")));
+        assert!(rows.iter().any(|row| row.contains("tab:next")));
         assert!(rows.iter().any(|row| row.contains("TAB:prev")));
         assert!(rows.iter().all(|row| !row.contains("a:")));
 
@@ -1223,6 +1223,7 @@ mod tests {
         app.keys("sl");
         let rows = lines(&render(&app, 64, 20));
         assert!(rows.iter().any(|row| row.contains("nothing stored")));
+        assert!(rows.iter().all(|row| !row.contains("tab:next")));
     }
 
     #[test]
@@ -1239,6 +1240,7 @@ mod tests {
             "eight names down each column"
         );
         assert!(rows.iter().any(|row| row.contains("tab:next")));
+        assert!(rows.iter().any(|row| row.contains("TAB:prev")));
         assert!(rows.iter().all(|row| !row.contains("ret:push")));
         assert!(rows.iter().all(|row| !row.contains("eps0")));
 
@@ -1246,12 +1248,24 @@ mod tests {
         app.press(Key::Tab);
         let rows = lines(&render(&app, 64, 24));
         assert!(rows.iter().any(|row| row.contains("3/3")));
+        assert!(rows.iter().any(|row| row.contains("tab:next")));
         assert!(rows.iter().any(|row| row.contains("TAB:prev")));
-        assert!(rows.iter().all(|row| !row.contains("tab:next")));
         assert!(
             rows.iter()
-                .any(|row| row.contains("alpha") && row.contains("fine")),
-            "the last page keeps the remaining eight"
+                .any(|row| row.contains("alpha") && row.contains("fine") && row.contains("Me")),
+            "the last page keeps alpha beside Earth mass"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("AU") && row.contains("astronomical"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Mm") && row.contains("Moon"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("dm") && row.contains("distance"))
         );
         assert!(rows.iter().all(|row| !row.contains("light")));
     }

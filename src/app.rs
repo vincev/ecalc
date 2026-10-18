@@ -365,16 +365,12 @@ impl App {
     fn press_const_list(&mut self, key: Key) {
         match key {
             Key::Tab => {
-                if self.const_page + 1 < self.const_pages() {
-                    self.const_page += 1;
-                    self.const_note.clear();
-                }
+                let pages = self.const_pages();
+                turn_page(&mut self.const_page, &mut self.const_note, pages, true);
             }
             Key::ShiftTab => {
-                if self.const_page > 0 {
-                    self.const_page -= 1;
-                    self.const_note.clear();
-                }
+                let pages = self.const_pages();
+                turn_page(&mut self.const_page, &mut self.const_note, pages, false);
             }
             Key::Char(c) => self.pick_constant(c),
             _ => {}
@@ -402,16 +398,12 @@ impl App {
     fn press_var_list(&mut self, key: Key) {
         match key {
             Key::Tab => {
-                if self.var_page + 1 < self.var_pages() {
-                    self.var_page += 1;
-                    self.var_note.clear();
-                }
+                let pages = self.var_pages();
+                turn_page(&mut self.var_page, &mut self.var_note, pages, true);
             }
             Key::ShiftTab => {
-                if self.var_page > 0 {
-                    self.var_page -= 1;
-                    self.var_note.clear();
-                }
+                let pages = self.var_pages();
+                turn_page(&mut self.var_page, &mut self.var_note, pages, false);
             }
             Key::Char(c) if c.is_ascii_digit() => self.pick_variable(&format!("q{c}")),
             Key::Char(c) if c.is_ascii_alphabetic() => self.pick_variable(&c.to_string()),
@@ -795,6 +787,19 @@ fn var_prompt(op: VarOp) -> &'static str {
         VarOp::Recall => "recall",
         VarOp::Unstore => "unstore",
     }
+}
+
+/// Next or previous page. More than one page wraps. One page stays put.
+fn turn_page(page: &mut usize, note: &mut String, pages: usize, forward: bool) {
+    if pages <= 1 {
+        return;
+    }
+    *page = if forward {
+        (*page + 1) % pages
+    } else {
+        (*page + pages - 1) % pages
+    };
+    note.clear();
 }
 
 fn hex_slot(c: char) -> Option<usize> {
@@ -1262,12 +1267,12 @@ mod tests {
         assert!(app.vars_open());
         assert_eq!(app.var_page(), 0);
         assert_eq!(app.var_pages(), 2);
-        app.press(Key::Tab);
-        assert_eq!(app.var_page(), 1);
-        app.press(Key::Tab);
-        assert_eq!(app.var_page(), 1);
         app.press(Key::ShiftTab);
+        assert_eq!(app.var_page(), 1);
+        app.press(Key::Tab);
         assert_eq!(app.var_page(), 0);
+        app.press(Key::Tab);
+        assert_eq!(app.var_page(), 1);
 
         // `k` is on the other page. A letter still recalls it.
         app.press(Key::Char('k'));
@@ -1304,15 +1309,13 @@ mod tests {
         app.keys("K");
         assert!(app.consts_open());
         assert_eq!(app.const_pages(), 3);
+        app.press(Key::ShiftTab);
+        assert_eq!(app.const_page(), 2);
+        app.press(Key::Tab);
+        assert_eq!(app.const_page(), 0);
         app.press(Key::Tab);
         app.press(Key::Tab);
         assert_eq!(app.const_page(), 2);
-        app.press(Key::Tab);
-        assert_eq!(app.const_page(), 2);
-        app.press(Key::Char('8'));
-        assert!(app.consts_open());
-        assert_eq!(app.const_note(), "no constant");
-        assert!(app.engine().stack().is_empty());
         app.press(Key::ShiftTab);
         assert_eq!(app.const_page(), 1);
         assert_eq!(app.const_note(), "");
@@ -1353,6 +1356,56 @@ mod tests {
         app.keys("3");
         assert_eq!(app.top_string().as_deref(), Some("101325"));
         assert_eq!(app.engine().message(), "atm  Pa");
+
+        let mut app = App::new();
+        app.keys("K");
+        app.press(Key::Tab);
+        app.press(Key::Tab);
+        app.keys("8");
+        assert_eq!(app.top_string().as_deref(), Some("5.9722e24"));
+        assert_eq!(app.engine().message(), "Me  kg");
+        app.keys("K");
+        app.press(Key::Tab);
+        app.press(Key::Tab);
+        app.keys("9");
+        assert_eq!(app.top_string().as_deref(), Some("6378137"));
+        assert_eq!(app.engine().message(), "Re  m");
+        app.keys("K");
+        app.press(Key::Tab);
+        app.press(Key::Tab);
+        app.keys("A");
+        assert_eq!(app.top_string().as_deref(), Some("7.346e22"));
+        assert_eq!(app.engine().message(), "Mm  kg");
+        app.keys("K");
+        app.press(Key::Tab);
+        app.press(Key::Tab);
+        app.keys("B");
+        assert_eq!(app.top_string().as_deref(), Some("1738100"));
+        assert_eq!(app.engine().message(), "Rm  m");
+        app.keys("K");
+        app.press(Key::Tab);
+        app.press(Key::Tab);
+        app.keys("C");
+        assert_eq!(app.top_string().as_deref(), Some("384400000"));
+        assert_eq!(app.engine().message(), "dm  m");
+        app.keys("K");
+        app.press(Key::Tab);
+        app.press(Key::Tab);
+        app.keys("D");
+        assert_eq!(app.top_string().as_deref(), Some("1.9884e30"));
+        assert_eq!(app.engine().message(), "Ms  kg");
+        app.keys("K");
+        app.press(Key::Tab);
+        app.press(Key::Tab);
+        app.keys("E");
+        assert_eq!(app.top_string().as_deref(), Some("695700000"));
+        assert_eq!(app.engine().message(), "Rs  m");
+        app.keys("K");
+        app.press(Key::Tab);
+        app.press(Key::Tab);
+        app.keys("F");
+        assert_eq!(app.top_string().as_deref(), Some("149597870700"));
+        assert_eq!(app.engine().message(), "AU  m");
 
         let mut app = App::new();
         app.keys("K");
