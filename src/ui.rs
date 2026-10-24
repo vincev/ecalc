@@ -113,18 +113,24 @@ fn draw_stack(buf: &mut Buffer, area: Rect, app: &App) {
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let lines = stack_lines(app, area.height as usize);
+    let lines = stack_lines(app, area.height as usize, area.width as usize);
     Paragraph::new(lines).render(area, buf);
 }
 
-fn stack_lines(app: &App, rows: usize) -> Vec<Line<'static>> {
+fn stack_lines(app: &App, rows: usize, width: usize) -> Vec<Line<'static>> {
     if rows == 0 {
         return Vec::new();
     }
-    let raw = app.engine().stack_lines();
     let room = rows - 1;
-    let start = raw.len().saturating_sub(room);
-    let pad = room.saturating_sub(raw.len() - start);
+    let content_width = width.saturating_sub(STACK_INDENT);
+    let wrapped: Vec<Vec<String>> = app
+        .engine()
+        .stack_lines()
+        .iter()
+        .map(|line| wrap_continued(line, content_width))
+        .collect();
+    let shown = fit_stack(&wrapped, room);
+    let pad = room.saturating_sub(shown.len());
     let mut lines = Vec::with_capacity(rows);
     let blank = Style::default().bg(BG);
     for _ in 0..pad {
@@ -132,14 +138,92 @@ fn stack_lines(app: &App, rows: usize) -> Vec<Line<'static>> {
     }
     let value = Style::default().fg(FG).bg(BG);
     let indent = " ".repeat(STACK_INDENT);
-    for line in &raw[start..] {
-        lines.push(Line::from(Span::styled(format!("{indent}{line}"), value)));
+    for text in shown {
+        lines.push(Line::from(Span::styled(format!("{indent}{text}"), value)));
     }
     lines.push(Line::from(Span::styled(
         format!("{indent}."),
         Style::default().fg(GRAY_DIM).bg(BG),
     )));
     lines
+}
+
+/// Break `text` so each piece fits in `width` columns.
+///
+/// A piece that continues ends with `\`. Later pieces start with one space, so
+/// the continuation is obvious, and that space counts toward `width`. A width
+/// of one has no room for the marker, so the text is one character per line.
+fn wrap_continued(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= width {
+        return vec![text.to_string()];
+    }
+    if width == 1 {
+        return chars.into_iter().map(|c| c.to_string()).collect();
+    }
+    let mut lines = Vec::new();
+    let first = width - 1;
+    let mut line: String = chars[..first].iter().collect();
+    let mut start = first;
+    if start < chars.len() {
+        line.push('\\');
+    }
+    lines.push(line);
+    while start < chars.len() {
+        let remaining = chars.len() - start;
+        // The indent uses one column. A line that still continues also keeps a
+        // column for `\`. Width 2 can hold the indent and one character only.
+        let (take, slash) = if width == 2 {
+            (1, false)
+        } else if remaining > width - 1 {
+            (width - 2, true)
+        } else {
+            (remaining, false)
+        };
+        let end = start + take;
+        let mut line = String::from(" ");
+        line.extend(chars[start..end].iter().copied());
+        start = end;
+        if slash {
+            line.push('\\');
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+/// Keep the newest values that fit in `room` rows, oldest first.
+///
+/// A value is kept whole. The newest value may be clipped to its leading rows
+/// when it alone is taller than the screen; those rows still end in `\` when
+/// more digits remain.
+fn fit_stack(wrapped: &[Vec<String>], room: usize) -> Vec<String> {
+    let mut picked: Vec<&[String]> = Vec::new();
+    let mut used = 0usize;
+    for lines in wrapped.iter().rev() {
+        if used >= room {
+            break;
+        }
+        let left = room - used;
+        if lines.len() <= left {
+            picked.push(lines.as_slice());
+            used += lines.len();
+        } else if picked.is_empty() {
+            picked.push(&lines[..left]);
+            break;
+        } else {
+            break;
+        }
+    }
+    picked.reverse();
+    let mut shown = Vec::with_capacity(room);
+    for lines in picked {
+        shown.extend(lines.iter().cloned());
+    }
+    shown
 }
 
 fn draw_prompt(buf: &mut Buffer, area: Rect, app: &App) {
@@ -1013,6 +1097,19 @@ mod tests {
         row.chars().position(|c| c == ch).expect("column")
     }
 
+    fn row_text(row: &str, from: usize) -> String {
+        row.chars().skip(from).collect::<String>().trim_end().to_string()
+    }
+
+    /// A stack row has a digit somewhere in the value columns. A continuation
+    /// is a space in the first of those columns, so a blank pad row is not one.
+    fn value_row(row: &str, from: usize, last: usize) -> bool {
+        row.chars()
+            .skip(from)
+            .take(last.saturating_sub(from) + 1)
+            .any(|c| c != ' ')
+    }
+
     fn lines(buffer: &Buffer) -> Vec<String> {
         let width = buffer.area.width as usize;
         let height = buffer.area.height as usize;
@@ -1049,10 +1146,118 @@ mod tests {
         assert_eq!(col(&rows[top], '3'), typed_at);
         assert_eq!(col(&rows[oldest], '1'), typed_at);
         assert_eq!(col(&rows[dot], '.'), typed_at);
+        assert!(!rows.iter().any(|row| row.contains('\\')));
         assert!(
             rows.iter()
                 .any(|row| row.contains("prec 12") && row.contains("deg"))
         );
+    }
+
+    #[test]
+    fn wrap_continued_breaks_on_the_backslash() {
+        assert_eq!(wrap_continued("12345", 5), ["12345"]);
+        assert_eq!(wrap_continued("123456", 5), ["1234\\", " 56"]);
+        assert_eq!(
+            wrap_continued("-1234567890", 5),
+            ["-123\\", " 456\\", " 7890"]
+        );
+        assert_eq!(wrap_continued("ab", 1), ["a", "b"]);
+        assert_eq!(wrap_continued("ab", 0), [""]);
+    }
+
+    #[test]
+    fn fit_stack_keeps_the_newest_values() {
+        let wrapped = vec![
+            vec!["1".to_string()],
+            vec!["22\\".to_string(), "2".to_string()],
+            vec!["3".to_string()],
+        ];
+        assert_eq!(
+            fit_stack(&wrapped, 3),
+            vec!["22\\".to_string(), "2".to_string(), "3".to_string()]
+        );
+        let huge = vec!["aaaa\\".to_string(), "bbbb\\".to_string(), "cc".to_string()];
+        assert_eq!(
+            fit_stack(&[huge.clone(), vec!["9".to_string()]], 2),
+            vec!["9".to_string()]
+        );
+        assert_eq!(
+            fit_stack(&[huge], 2),
+            vec!["aaaa\\".to_string(), "bbbb\\".to_string()]
+        );
+    }
+
+    #[test]
+    fn long_integer_wraps_inside_the_stack() {
+        let mut app = App::new();
+        app.keys("2\n100\n!");
+        let full = app.engine().stack_lines().pop().expect("factorial");
+        assert!(full.len() > 40, "100! should be wider than the test screen");
+
+        let buffer = render(&app, 40, 24);
+        let rows = lines(&buffer);
+        let prompt = rows.iter().find(|row| row.contains('❯')).expect("prompt");
+        let typed_at = col(prompt, '❯') + 2;
+        let dot = rows
+            .iter()
+            .position(|row| row.trim() == ".")
+            .expect("dot");
+        let inset_last = buffer.area.width as usize - SIDE_PAD as usize - 1;
+        let mut shown = Vec::new();
+        for row in &rows[..dot] {
+            if value_row(row, typed_at, inset_last) {
+                shown.push(row.as_str());
+            }
+        }
+        assert!(shown.len() >= 2, "the 2 and the factorial should both fit");
+        assert_eq!(shown[0].chars().nth(typed_at), Some('2'));
+        assert!(!shown[0].contains('\\'));
+
+        let mut joined = String::new();
+        for (i, row) in shown[1..].iter().enumerate() {
+            let content = row_text(row, typed_at);
+            let last = i + 1 == shown.len() - 1;
+            let body = content.strip_suffix('\\').unwrap_or(&content);
+            if i == 0 {
+                assert_eq!(row.chars().nth(typed_at), Some(full.chars().next().unwrap()));
+                joined.push_str(body);
+            } else {
+                assert_eq!(row.chars().nth(typed_at), Some(' '));
+                assert_ne!(row.chars().nth(typed_at + 1), Some(' '));
+                let digits = body.strip_prefix(' ').expect("continuation indent");
+                joined.push_str(digits);
+            }
+            if last {
+                assert!(!content.ends_with('\\'));
+            } else {
+                assert!(content.ends_with('\\'));
+                assert_eq!(row.chars().nth(inset_last), Some('\\'));
+                assert_eq!(row.chars().nth(inset_last + 1), Some(' '));
+            }
+        }
+        assert_eq!(joined, full);
+
+        let clipped = lines(&render(&app, 40, 12));
+        let clip_dot = clipped
+            .iter()
+            .position(|row| row.trim() == ".")
+            .expect("dot");
+        let mut head = String::new();
+        let mut pieces = 0;
+        for row in &clipped[..clip_dot] {
+            if !value_row(row, typed_at, inset_last) {
+                continue;
+            }
+            let content = row_text(row, typed_at);
+            assert!(content.ends_with('\\'), "a clipped factorial still ends in \\");
+            let body = content.strip_suffix('\\').unwrap();
+            let digits = body.strip_prefix(' ').unwrap_or(body);
+            head.push_str(digits);
+            pieces += 1;
+        }
+        assert!(pieces > 1);
+        assert!(full.starts_with(&head));
+        assert_ne!(head, full);
     }
 
     #[test]
