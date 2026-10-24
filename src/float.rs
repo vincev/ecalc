@@ -386,7 +386,7 @@ impl DecFloat {
         let q = x.div(&half_pi, high)?.round_half_away();
         let r = x.sub(&half_pi.mul(&Self::from_bigint(&q, high), high), high);
         let (mut s, mut c) = sin_cos_series(&r, high)?;
-        let qmod = (&q).mod_floor(&BigInt::from(4));
+        let qmod = q.mod_floor(&BigInt::from(4));
         match qmod.to_i32().unwrap_or(0) {
             0 => {}
             1 => {
@@ -602,16 +602,7 @@ impl DecFloat {
         let digits = self.mantissa.abs().to_str_radix(10);
         let order = self.exponent + digits.len() as i64 - 1;
         if order >= 10 || order <= -5 {
-            let mut frac: String = digits.chars().skip(1).collect();
-            while frac.ends_with('0') {
-                frac.pop();
-            }
-            let body = if frac.is_empty() {
-                digits[..1].to_string()
-            } else {
-                format!("{}.{}", &digits[..1], frac)
-            };
-            format!("{neg}{body}e{order}")
+            format!("{neg}{}e{order}", scientific_mantissa(&digits))
         } else {
             format!("{neg}{}", fixed_point(&digits, self.exponent))
         }
@@ -637,7 +628,20 @@ impl fmt::Debug for DecFloat {
     }
 }
 
-fn fixed_point(digits: &str, exponent: i64) -> String {
+/// `d` or `d.ddd`, with trailing zeros removed from the fraction.
+pub(crate) fn scientific_mantissa(digits: &str) -> String {
+    let mut frac: String = digits.chars().skip(1).collect();
+    while frac.ends_with('0') {
+        frac.pop();
+    }
+    if frac.is_empty() {
+        digits[..1].to_string()
+    } else {
+        format!("{}.{}", &digits[..1], frac)
+    }
+}
+
+pub(crate) fn fixed_point(digits: &str, exponent: i64) -> String {
     if exponent >= 0 {
         let zeros = exponent as usize;
         return format!("{digits}{}", "0".repeat(zeros));

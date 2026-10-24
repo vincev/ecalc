@@ -507,13 +507,17 @@ mod tests {
         assert_eq!(p("(16#3, 16#4)"), "(3, 4)");
         assert_eq!(p("10"), "10");
 
-        let mut hex = Mode::default();
-        hex.radix = 16;
+        let hex = Mode {
+            radix: 16,
+            ..Mode::default()
+        };
         assert_eq!(parse_value("#FF", &hex).unwrap().to_string(), "255");
         assert_eq!(parse_value("10", &hex).unwrap().to_string(), "10");
 
-        let mut word = Mode::default();
-        word.word_size = 8;
+        let word = Mode {
+            word_size: 8,
+            ..Mode::default()
+        };
         assert_eq!(parse_value("16##FD", &word).unwrap().to_string(), "-3");
         assert_eq!(
             parse_value("2##11110101", &word).unwrap().to_string(),

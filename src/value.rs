@@ -302,10 +302,10 @@ pub fn fdiv(a: &Value, b: &Value, mode: &Mode) -> Result<Value, CalcError> {
     if b.is_zero() {
         return Err(CalcError::DivideByZero);
     }
-    if let (Value::Real(ar), Value::Real(br)) = (a, b) {
-        if let (Some(x), Some(y)) = (ar.to_rational(), br.to_rational()) {
-            return Ok(Value::from_rational(x / y));
-        }
+    if let (Value::Real(ar), Value::Real(br)) = (a, b)
+        && let (Some(x), Some(y)) = (ar.to_rational(), br.to_rational())
+    {
+        return Ok(Value::from_rational(x / y));
     }
     div(a, b, mode)
 }
@@ -340,10 +340,11 @@ fn floor_quot(a: &Value, b: &Value, mode: &Mode) -> Result<BigInt, CalcError> {
 }
 
 fn add_real(a: &Real, b: &Real, mode: &Mode) -> Result<Real, CalcError> {
-    if let (Some(x), Some(y)) = (a.to_rational(), b.to_rational()) {
-        if !matches!(a, Real::Float(_)) && !matches!(b, Real::Float(_)) {
-            return Ok(real_from_rational(x + y));
-        }
+    if let (Some(x), Some(y)) = (a.to_rational(), b.to_rational())
+        && !matches!(a, Real::Float(_))
+        && !matches!(b, Real::Float(_))
+    {
+        return Ok(real_from_rational(x + y));
     }
     Ok(Real::Float(
         a.to_float(mode.prec)?
@@ -356,10 +357,11 @@ fn sub_real(a: &Real, b: &Real, mode: &Mode) -> Result<Real, CalcError> {
 }
 
 fn mul_real(a: &Real, b: &Real, mode: &Mode) -> Result<Real, CalcError> {
-    if let (Some(x), Some(y)) = (a.to_rational(), b.to_rational()) {
-        if !matches!(a, Real::Float(_)) && !matches!(b, Real::Float(_)) {
-            return Ok(real_from_rational(x * y));
-        }
+    if let (Some(x), Some(y)) = (a.to_rational(), b.to_rational())
+        && !matches!(a, Real::Float(_))
+        && !matches!(b, Real::Float(_))
+    {
+        return Ok(real_from_rational(x * y));
     }
     Ok(Real::Float(
         a.to_float(mode.prec)?
@@ -371,19 +373,20 @@ fn div_real(a: &Real, b: &Real, mode: &Mode) -> Result<Real, CalcError> {
     if b.is_zero() {
         return Err(CalcError::DivideByZero);
     }
-    if let (Some(x), Some(y)) = (a.to_rational(), b.to_rational()) {
-        if !matches!(a, Real::Float(_)) && !matches!(b, Real::Float(_)) {
-            let q = x / y;
-            if q.denom().is_one() {
-                return Ok(Real::Int(q.into_raw().0));
-            }
-            if mode.fraction {
-                return Ok(Real::Rat(q));
-            }
-            let n = DecFloat::from_bigint(q.numer(), mode.prec);
-            let d = DecFloat::from_bigint(q.denom(), mode.prec);
-            return Ok(Real::Float(n.div(&d, mode.prec)?));
+    if let (Some(x), Some(y)) = (a.to_rational(), b.to_rational())
+        && !matches!(a, Real::Float(_))
+        && !matches!(b, Real::Float(_))
+    {
+        let q = x / y;
+        if q.denom().is_one() {
+            return Ok(Real::Int(q.into_raw().0));
         }
+        if mode.fraction {
+            return Ok(Real::Rat(q));
+        }
+        let n = DecFloat::from_bigint(q.numer(), mode.prec);
+        let d = DecFloat::from_bigint(q.denom(), mode.prec);
+        return Ok(Real::Float(n.div(&d, mode.prec)?));
     }
     Ok(Real::Float(
         a.to_float(mode.prec)?
@@ -403,15 +406,15 @@ pub fn pow(base: &Value, exp: &Value, mode: &Mode) -> Result<Value, CalcError> {
     if let Some(n) = real_exponent_int(exp) {
         return pow_int(base, &n, mode);
     }
-    if let Value::Real(r) = exp {
-        if let Some(q) = r.to_rational() {
-            if !matches!(r, Real::Float(_)) {
-                return pow_rational(base, &q, mode);
-            }
-            // A short decimal such as 0.5 is an exact rational too.
-            if matches!(r, Real::Float(f) if f.prec() <= 12) {
-                return pow_rational(base, &q, mode);
-            }
+    if let Value::Real(r) = exp
+        && let Some(q) = r.to_rational()
+    {
+        if !matches!(r, Real::Float(_)) {
+            return pow_rational(base, &q, mode);
+        }
+        // A short decimal such as 0.5 is an exact rational too.
+        if matches!(r, Real::Float(f) if f.prec() <= 12) {
+            return pow_rational(base, &q, mode);
         }
     }
     pow_exp_ln(base, exp, mode)
@@ -502,12 +505,11 @@ pub fn nth_root(base: &Value, n: &BigInt, mode: &Mode) -> Result<Value, CalcErro
         if r.is_zero() {
             return Ok(Value::from_int(0));
         }
-        if let Some(q) = r.to_rational() {
-            if !matches!(r, Real::Float(_)) {
-                if let Some(root) = rational_nth_root(&q, degree) {
-                    return Ok(Value::from_rational(root));
-                }
-            }
+        if let Some(q) = r.to_rational()
+            && !matches!(r, Real::Float(_))
+            && let Some(root) = rational_nth_root(&q, degree)
+        {
+            return Ok(Value::from_rational(root));
         }
         let f = r.to_float(mode.prec)?;
         let ln = f.ln(mode.prec)?;
@@ -548,7 +550,7 @@ fn int_nth_root(a: &BigInt, n: u32) -> Option<(bool, BigInt)> {
         return Some((true, a.clone()));
     }
     let digs = float::digit_count(a);
-    let guess_digits = (digs + n - 1) / n;
+    let guess_digits = digs.div_ceil(n);
     let mut guess = BigInt::from(10).pow(guess_digits.max(1));
     for _ in 0..10_000 {
         let p = if n == 1 {
@@ -584,10 +586,7 @@ pub fn sqrt(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
             };
             Ok(Value::complex(Real::Int(BigInt::zero()), im))
         }
-        Value::Real(r) => nth_root(v, &BigInt::from(2), mode).or_else(|_| {
-            let _ = r;
-            nth_root(&Value::Real(r.clone()), &BigInt::from(2), mode)
-        }),
+        Value::Real(_) => nth_root(v, &BigInt::from(2), mode),
         Value::Complex(re, im) => {
             let x = re.to_float(mode.prec)?;
             let y = im.to_float(mode.prec)?;
@@ -656,12 +655,13 @@ fn hypot_real(a: &Real, b: &Real, mode: &Mode) -> Result<Real, CalcError> {
     if b.is_zero() {
         return Ok(a.abs());
     }
-    if let (Some(x), Some(y)) = (a.to_rational(), b.to_rational()) {
-        if !matches!(a, Real::Float(_)) && !matches!(b, Real::Float(_)) {
-            let sum = &x * &x + &y * &y;
-            if let Some(root) = rational_nth_root(&sum, 2) {
-                return Ok(real_from_rational(root));
-            }
+    if let (Some(x), Some(y)) = (a.to_rational(), b.to_rational())
+        && !matches!(a, Real::Float(_))
+        && !matches!(b, Real::Float(_))
+    {
+        let sum = &x * &x + &y * &y;
+        if let Some(root) = rational_nth_root(&sum, 2) {
+            return Ok(real_from_rational(root));
         }
     }
     let af = a.to_float(mode.prec)?;
@@ -794,15 +794,14 @@ pub fn exp_value(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 }
 
 pub fn expm1(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
-    if let Value::Real(r) = v {
-        if let Some(f) = (!r.is_zero()).then(|| r.to_float(mode.prec)).transpose()? {
-            if f.order() < 0 {
-                return Ok(polish(
-                    Value::Real(Real::Float(exp_minus_one_series(&f, mode.prec)?)),
-                    mode.prec,
-                ));
-            }
-        }
+    if let Value::Real(r) = v
+        && let Some(f) = (!r.is_zero()).then(|| r.to_float(mode.prec)).transpose()?
+        && f.order() < 0
+    {
+        return Ok(polish(
+            Value::Real(Real::Float(exp_minus_one_series(&f, mode.prec)?)),
+            mode.prec,
+        ));
     }
     sub(&exp_value(v, mode)?, &Value::from_int(1), mode)
 }
@@ -825,12 +824,12 @@ pub fn exp10(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 }
 
 pub fn log(x: &Value, base: &Value, mode: &Mode) -> Result<Value, CalcError> {
-    if let (Some(xv), Some(bv)) = (positive_int(x), positive_int(base)) {
-        if bv > BigInt::one() {
-            let k = ilog_int(&xv, &bv)?;
-            if bv.pow(u32::try_from(&k).unwrap_or(0)) == xv {
-                return Ok(Value::from_int(k));
-            }
+    if let (Some(xv), Some(bv)) = (positive_int(x), positive_int(base))
+        && bv > BigInt::one()
+    {
+        let k = ilog_int(&xv, &bv)?;
+        if bv.pow(u32::try_from(&k).unwrap_or(0)) == xv {
+            return Ok(Value::from_int(k));
         }
     }
     let num = ln(x, mode)?;
@@ -866,30 +865,49 @@ fn power_of_ten(v: &Value) -> Option<BigInt> {
     }
 }
 
+/// Largest `k` with `base^k <= x`.
+///
+/// The powers are `base^(2^i)`, so the work follows the size of `x` rather
+/// than the size of the logarithm. A capped linear scan used to return
+/// `1000000` for anything larger.
 fn ilog_int(x: &BigInt, base: &BigInt) -> Result<BigInt, CalcError> {
     if !x.is_positive() || *base <= BigInt::one() {
         return Err(CalcError::Domain(
             "integer log needs a positive integer and a base greater than 1",
         ));
     }
-    let mut k = BigInt::zero();
-    let mut power = BigInt::one();
-    for _ in 0..1_000_000 {
-        if &power > &(x / base) {
+    if x < base {
+        return Ok(BigInt::zero());
+    }
+    let mut powers = vec![base.clone()];
+    loop {
+        let square = {
+            let last = powers.last().expect("base power");
+            last * last
+        };
+        if &square > x {
             break;
         }
-        power *= base;
-        k += 1;
+        powers.push(square);
     }
-    Ok(k)
+    let mut acc = BigInt::one();
+    let mut result = BigInt::zero();
+    for (i, power) in powers.iter().enumerate().rev() {
+        let next = &acc * power;
+        if &next <= x {
+            acc = next;
+            result += BigInt::one() << i;
+        }
+    }
+    Ok(result)
 }
 
 pub fn sin(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     if mode.angle == AngleMode::Degrees {
-        if let Some(n) = real_exact_int(v) {
-            if degree_mod(&n).is_multiple_of(&BigInt::from(90)) {
-                return Ok(quadrant_sin(&n));
-            }
+        if let Some(n) = real_exact_int(v)
+            && degree_mod(&n).is_multiple_of(&BigInt::from(90))
+        {
+            return Ok(quadrant_sin(&n));
         }
     } else if real_is_zero(v) {
         return Ok(Value::from_int(0));
@@ -899,31 +917,29 @@ pub fn sin(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 
 pub fn cos(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     if mode.angle == AngleMode::Degrees {
-        if let Some(n) = real_exact_int(v) {
-            if degree_mod(&n).is_multiple_of(&BigInt::from(90)) {
-                return Ok(quadrant_cos(&n));
-            }
+        if let Some(n) = real_exact_int(v)
+            && degree_mod(&n).is_multiple_of(&BigInt::from(90))
+        {
+            return Ok(quadrant_cos(&n));
         }
     } else if real_is_zero(v) {
         return Ok(Value::from_int(1));
     }
-    let shifted = add(v, &quarter_turn(mode)?, mode)?;
-    // cos(x) = sin(x + 90°) only in the current angle mode. For radians,
-    // quarter_turn is pi/2. Fall through to the direct formula instead when
-    // the value is complex, so the shift stays in the same unit.
+    // cos(x) = sin(x + 90°) only for a real, in the current angle mode.
+    // A complex value uses the direct formula, so it never builds that shift.
     if v.is_real() {
+        let shifted = add(v, &quarter_turn(mode)?, mode)?;
         return sin(&shifted, mode);
     }
     trig_complex(v, mode, false)
 }
 
 pub fn tan(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
-    if mode.angle == AngleMode::Degrees {
-        if let Some(n) = real_exact_int(v) {
-            if degree_mod(&n).is_multiple_of(&BigInt::from(45)) {
-                return tan_exact_degrees(&n);
-            }
-        }
+    if mode.angle == AngleMode::Degrees
+        && let Some(n) = real_exact_int(v)
+        && degree_mod(&n).is_multiple_of(&BigInt::from(45))
+    {
+        return tan_exact_degrees(&n);
     }
     let s = sin(v, mode)?;
     let c = cos(v, mode)?;
@@ -1072,12 +1088,11 @@ pub fn asin(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         }
     }
     if let Value::Real(r) = v {
-        if !r.is_negative() || r.abs().to_float(4)?.cmp_val(&DecFloat::one(4)) != Ordering::Greater
-        {
-            if r.abs().to_float(8)?.cmp_val(&DecFloat::one(8)) != Ordering::Greater {
-                let rad = r.to_float(mode.prec)?.asin(mode.prec)?;
-                return from_radians_real(rad, mode);
-            }
+        // Eight digits separates `|z| > 1` from a value that rounds to 1.
+        let one = DecFloat::one(8);
+        if r.abs().to_float(8)?.cmp_val(&one) != Ordering::Greater {
+            let rad = r.to_float(mode.prec)?.asin(mode.prec)?;
+            return from_radians_real(rad, mode);
         }
     }
     // asin(z) = -i ln(i z + sqrt(1 - z^2)), result still in radians.
@@ -1575,5 +1590,104 @@ mod tests {
         );
         let third = div(&Value::from_int(1), &Value::from_int(3), &mode()).unwrap();
         assert_eq!(to_fraction(&third, &mode()).unwrap().to_string(), "1:3");
+    }
+
+    #[test]
+    fn adding_zero_keeps_the_value() {
+        let samples = [
+            Value::from_int(0),
+            Value::from_int(-42),
+            Value::from_int(1_000_000),
+            Value::from_rational(BigRational::new(BigInt::from(2), BigInt::from(3))),
+            Value::from_rational(BigRational::new(BigInt::from(-4), BigInt::from(3))),
+            Value::real(Real::Float(DecFloat::from_decimal(BigInt::from(1), -1, 12))),
+            Value::complex(Real::Int(BigInt::from(3)), Real::Int(BigInt::from(-4))),
+        ];
+        let zero = Value::from_int(0);
+        for value in &samples {
+            let sum = add(value, &zero, &mode()).unwrap();
+            assert_eq!(sum.to_string(), value.to_string());
+            let sum = add(&zero, value, &mode()).unwrap();
+            assert_eq!(sum.to_string(), value.to_string());
+        }
+    }
+
+    #[test]
+    fn exp_then_ln_returns_the_input() {
+        let mut precise = mode();
+        precise.prec = 16;
+        for n in [-2, -1, 0, 1, 2] {
+            let x = Value::from_int(n);
+            let back = ln(&exp_value(&x, &precise).unwrap(), &precise).unwrap();
+            assert_eq!(back.to_string(), x.to_string(), "ln(exp({n}))");
+        }
+    }
+
+    #[test]
+    fn fraction_survives_a_float_round_trip() {
+        let samples = [
+            (1, 2, "1:2"),
+            (1, 3, "1:3"),
+            (2, 7, "2:7"),
+            (22, 7, "22:7"),
+            (-4, 3, "-4:3"),
+        ];
+        for (numer, denom, shown) in samples {
+            let q =
+                Value::from_rational(BigRational::new(BigInt::from(numer), BigInt::from(denom)));
+            assert_eq!(q.to_string(), shown);
+            let float = to_float(&q, &mode()).unwrap();
+            let back = to_fraction(&float, &mode()).unwrap();
+            assert_eq!(back.to_string(), shown);
+        }
+    }
+
+    #[test]
+    fn repeating_products_stay_unpolished() {
+        let third = div(&Value::from_int(1), &Value::from_int(3), &mode()).unwrap();
+        let almost_one = mul(&third, &Value::from_int(3), &mode()).unwrap();
+        assert_eq!(almost_one.to_string(), "0.999999999999");
+
+        let root = sqrt(&Value::from_int(2), &mode()).unwrap();
+        let almost_two = mul(&root, &root, &mode()).unwrap();
+        assert_eq!(almost_two.to_string(), "1.99999999999");
+    }
+
+    #[test]
+    fn integer_log_is_exact_past_a_million() {
+        assert_eq!(
+            ilog(&Value::from_int(1000), &Value::from_int(10), &mode())
+                .unwrap()
+                .to_string(),
+            "3"
+        );
+        assert_eq!(
+            ilog(&Value::from_int(999), &Value::from_int(10), &mode())
+                .unwrap()
+                .to_string(),
+            "2"
+        );
+        assert_eq!(
+            ilog(&Value::from_int(1), &Value::from_int(10), &mode())
+                .unwrap()
+                .to_string(),
+            "0"
+        );
+        let huge = Value::from_int(BigInt::one() << 1_000_001);
+        assert_eq!(
+            ilog(&huge, &Value::from_int(2), &mode())
+                .unwrap()
+                .to_string(),
+            "1000001"
+        );
+        let just_under = Value::from_int((BigInt::one() << 1_000_001) - 1);
+        assert_eq!(
+            ilog(&just_under, &Value::from_int(2), &mode())
+                .unwrap()
+                .to_string(),
+            "1000000"
+        );
+        assert!(ilog(&Value::from_int(0), &Value::from_int(2), &mode()).is_err());
+        assert!(ilog(&Value::from_int(8), &Value::from_int(1), &mode()).is_err());
     }
 }

@@ -12,7 +12,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 use std::io;
-use std::time::Duration;
 
 /// Main background, `#141414`.
 const BG: Color = Color::Rgb(20, 20, 20);
@@ -50,22 +49,32 @@ pub fn run() -> io::Result<()> {
     ratatui::run(|terminal| {
         loop {
             terminal.draw(|frame| draw(frame, &app))?;
-            if event::poll(Duration::from_millis(200))? {
-                if let Event::Key(key) = event::read()? {
-                    if key.kind == KeyEventKind::Release {
-                        continue;
-                    }
-                    if let Some(mapped) = map_key(&key) {
-                        app.press(mapped);
-                    }
-                }
-            }
-            if app.should_quit() {
+            if wait_for_redraw(&mut app)? {
                 break;
             }
         }
         Ok(())
     })
+}
+
+/// Blocks until a key or a resize. Idle time does not redraw the stack.
+/// Returns true when the app should quit.
+fn wait_for_redraw(app: &mut App) -> io::Result<bool> {
+    loop {
+        match event::read()? {
+            Event::Key(key) => {
+                if key.kind == KeyEventKind::Release {
+                    continue;
+                }
+                if let Some(mapped) = map_key(&key) {
+                    app.press(mapped);
+                }
+                return Ok(app.should_quit());
+            }
+            Event::Resize(_, _) => return Ok(false),
+            _ => {}
+        }
+    }
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
@@ -425,102 +434,180 @@ const HELP_GROUPS: [&[(&str, &str)]; 4] = [
     ],
 ];
 
+/// Gray `┌┐` frame shared by the shortcuts, variable, and constant boxes.
+struct Dialog {
+    rect: Rect,
+    inner_x: u16,
+    text_w: u16,
+    content_y: u16,
+    content_h: u16,
+}
+
+impl Dialog {
+    fn open(buf: &mut Buffer, area: Rect, content_rows: u16) -> Option<Self> {
+        let chrome_y = 2 + HELP_V_PAD + HELP_FOOTER;
+        let width = 68u16.min(area.width);
+        let inner_w = width.saturating_sub(2 + HELP_H_PAD * 2);
+        if inner_w < 8 || area.height < chrome_y {
+            return None;
+        }
+        let height = (content_rows + chrome_y).min(area.height);
+        let rect = Rect {
+            x: area.x + (area.width - width) / 2,
+            y: area.y + (area.height - height) / 2,
+            width,
+            height,
+        };
+
+        let fill = Style::default().bg(BG);
+        for y in rect.y..rect.y + rect.height {
+            for x in rect.x..rect.x + rect.width {
+                paint_char(buf, x, y, ' ', fill);
+            }
+        }
+
+        let border = Style::default().fg(GRAY_DIM).bg(BG);
+        let last_x = rect.x + rect.width - 1;
+        let last_y = rect.y + rect.height - 1;
+        for x in rect.x..rect.x + rect.width {
+            let (top_ch, bot_ch) = if x == rect.x {
+                ('┌', '└')
+            } else if x == last_x {
+                ('┐', '┘')
+            } else {
+                ('─', '─')
+            };
+            paint_char(buf, x, rect.y, top_ch, border);
+            paint_char(buf, x, last_y, bot_ch, border);
+        }
+        for y in rect.y + 1..last_y {
+            paint_char(buf, rect.x, y, '│', border);
+            paint_char(buf, last_x, y, '│', border);
+        }
+
+        Some(Self {
+            rect,
+            inner_x: rect.x + 1 + HELP_H_PAD,
+            text_w: rect.width.saturating_sub(2 + HELP_H_PAD * 2),
+            content_y: rect.y + 1 + HELP_V_PAD,
+            content_h: rect.height.saturating_sub(chrome_y),
+        })
+    }
+
+    fn title(&self, buf: &mut Buffer, title: &str) {
+        let border = Style::default().fg(GRAY_DIM).bg(BG);
+        let last_x = self.rect.x + self.rect.width - 1;
+        let title_end = last_x.saturating_sub(8);
+        let mut title_x = self.rect.x + 1;
+        title_x = paint_str(buf, title_x, self.rect.y, title_end, "─ ", border);
+        title_x = paint_str(
+            buf,
+            title_x,
+            self.rect.y,
+            title_end,
+            title,
+            Style::default().fg(FG).bg(BG).add_modifier(Modifier::BOLD),
+        );
+        paint_str(buf, title_x, self.rect.y, title_end, " ─", border);
+
+        let close = " [x] ";
+        let close_x = self.rect.x + self.rect.width - close.chars().count() as u16 - 2;
+        if close_x > title_x + 1 {
+            paint_str(
+                buf,
+                close_x,
+                self.rect.y,
+                last_x,
+                close,
+                Style::default().fg(GRAY).bg(BG),
+            );
+        }
+    }
+
+    fn note(&self, buf: &mut Buffer, text: &str, style: Style) {
+        paint_str(
+            buf,
+            self.inner_x,
+            self.rect.y + 1,
+            self.inner_x + self.text_w,
+            text,
+            style,
+        );
+    }
+
+    /// Note on the left, `page/pages` on the right when there is another page.
+    fn note_page(
+        &self,
+        buf: &mut Buffer,
+        note: &str,
+        note_style: Style,
+        page: usize,
+        pages: usize,
+    ) {
+        let page_text = if pages > 1 {
+            format!("{}/{}", page + 1, pages)
+        } else {
+            String::new()
+        };
+        let page_w = page_text.chars().count() as u16;
+        let page_x = self.inner_x + self.text_w.saturating_sub(page_w);
+        let note_end = if page_w == 0 {
+            self.inner_x + self.text_w
+        } else {
+            page_x.saturating_sub(1)
+        };
+        paint_str(
+            buf,
+            self.inner_x,
+            self.rect.y + 1,
+            note_end,
+            note,
+            note_style,
+        );
+        if page_w > 0 {
+            paint_str(
+                buf,
+                page_x,
+                self.rect.y + 1,
+                self.inner_x + self.text_w,
+                &page_text,
+                Style::default().fg(GRAY).bg(BG),
+            );
+        }
+    }
+
+    fn footer(&self, buf: &mut Buffer, hints: &[(&str, &str)]) {
+        let y = self.rect.y + self.rect.height - 2;
+        draw_centered_hints(buf, self.inner_x, y, self.text_w, hints);
+    }
+}
+
 /// Centered shortcuts box, in the shape of Grok Build's cheatsheet: gray frame,
 /// bold title on the top border, and close hints centered inside the bottom.
 fn draw_help(buf: &mut Buffer, area: Rect) {
-    let chrome_y = 2 + HELP_V_PAD + HELP_FOOTER;
     let width = 68u16.min(area.width);
     let inner_w = width.saturating_sub(2 + HELP_H_PAD * 2);
-    if inner_w < 8 || area.height < chrome_y {
+    if inner_w < 8 {
         return;
     }
     let (cols, col_w) = help_layout(inner_w);
     let columns = help_columns(cols);
     let grid_rows = columns.iter().map(|column| column.len()).max().unwrap_or(0) as u16;
-    let height = (grid_rows + chrome_y).min(area.height);
-    let rect = Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + (area.height - height) / 2,
-        width,
-        height,
+    let Some(dialog) = Dialog::open(buf, area, grid_rows) else {
+        return;
     };
-
-    let fill = Style::default().bg(BG);
-    for y in rect.y..rect.y + rect.height {
-        for x in rect.x..rect.x + rect.width {
-            paint_char(buf, x, y, ' ', fill);
-        }
-    }
-
-    let border = Style::default().fg(GRAY_DIM).bg(BG);
-    let last_x = rect.x + rect.width - 1;
-    let last_y = rect.y + rect.height - 1;
-    for x in rect.x..rect.x + rect.width {
-        let (top_ch, bot_ch) = if x == rect.x {
-            ('┌', '└')
-        } else if x == last_x {
-            ('┐', '┘')
-        } else {
-            ('─', '─')
-        };
-        paint_char(buf, x, rect.y, top_ch, border);
-        paint_char(buf, x, last_y, bot_ch, border);
-    }
-    for y in rect.y + 1..last_y {
-        paint_char(buf, rect.x, y, '│', border);
-        paint_char(buf, last_x, y, '│', border);
-    }
-
-    let title_end = last_x.saturating_sub(8);
-    let mut title_x = rect.x + 1;
-    title_x = paint_str(buf, title_x, rect.y, title_end, "─ ", border);
-    title_x = paint_str(
-        buf,
-        title_x,
-        rect.y,
-        title_end,
-        "Shortcuts",
-        Style::default().fg(FG).bg(BG).add_modifier(Modifier::BOLD),
-    );
-    paint_str(buf, title_x, rect.y, title_end, " ─", border);
-
-    let close = " [x] ";
-    let close_x = rect.x + rect.width - close.chars().count() as u16 - 2;
-    if close_x > title_x + 1 {
-        paint_str(
-            buf,
-            close_x,
-            rect.y,
-            last_x,
-            close,
-            Style::default().fg(GRAY).bg(BG),
-        );
-    }
-
-    let note_y = rect.y + 1;
-    paint_str(
-        buf,
-        rect.x + 1 + HELP_H_PAD,
-        note_y,
-        last_x,
-        "any key closes",
-        Style::default().fg(GRAY).bg(BG),
-    );
-
-    let content_h = rect.height.saturating_sub(chrome_y);
-    if content_h > 0 {
+    dialog.title(buf, "Shortcuts");
+    dialog.note(buf, "any key closes", Style::default().fg(GRAY).bg(BG));
+    if dialog.content_h > 0 {
         let content = Rect {
-            x: rect.x + 1 + HELP_H_PAD,
-            y: rect.y + 1 + HELP_V_PAD,
-            width: inner_w,
-            height: content_h,
+            x: dialog.inner_x,
+            y: dialog.content_y,
+            width: dialog.text_w,
+            height: dialog.content_h,
         };
-        draw_help_grid(buf, content, &columns, col_w, content_h);
+        draw_help_grid(buf, content, &columns, col_w, dialog.content_h);
     }
-
-    let inner_x = rect.x + 1 + HELP_H_PAD;
-    let inner_w = rect.width.saturating_sub(2 + HELP_H_PAD * 2);
-    draw_help_footer(buf, inner_x, last_y - 1, inner_w);
+    dialog.footer(buf, &[("esc", "close"), ("q", "quit")]);
 }
 
 /// `(columns, column width)` for the shortcut grid. Prefers four columns.
@@ -578,10 +665,6 @@ fn draw_help_grid(
     }
 }
 
-fn draw_help_footer(buf: &mut Buffer, x: u16, y: u16, width: u16) {
-    draw_centered_hints(buf, x, y, width, &[("esc", "close"), ("q", "quit")]);
-}
-
 /// `key label` groups, centered, separated by `  |  `.
 fn draw_centered_hints(buf: &mut Buffer, x: u16, y: u16, width: u16, hints: &[(&str, &str)]) {
     let sep = "  |  ";
@@ -620,74 +703,10 @@ fn draw_variables(buf: &mut Buffer, area: Rect, app: &App) {
         let right = rows.len().saturating_sub(VAR_COLUMN);
         left.max(right) as u16
     };
-    let chrome_y = 2 + HELP_V_PAD + HELP_FOOTER;
-    let width = 68u16.min(area.width);
-    let inner_w = width.saturating_sub(2 + HELP_H_PAD * 2);
-    if inner_w < 8 || area.height < chrome_y {
+    let Some(dialog) = Dialog::open(buf, area, grid_rows) else {
         return;
-    }
-    let height = (grid_rows + chrome_y).min(area.height);
-    let rect = Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + (area.height - height) / 2,
-        width,
-        height,
     };
-
-    let fill = Style::default().bg(BG);
-    for y in rect.y..rect.y + rect.height {
-        for x in rect.x..rect.x + rect.width {
-            paint_char(buf, x, y, ' ', fill);
-        }
-    }
-
-    let border = Style::default().fg(GRAY_DIM).bg(BG);
-    let last_x = rect.x + rect.width - 1;
-    let last_y = rect.y + rect.height - 1;
-    for x in rect.x..rect.x + rect.width {
-        let (top_ch, bot_ch) = if x == rect.x {
-            ('┌', '└')
-        } else if x == last_x {
-            ('┐', '┘')
-        } else {
-            ('─', '─')
-        };
-        paint_char(buf, x, rect.y, top_ch, border);
-        paint_char(buf, x, last_y, bot_ch, border);
-    }
-    for y in rect.y + 1..last_y {
-        paint_char(buf, rect.x, y, '│', border);
-        paint_char(buf, last_x, y, '│', border);
-    }
-
-    let title_end = last_x.saturating_sub(8);
-    let mut title_x = rect.x + 1;
-    title_x = paint_str(buf, title_x, rect.y, title_end, "─ ", border);
-    title_x = paint_str(
-        buf,
-        title_x,
-        rect.y,
-        title_end,
-        "Variables",
-        Style::default().fg(FG).bg(BG).add_modifier(Modifier::BOLD),
-    );
-    paint_str(buf, title_x, rect.y, title_end, " ─", border);
-
-    let close = " [x] ";
-    let close_x = rect.x + rect.width - close.chars().count() as u16 - 2;
-    if close_x > title_x + 1 {
-        paint_str(
-            buf,
-            close_x,
-            rect.y,
-            last_x,
-            close,
-            Style::default().fg(GRAY).bg(BG),
-        );
-    }
-
-    let inner_x = rect.x + 1 + HELP_H_PAD;
-    let text_w = rect.width.saturating_sub(2 + HELP_H_PAD * 2);
+    dialog.title(buf, "Variables");
     let note = if app.var_note().is_empty() {
         "letter or digit recalls"
     } else {
@@ -698,54 +717,30 @@ fn draw_variables(buf: &mut Buffer, area: Rect, app: &App) {
     } else {
         Style::default().fg(ERROR).bg(BG)
     };
-    let page = if app.var_pages() > 1 {
-        format!("{}/{}", app.var_page() + 1, app.var_pages())
-    } else {
-        String::new()
-    };
-    let page_w = page.chars().count() as u16;
-    let page_x = inner_x + text_w.saturating_sub(page_w);
-    let note_end = if page_w == 0 {
-        inner_x + text_w
-    } else {
-        page_x.saturating_sub(1)
-    };
-    paint_str(buf, inner_x, rect.y + 1, note_end, note, note_style);
-    if page_w > 0 {
-        paint_str(
-            buf,
-            page_x,
-            rect.y + 1,
-            inner_x + text_w,
-            &page,
-            Style::default().fg(GRAY).bg(BG),
-        );
-    }
+    dialog.note_page(buf, note, note_style, app.var_page(), app.var_pages());
 
-    let content_y = rect.y + 1 + HELP_V_PAD;
-    let content_h = rect.height.saturating_sub(chrome_y);
     if rows.is_empty() {
         paint_str(
             buf,
-            inner_x,
-            content_y,
-            inner_x + text_w,
+            dialog.inner_x,
+            dialog.content_y,
+            dialog.inner_x + dialog.text_w,
             "nothing stored",
             Style::default().fg(GRAY).bg(BG),
         );
-    } else if content_h > 0 {
-        let col_w = (text_w as usize - HELP_GAP) / 2;
+    } else if dialog.content_h > 0 {
+        let col_w = (dialog.text_w as usize - HELP_GAP) / 2;
         for (index, (name, value)) in rows.iter().enumerate() {
             let col = index / VAR_COLUMN;
             let row = index % VAR_COLUMN;
-            if col > 1 || row >= content_h as usize || col_w == 0 {
+            if col > 1 || row >= dialog.content_h as usize || col_w == 0 {
                 continue;
             }
-            let x = inner_x + (col * (col_w + HELP_GAP)) as u16;
+            let x = dialog.inner_x + (col * (col_w + HELP_GAP)) as u16;
             paint_var_cell(
                 buf,
                 x,
-                content_y + row as u16,
+                dialog.content_y + row as u16,
                 x + col_w as u16,
                 name,
                 value,
@@ -754,7 +749,7 @@ fn draw_variables(buf: &mut Buffer, area: Rect, app: &App) {
     }
 
     let hints = var_footer_hints(app);
-    draw_centered_hints(buf, inner_x, last_y - 1, text_w, &hints);
+    dialog.footer(buf, &hints);
 }
 
 /// Physics constants, sixteen to a page: eight down each column.
@@ -763,74 +758,13 @@ fn draw_constants(buf: &mut Buffer, area: Rect, app: &App) {
     let left = rows.len().min(CONST_COLUMN);
     let right = rows.len().saturating_sub(CONST_COLUMN);
     let grid_rows = left.max(right) as u16;
-    let chrome_y = 2 + HELP_V_PAD + HELP_FOOTER;
-    let width = 68u16.min(area.width);
-    let inner_w = width.saturating_sub(2 + HELP_H_PAD * 2);
-    if inner_w < 8 || area.height < chrome_y || grid_rows == 0 {
+    if grid_rows == 0 {
         return;
     }
-    let height = (grid_rows + chrome_y).min(area.height);
-    let rect = Rect {
-        x: area.x + (area.width - width) / 2,
-        y: area.y + (area.height - height) / 2,
-        width,
-        height,
+    let Some(dialog) = Dialog::open(buf, area, grid_rows) else {
+        return;
     };
-
-    let fill = Style::default().bg(BG);
-    for y in rect.y..rect.y + rect.height {
-        for x in rect.x..rect.x + rect.width {
-            paint_char(buf, x, y, ' ', fill);
-        }
-    }
-
-    let border = Style::default().fg(GRAY_DIM).bg(BG);
-    let last_x = rect.x + rect.width - 1;
-    let last_y = rect.y + rect.height - 1;
-    for x in rect.x..rect.x + rect.width {
-        let (top_ch, bot_ch) = if x == rect.x {
-            ('┌', '└')
-        } else if x == last_x {
-            ('┐', '┘')
-        } else {
-            ('─', '─')
-        };
-        paint_char(buf, x, rect.y, top_ch, border);
-        paint_char(buf, x, last_y, bot_ch, border);
-    }
-    for y in rect.y + 1..last_y {
-        paint_char(buf, rect.x, y, '│', border);
-        paint_char(buf, last_x, y, '│', border);
-    }
-
-    let title_end = last_x.saturating_sub(8);
-    let mut title_x = rect.x + 1;
-    title_x = paint_str(buf, title_x, rect.y, title_end, "─ ", border);
-    title_x = paint_str(
-        buf,
-        title_x,
-        rect.y,
-        title_end,
-        "Constants",
-        Style::default().fg(FG).bg(BG).add_modifier(Modifier::BOLD),
-    );
-    paint_str(buf, title_x, rect.y, title_end, " ─", border);
-
-    let close = " [x] ";
-    let close_x = rect.x + rect.width - close.chars().count() as u16 - 2;
-    if close_x > title_x + 1 {
-        paint_str(
-            buf,
-            close_x,
-            rect.y,
-            last_x,
-            close,
-            Style::default().fg(GRAY).bg(BG),
-        );
-    }
-
-    let inner_x = rect.x + 1 + HELP_H_PAD;
-    let text_w = rect.width.saturating_sub(2 + HELP_H_PAD * 2);
+    dialog.title(buf, "Constants");
     let note = if app.const_note().is_empty() {
         "0-F inserts"
     } else {
@@ -841,45 +775,21 @@ fn draw_constants(buf: &mut Buffer, area: Rect, app: &App) {
     } else {
         Style::default().fg(ERROR).bg(BG)
     };
-    let page = if app.const_pages() > 1 {
-        format!("{}/{}", app.const_page() + 1, app.const_pages())
-    } else {
-        String::new()
-    };
-    let page_w = page.chars().count() as u16;
-    let page_x = inner_x + text_w.saturating_sub(page_w);
-    let note_end = if page_w == 0 {
-        inner_x + text_w
-    } else {
-        page_x.saturating_sub(1)
-    };
-    paint_str(buf, inner_x, rect.y + 1, note_end, note, note_style);
-    if page_w > 0 {
-        paint_str(
-            buf,
-            page_x,
-            rect.y + 1,
-            inner_x + text_w,
-            &page,
-            Style::default().fg(GRAY).bg(BG),
-        );
-    }
+    dialog.note_page(buf, note, note_style, app.const_page(), app.const_pages());
 
-    let content_y = rect.y + 1 + HELP_V_PAD;
-    let content_h = rect.height.saturating_sub(chrome_y);
-    if content_h > 0 {
-        let col_w = (text_w as usize - HELP_GAP) / 2;
+    if dialog.content_h > 0 {
+        let col_w = (dialog.text_w as usize - HELP_GAP) / 2;
         for (index, (key, symbol, name)) in rows.iter().enumerate() {
             let col = index / CONST_COLUMN;
             let row = index % CONST_COLUMN;
-            if col > 1 || row >= content_h as usize || col_w == 0 {
+            if col > 1 || row >= dialog.content_h as usize || col_w == 0 {
                 continue;
             }
-            let x = inner_x + (col * (col_w + HELP_GAP)) as u16;
+            let x = dialog.inner_x + (col * (col_w + HELP_GAP)) as u16;
             paint_const_cell(
                 buf,
                 x,
-                content_y + row as u16,
+                dialog.content_y + row as u16,
                 x + col_w as u16,
                 *key,
                 symbol,
@@ -889,7 +799,7 @@ fn draw_constants(buf: &mut Buffer, area: Rect, app: &App) {
     }
 
     let hints = const_footer_hints(app);
-    draw_centered_hints(buf, inner_x, last_y - 1, text_w, &hints);
+    dialog.footer(buf, &hints);
 }
 
 fn var_footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
@@ -1098,7 +1008,11 @@ mod tests {
     }
 
     fn row_text(row: &str, from: usize) -> String {
-        row.chars().skip(from).collect::<String>().trim_end().to_string()
+        row.chars()
+            .skip(from)
+            .collect::<String>()
+            .trim_end()
+            .to_string()
     }
 
     /// A stack row has a digit somewhere in the value columns. A continuation
@@ -1140,7 +1054,7 @@ mod tests {
             .expect("oldest value");
         assert!(oldest < top);
         assert!(top < dot);
-        assert!(shown.iter().any(|row| *row == "2"));
+        assert!(shown.contains(&"2"));
         let prompt = rows.iter().find(|row| row.contains('❯')).expect("prompt");
         let typed_at = col(prompt, '❯') + 2;
         assert_eq!(col(&rows[top], '3'), typed_at);
@@ -1198,10 +1112,7 @@ mod tests {
         let rows = lines(&buffer);
         let prompt = rows.iter().find(|row| row.contains('❯')).expect("prompt");
         let typed_at = col(prompt, '❯') + 2;
-        let dot = rows
-            .iter()
-            .position(|row| row.trim() == ".")
-            .expect("dot");
+        let dot = rows.iter().position(|row| row.trim() == ".").expect("dot");
         let inset_last = buffer.area.width as usize - SIDE_PAD as usize - 1;
         let mut shown = Vec::new();
         for row in &rows[..dot] {
@@ -1219,7 +1130,10 @@ mod tests {
             let last = i + 1 == shown.len() - 1;
             let body = content.strip_suffix('\\').unwrap_or(&content);
             if i == 0 {
-                assert_eq!(row.chars().nth(typed_at), Some(full.chars().next().unwrap()));
+                assert_eq!(
+                    row.chars().nth(typed_at),
+                    Some(full.chars().next().unwrap())
+                );
                 joined.push_str(body);
             } else {
                 assert_eq!(row.chars().nth(typed_at), Some(' '));
@@ -1249,7 +1163,10 @@ mod tests {
                 continue;
             }
             let content = row_text(row, typed_at);
-            assert!(content.ends_with('\\'), "a clipped factorial still ends in \\");
+            assert!(
+                content.ends_with('\\'),
+                "a clipped factorial still ends in \\"
+            );
             let body = content.strip_suffix('\\').unwrap();
             let digits = body.strip_prefix(' ').unwrap_or(body);
             head.push_str(digits);

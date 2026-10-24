@@ -15,7 +15,7 @@ use num_traits::One;
 use std::collections::BTreeMap;
 
 const UNDO_CAP: usize = 100;
-const MAX_VAR_LEN: usize = 32;
+pub(crate) const MAX_VAR_LEN: usize = 32;
 
 #[derive(Clone, Debug)]
 struct Snapshot {
@@ -436,7 +436,7 @@ impl Engine {
         if self.inverse {
             self.binop(|exponent, base, mode| value::pow(base, exponent, mode));
         } else {
-            self.binop(|value, base, mode| value::log(value, base, mode));
+            self.binop(value::log);
         }
     }
 
@@ -664,7 +664,7 @@ impl Engine {
     }
 }
 
-fn valid_var(name: &str) -> bool {
+pub(crate) fn valid_var(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -672,6 +672,14 @@ fn valid_var(name: &str) -> bool {
     name.len() <= MAX_VAR_LEN
         && first.is_ascii_alphabetic()
         && chars.all(|c| c.is_ascii_alphanumeric())
+}
+
+/// Whether appending `c` still yields a variable name.
+pub(crate) fn extends_var(name: &str, c: char) -> bool {
+    let mut next = String::with_capacity(name.len() + c.len_utf8());
+    next.push_str(name);
+    next.push(c);
+    valid_var(&next)
 }
 
 fn exact_int(value: &Value) -> Option<BigInt> {

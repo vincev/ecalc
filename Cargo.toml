@@ -1,10 +1,16 @@
 [package]
 name = "calc"
-version = "0.2.8"
+version = "0.2.9"
 edition = "2024"
 description = "Terminal RPN calculator"
 license = "Apache-2.0"
 authors = ["Vince <vince.vasta@gmail.com>"]
+
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+all = "deny"
 
 [dependencies]
 crossterm = "0.29.0"

@@ -244,22 +244,6 @@ impl App {
         parts.join("  ")
     }
 
-    /// Lines for the stack pane, oldest toward the top, `.` on the last row.
-    pub fn stack_text(&self, rows: usize) -> String {
-        if rows == 0 {
-            return String::new();
-        }
-        let lines = self.engine.stack_lines();
-        let room = rows - 1;
-        let start = lines.len().saturating_sub(room);
-        let mut out = Vec::with_capacity(rows);
-        let pad = room.saturating_sub(lines.len() - start);
-        out.resize(pad, String::new());
-        out.extend(lines[start..].iter().cloned());
-        out.push(".".to_string());
-        out.join("\n")
-    }
-
     pub fn keys(&mut self, keys: &str) {
         for c in keys.chars() {
             match c {
@@ -507,12 +491,7 @@ impl App {
         let Some(name) = self.pending_text() else {
             return;
         };
-        let ok = if name.is_empty() {
-            c.is_ascii_alphabetic()
-        } else {
-            c.is_ascii_alphanumeric()
-        };
-        if ok && name.len() < 32 {
+        if crate::engine::extends_var(name, c) {
             name.push(c);
         }
     }
@@ -556,11 +535,11 @@ impl App {
     }
 
     fn press_prefix(&mut self, key: Key) {
-        if self.prefix == Prefix::O {
-            if let Key::Char('d') = key {
-                self.prefix = Prefix::Od;
-                return;
-            }
+        if self.prefix == Prefix::O
+            && let Key::Char('d') = key
+        {
+            self.prefix = Prefix::Od;
+            return;
         }
         let which = self.prefix;
         self.prefix = Prefix::None;

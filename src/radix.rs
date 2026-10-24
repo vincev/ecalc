@@ -4,7 +4,7 @@
 //! value is drawn and how a `#` literal is read. Decimal display (no leading
 //! zeros) stays on `Display`, so `0.1 + 0.2` is still `0.3`.
 
-use crate::float::DecFloat;
+use crate::float::{self, DecFloat};
 use crate::value::{Mode, Real, Value};
 use num_bigint::BigInt;
 use num_integer::Integer;
@@ -129,10 +129,10 @@ fn push_grouped(digits: &[char], size: usize, out: &mut String) {
 
 fn format_int(n: &BigInt, mode: &Mode) -> String {
     let bits = word_bits(mode.word_size);
-    if mode.twos_complement {
-        if let Some(text) = format_twos(n, mode.radix, bits) {
-            return text;
-        }
+    if mode.twos_complement
+        && let Some(text) = format_twos(n, mode.radix, bits)
+    {
+        return text;
     }
     let mut digits = n.abs().to_str_radix(mode.radix).to_ascii_uppercase();
     if mode.leading_zeros {
@@ -219,51 +219,18 @@ fn render_float(value: RFloat, negative: bool) -> String {
     let body = if order >= 10 || order <= -5 {
         scientific(&digits, order, radix)
     } else {
-        fixed_point(&digits, exp)
+        float::fixed_point(&digits, exp)
     };
     with_prefix(radix, negative, &body, "#")
 }
 
 fn scientific(digits: &str, order: i64, radix: u32) -> String {
-    let mut frac: String = digits.chars().skip(1).collect();
-    while frac.ends_with('0') {
-        frac.pop();
-    }
-    let mant = if frac.is_empty() {
-        digits[..1].to_string()
-    } else {
-        format!("{}.{}", &digits[..1], frac)
-    };
+    let mant = float::scientific_mantissa(digits);
     // `e` is a digit once the radix passes 14, so the power is written out.
     if radix <= 14 {
         format!("{mant}e{order}")
     } else {
         format!("{mant}*{radix}^{order}")
-    }
-}
-
-fn fixed_point(digits: &str, exponent: i64) -> String {
-    if exponent >= 0 {
-        return format!("{digits}{}", "0".repeat(exponent as usize));
-    }
-    let places = (-exponent) as usize;
-    if places < digits.len() {
-        let split = digits.len() - places;
-        let (whole, frac) = digits.split_at(split);
-        let frac = frac.trim_end_matches('0');
-        if frac.is_empty() {
-            whole.to_string()
-        } else {
-            format!("{whole}.{frac}")
-        }
-    } else {
-        let zeros = places - digits.len();
-        let frac = digits.trim_end_matches('0');
-        if frac.is_empty() {
-            "0".to_string()
-        } else {
-            format!("0.{}{frac}", "0".repeat(zeros))
-        }
     }
 }
 
@@ -458,9 +425,10 @@ mod tests {
     use crate::float::DecFloat;
 
     fn mode_radix(radix: u32) -> Mode {
-        let mut mode = Mode::default();
-        mode.radix = radix;
-        mode
+        Mode {
+            radix,
+            ..Mode::default()
+        }
     }
 
     fn float_at(mantissa: i64, exponent: i64, prec: u32) -> DecFloat {
@@ -520,8 +488,10 @@ mod tests {
         let two_thousand = Value::real(Real::Float(float_at(2, 3, 1)));
         assert_eq!(format_value(&two_thousand, &bin), "2#1.111101e10");
 
-        let mut zeros = Mode::default();
-        zeros.leading_zeros = true;
+        let zeros = Mode {
+            leading_zeros: true,
+            ..Mode::default()
+        };
         assert_eq!(format_value(&Value::from_int(1), &zeros), "0000000001");
 
         let huge = Value::real(Real::Float(float_at(1, 20, 12)));
@@ -533,8 +503,10 @@ mod tests {
 
     #[test]
     fn grouping_clumps_integer_digits_only() {
-        let mut mode = Mode::default();
-        mode.group_digits = true;
+        let mode = Mode {
+            group_digits: true,
+            ..Mode::default()
+        };
         assert_eq!(format_value(&Value::from_int(123), &mode), "123");
         assert_eq!(format_value(&Value::from_int(1234), &mode), "1,234");
         assert_eq!(
@@ -592,9 +564,55 @@ mod tests {
         twos.word_size = 32;
         assert_eq!(format_value(&Value::from_int(-3), &twos), "16##FFFF,FFFD");
 
-        let mut zeros = Mode::default();
-        zeros.group_digits = true;
-        zeros.leading_zeros = true;
+        let zeros = Mode {
+            group_digits: true,
+            leading_zeros: true,
+            ..Mode::default()
+        };
         assert_eq!(format_value(&Value::from_int(1), &zeros), "0,000,000,001");
+    }
+
+    #[test]
+    fn display_parses_back_to_the_same_number() {
+        use crate::parse::parse_value;
+
+        let integers = [
+            Value::from_int(0),
+            Value::from_int(1),
+            Value::from_int(-42),
+            Value::from_int(255),
+            Value::from_int(1_000_000),
+        ];
+        let fraction = Value::from_rational(BigRational::new(BigInt::from(3), BigInt::from(4)));
+        let complex = Value::complex(Real::Int(BigInt::from(3)), Real::Int(BigInt::from(4)));
+        for radix in [2_u32, 8, 10, 16, 36] {
+            let mode = mode_radix(radix);
+            for value in integers.iter().chain([&fraction, &complex]) {
+                let text = format_value(value, &mode);
+                let back = parse_value(&text, &mode).unwrap_or_else(|err| panic!("{text}: {err}"));
+                assert_eq!(back.to_string(), value.to_string(), "{text}");
+            }
+        }
+
+        let floats = [
+            Value::real(Real::Float(float_at(1, 20, 12))),
+            Value::real(Real::Float(float_at(5, -1, 12))),
+            Value::real(Real::Float(float_at(-123_456, -3, 12))),
+        ];
+        for radix in [2_u32, 10, 16] {
+            let mode = mode_radix(radix);
+            for value in &floats {
+                let text = format_value(value, &mode);
+                let back = parse_value(&text, &mode).unwrap_or_else(|err| panic!("{text}: {err}"));
+                assert_eq!(format_value(&back, &mode), text, "{text}");
+            }
+        }
+
+        let mut twos = mode_radix(16);
+        twos.twos_complement = true;
+        twos.word_size = 8;
+        let text = format_value(&Value::from_int(-3), &twos);
+        assert_eq!(text, "16##FD");
+        assert_eq!(parse_value(&text, &twos).unwrap().to_string(), "-3");
     }
 }

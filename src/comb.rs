@@ -12,6 +12,7 @@ use num_integer::Integer;
 use num_rational::BigRational;
 use num_traits::{One, Signed, ToPrimitive, Zero};
 use std::cmp::Ordering;
+use std::sync::LazyLock;
 
 const MAX_FACTORIAL: u32 = 100_000;
 /// Trial division proves the answer up through this bound, matching Calc.
@@ -143,7 +144,7 @@ fn classify(n: &BigInt) -> PrimeKind {
             return PrimeKind::NotPrime;
         }
     }
-    let proven = n < &proven_bound();
+    let proven = n < proven_bound();
     if miller_rabin(n, WITNESSES) {
         if proven {
             PrimeKind::Prime
@@ -206,8 +207,10 @@ fn miller_rabin(n: &BigInt, witnesses: &[u32]) -> bool {
     true
 }
 
-fn proven_bound() -> BigInt {
-    BigInt::parse_bytes(PROVEN_BOUND.as_bytes(), 10).expect("prime bound")
+fn proven_bound() -> &'static BigInt {
+    static BOUND: LazyLock<BigInt> =
+        LazyLock::new(|| BigInt::parse_bytes(PROVEN_BOUND.as_bytes(), 10).expect("prime bound"));
+    &BOUND
 }
 
 fn choose_int(n: &BigInt, k: &BigInt) -> Result<BigInt, CalcError> {
