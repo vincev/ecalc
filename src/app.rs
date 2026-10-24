@@ -34,7 +34,7 @@ enum Prefix {
     D,
     /// `b` binary prefix. Only `b w` (word size) is used.
     B,
-    /// `k` combinatorics prefix: gcd, lcm, extended gcd, prime test.
+    /// `k` combinatorics prefix: gcd, lcm, extended gcd, modular inverse, prime test.
     K,
     /// `s` store and recall. `s s`, `s t`, `s r`, `s u`, `s l`, or a digit for `q0`–`q9`.
     S,
@@ -675,6 +675,7 @@ impl App {
             (Prefix::K, 'g') => self.engine.gcd(),
             (Prefix::K, 'l') => self.engine.lcm(),
             (Prefix::K, 'E') => self.engine.egcd(),
+            (Prefix::K, 'i') => self.engine.mod_inverse(),
             (Prefix::K, 'p') => self.engine.prime_test(),
             (Prefix::K, 'c') => self.engine.choose(),
             (Prefix::S, 's') => {
@@ -1321,6 +1322,34 @@ mod tests {
         let mut app = App::new();
         app.keys("kf");
         assert_eq!(app.engine().message(), "unknown key");
+
+        assert_eq!(top("3\n7\nki"), "5");
+        assert_eq!(top("5\n24\nki"), "5");
+        assert_eq!(top("_3\n7\nki"), "2");
+        // Calc's tutorial: 21 divided by 5, modulo 24, is 9.
+        assert_eq!(top("21\n5\n24\nki*24\n%"), "9");
+
+        let mut app = App::new();
+        app.keys("4\n6\nki");
+        assert_eq!(app.engine().message(), "no modular inverse");
+        assert!(app.engine().is_error());
+        assert_eq!(app.engine().stack_lines(), ["4", "6"]);
+
+        let mut app = App::new();
+        app.keys("3\n7\nki");
+        assert_eq!(app.top_string().as_deref(), Some("5"));
+        app.keys("u");
+        assert_eq!(app.engine().stack_lines(), ["3", "7"]);
+
+        let mut app = App::new();
+        app.keys("5\nki");
+        assert_eq!(app.engine().message(), "too few arguments");
+        assert_eq!(app.top_string().as_deref(), Some("5"));
+
+        let mut app = App::new();
+        app.keys("5\n_7\nki");
+        assert_eq!(app.engine().message(), "modulus must be positive");
+        assert_eq!(app.engine().stack_lines(), ["5", "-7"]);
 
         assert_eq!(top("10\n3\nkc"), "120");
         assert_eq!(top("5\n2\nHkc"), "20");

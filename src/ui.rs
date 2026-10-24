@@ -97,7 +97,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_prompt(frame.buffer_mut(), chunks[1], app);
     draw_shortcuts(frame.buffer_mut(), chunks[3], app);
     if app.help_open() {
-        draw_help(frame.buffer_mut(), area);
+        draw_help(frame.buffer_mut(), area, above_prompt(area, chunks[1]));
     }
     if app.docs_open() {
         draw_docs(frame.buffer_mut(), area, app);
@@ -107,6 +107,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
     }
     if app.consts_open() {
         draw_constants(frame.buffer_mut(), area, app);
+    }
+}
+
+/// The input's width, from the top of the window down to the prompt border.
+fn above_prompt(window: Rect, prompt: Rect) -> Rect {
+    Rect {
+        x: prompt.x,
+        y: window.y,
+        width: prompt.width,
+        height: prompt.y.saturating_sub(window.y),
     }
 }
 
@@ -366,6 +376,7 @@ const HELP_GROUPS: [&[(&str, &str)]; 4] = [
         ("&", "recip"),
         ("Q", "sqrt"),
         ("I Q", "square"),
+        ("I ^", "root"),
         ("A", "abs"),
         ("f A", "abs^2"),
         ("I", "inverse"),
@@ -389,6 +400,7 @@ const HELP_GROUPS: [&[(&str, &str)]; 4] = [
         ("k g", "gcd"),
         ("k l", "lcm"),
         ("k E", "egcd"),
+        ("k i", "invmod"),
         ("k p", "prime"),
         ("k c", "choose"),
         ("Hk c", "perm"),
@@ -585,9 +597,16 @@ impl Dialog {
     }
 }
 
-/// Centered shortcuts box, in the shape of Grok Build's cheatsheet: gray frame,
-/// bold title on the top border, and close hints centered inside the bottom.
-fn draw_help(buf: &mut Buffer, area: Rect) {
+/// Shortcuts box above the input. The same number of rows sits above the frame
+/// as between the frame and the prompt, and the frame is centered on the
+/// input's width. A terminal too short for that band uses the whole window.
+fn draw_help(buf: &mut Buffer, window: Rect, above: Rect) {
+    let chrome = 2 + HELP_V_PAD + HELP_FOOTER;
+    let area = if above.width >= 10 && above.height >= chrome {
+        above
+    } else {
+        window
+    };
     let width = 68u16.min(area.width);
     let inner_w = width.saturating_sub(2 + HELP_H_PAD * 2);
     if inner_w < 8 {
@@ -1574,7 +1593,7 @@ mod tests {
         assert_eq!(idle_chars[idle_corner], '╯');
 
         app.keys("?");
-        let buffer = render(&app, 50, 18);
+        let buffer = render(&app, 80, 40);
         let rows = lines(&buffer);
         assert!(rows.iter().any(|row| row.contains("undo")));
         assert!(rows.iter().any(|row| row.contains("fraction")));
@@ -1599,6 +1618,48 @@ mod tests {
         assert!(
             longest - shortest <= 1,
             "help columns should differ by at most one row"
+        );
+        let on_last = columns
+            .iter()
+            .filter(|column| column.len() == longest)
+            .count();
+        assert!(
+            on_last >= 2,
+            "the last shortcut row should hold at least two keys"
+        );
+    }
+
+    #[test]
+    fn help_is_centered_above_the_input() {
+        let mut app = App::new();
+        app.keys("?");
+        let buffer = render(&app, 80, 40);
+        let rows = lines(&buffer);
+        let top = rows
+            .iter()
+            .position(|row| row.contains('┌'))
+            .expect("help top");
+        let bottom = rows
+            .iter()
+            .rposition(|row| row.contains('└'))
+            .expect("help bottom");
+        let prompt = rows
+            .iter()
+            .position(|row| row.contains('╭'))
+            .expect("input");
+        let above = top;
+        let below = prompt - bottom - 1;
+        assert_eq!(above, below, "equal rows above the box and above the input");
+        assert!(prompt > bottom, "the box stays above the input");
+
+        let help_left = col(&rows[top], '┌');
+        let help_right = col(&rows[top], '┐');
+        let input_left = col(&rows[prompt], '╭');
+        let input_right = col(&rows[prompt], '╮');
+        assert_eq!(
+            help_left - input_left,
+            input_right - help_right,
+            "the box is centered on the input"
         );
     }
 

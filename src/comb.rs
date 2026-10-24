@@ -1,4 +1,4 @@
-//! Gcd, lcm, factorial, choose, permutations, and the prime test.
+//! Gcd, lcm, factorial, choose, permutations, the prime test, and modular inverse.
 //!
 //! These stay on the number tower already in use. Extended gcd pushes three
 //! integers instead of a vector. Prime factors are left out for the same
@@ -44,6 +44,21 @@ pub fn extended_gcd(x: &Value, y: &Value) -> Result<(BigInt, BigInt, BigInt), Ca
     let y = as_integer(y, "extended gcd needs integers")?;
     let eg = x.extended_gcd(&y);
     Ok((eg.x, eg.y, eg.gcd))
+}
+
+/// Inverse of `a` modulo `m`. `a` is second on the stack and `m` is on top.
+/// The result `b` satisfies `0 <= b < m` and `a*b ≡ 1 (mod m)`.
+pub fn mod_inverse(a: &Value, m: &Value, _mode: &Mode) -> Result<Value, CalcError> {
+    let a = as_integer(a, "modular inverse needs integers")?;
+    let m = as_integer(m, "modular inverse needs integers")?;
+    if !m.is_positive() {
+        return Err(CalcError::Domain("modulus must be positive"));
+    }
+    let eg = a.extended_gcd(&m);
+    if !eg.gcd.is_one() {
+        return Err(CalcError::Domain("no modular inverse"));
+    }
+    Ok(Value::from_int(eg.x.mod_floor(&m)))
 }
 
 pub fn factorial(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
@@ -484,6 +499,64 @@ mod tests {
         assert_eq!(g, BigInt::from(5));
         assert_eq!(&a * 35 + &b * 15, g);
         assert_eq!((a, b), (BigInt::from(1), BigInt::from(-2)));
+    }
+
+    #[test]
+    fn modular_inverse_reduces_the_bezout_coefficient() {
+        let mode = mode();
+        let check = |a: i64, m: i64, expect: &str| {
+            let b = mod_inverse(&Value::from_int(a), &Value::from_int(m), &mode).unwrap();
+            assert_eq!(b.to_string(), expect);
+            let prod = crate::value::mul(&Value::from_int(a), &b, &mode).unwrap();
+            let rem = crate::value::modulo(&prod, &Value::from_int(m), &mode).unwrap();
+            assert_eq!(rem.to_string(), "1");
+        };
+        // 3*5 = 15 ≡ 1 (mod 7). 5*5 = 25 ≡ 1 (mod 24), the Calc tutorial divisor.
+        check(3, 7, "5");
+        check(5, 24, "5");
+        check(10, 7, "5");
+        check(-3, 7, "2");
+        check(-10, 7, "2");
+        assert_eq!(
+            mod_inverse(&Value::from_int(8), &Value::from_int(1), &mode)
+                .unwrap()
+                .to_string(),
+            "0"
+        );
+
+        let three = Value::real(Real::Float(DecFloat::from_i64(3, 12)));
+        assert_eq!(
+            mod_inverse(&three, &Value::from_int(7), &mode)
+                .unwrap()
+                .to_string(),
+            "5"
+        );
+
+        assert_eq!(
+            mod_inverse(&Value::from_int(4), &Value::from_int(6), &mode)
+                .unwrap_err()
+                .to_string(),
+            "no modular inverse"
+        );
+        assert_eq!(
+            mod_inverse(&Value::from_int(5), &Value::from_int(0), &mode)
+                .unwrap_err()
+                .to_string(),
+            "modulus must be positive"
+        );
+        assert_eq!(
+            mod_inverse(&Value::from_int(5), &Value::from_int(-7), &mode)
+                .unwrap_err()
+                .to_string(),
+            "modulus must be positive"
+        );
+        let half = Value::from_rational(BigRational::new(1.into(), 2.into()));
+        assert_eq!(
+            mod_inverse(&half, &Value::from_int(7), &mode)
+                .unwrap_err()
+                .to_string(),
+            "modular inverse needs integers"
+        );
     }
 
     #[test]

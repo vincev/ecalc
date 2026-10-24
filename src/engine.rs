@@ -305,6 +305,11 @@ impl Engine {
         self.binop(comb::lcm);
     }
 
+    /// Inverse of the second value modulo the top. `3 7 k i` leaves `5`.
+    pub fn mod_inverse(&mut self) {
+        self.binop(comb::mod_inverse);
+    }
+
     /// `k c` chooses. `H k c` counts permutations. The count is on top.
     pub fn choose(&mut self) {
         if self.hyperbolic {
@@ -314,7 +319,7 @@ impl Engine {
         }
     }
 
-    /// Pop `y` then `x`. Push `a`, `b`, and `g` so `g` is on top and `g = a*x + b*y`.
+    /// `y` is on top and `x` is under it. Push `a`, `b`, and `g` so `g` is on top and `a*x + b*y = g`.
     pub fn egcd(&mut self) {
         let n = self.stack.len();
         if n < 2 {

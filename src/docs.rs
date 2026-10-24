@@ -204,7 +204,13 @@ const ENTRIES: &[Entry] = &[
         keys: "k E",
         name: "egcd",
         summary: "extended gcd",
-        body: "k E takes x on top and y under it. It pushes a, then b, then g, with g on top, so g = a*x + b*y.",
+        body: "k E takes y on top and x under it. It pushes a, then b, then g, with g on top, so a*x + b*y = g. 2 5 k E leaves -2, then 1, then 1, and (-2)*2 + 1*5 = 1.",
+    },
+    Entry {
+        keys: "k i",
+        name: "invmod",
+        summary: "modular inverse",
+        body: "k i replaces a and m with b. m is on top, 0 <= b < m, and a*b is 1 modulo m. 3 7 k i is 5. The modulus is a positive integer. If the gcd is not 1, the message is no modular inverse.",
     },
     Entry {
         keys: "k p",
