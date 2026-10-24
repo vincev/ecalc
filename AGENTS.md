@@ -75,7 +75,8 @@ s l       list stored variables; letter or digit recalls, Tab pages
 s 0-9     store into q0–q9; t 0-9 pops into one; r 0-9 recalls one
 u         undo           C-r redo
           undo restores the stack and the variables
-q ? Esc   quit, help, cancel entry or prefixes
+q ? Esc   quit, shortcut list, cancel entry or prefixes
+? ?       command pages. Type to search. Esc closes. ? returns to the list.
 ```
 
 `L` follows Calc: it flips the inverse flag and then uses the exp/ln family, so `L` is ln and `I L` is exp.
@@ -106,14 +107,14 @@ Algebraic entry (`'`), formulas, vectors, matrices, units, dates, HMS, the trail
 
 Working RPN calculator. `cargo test` is green (float, value, parser, keys, and a headless screen test). `cargo build` produces the ratatui UI. That UI was checked with `TestBackend`, not by typing in a live terminal.
 
-The screen uses the GrokNight palette: dark canvas, a rounded `❯` prompt with the mode on its bottom border, and a shortcut bar (`ret:push`, bold key, muted label). Content sits two columns in from each edge. Under the prompt is a blank row, then the shortcuts, then a blank row. The typed text sits one column inside the prompt border. `?` opens a centered Shortcuts box: gray `┌┐` frame, bold title on the top edge, `[x]` at the top right, and `esc close` centered inside the bottom. Bindings sit in four columns (fewer when the terminal is narrow), bold key and muted label.
+The screen uses the GrokNight palette: dark canvas, a rounded `❯` prompt with the mode on its bottom border, and a shortcut bar (`ret:push`, bold key, muted label). Content sits two columns in from each edge. Under the prompt is a blank row, then the shortcuts, then a blank row. The typed text sits one column inside the prompt border. `?` opens a centered Shortcuts box: gray `┌┐` frame, bold title on the top edge, `[x]` at the top right, and `esc close` centered inside the bottom. Bindings sit in four columns (fewer when the terminal is narrow), bold key and muted label. `?` again opens Commands, in the same frame. The top row is a search field. Several matches show a short list and the selected page under a rule. One match shows only that page. Up and Down, or Tab and Shift-Tab, move and wrap. Backspace edits the search. Esc closes. `?` returns to the shortcut list. `q` is a search letter there.
 
 Entry and stack details that are easy to get wrong:
 
 - Keep `num-bigint` at 0.4.8 (`num-rational` 0.4 needs that major).
 - `DecFloat::from_decimal(mantissa, exponent, prec)` builds a typed decimal. The stored precision is the number of significant digits typed, capped at the current precision.
 - A typed exponent, decimal or radix, outside ±1000000 is overflow. `1e1000000` and `1e-1000000` still parse. An exponent that does not fit in a 64-bit integer is a bad exponent.
-- `q` quits when nothing is being typed. While precision, radix, or word size is being typed, `q` cancels that prompt and leaves the stack. A variable name can contain `q`. `q` does not quit while `K` or `s l` is open.
+- `q` quits when nothing is being typed. While precision, radix, or word size is being typed, `q` cancels that prompt and leaves the stack. A variable name can contain `q`. `q` does not quit while `K`, `s l`, or the command reference is open.
 - Do not polish add, sub, mul, or div. `(1/3)*3` can display as `0.999…`, and `sqrt(2)^2` as `1.999…`.
 - `L` flips inverse in `app.rs`, then calls `Engine::exp_family`. `E` does not flip. `push` and duplicate do not clear `I` or `H`.
 - `n` while typing toggles a leading `_`. `+` and `-` while typing are exponent signs, or digits inside an unclosed `(…)`. Otherwise they add and subtract. Space inside an unparsed `(…` inserts a space. `:` while typing is a fraction; on an empty entry it is fraction division.

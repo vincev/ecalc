@@ -99,6 +99,9 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if app.help_open() {
         draw_help(frame.buffer_mut(), area);
     }
+    if app.docs_open() {
+        draw_docs(frame.buffer_mut(), area, app);
+    }
     if app.vars_open() {
         draw_variables(frame.buffer_mut(), area, app);
     }
@@ -597,7 +600,7 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
         return;
     };
     dialog.title(buf, "Shortcuts");
-    dialog.note(buf, "any key closes", Style::default().fg(GRAY).bg(BG));
+    dialog.note(buf, "? for a description", Style::default().fg(GRAY).bg(BG));
     if dialog.content_h > 0 {
         let content = Rect {
             x: dialog.inner_x,
@@ -607,7 +610,306 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
         };
         draw_help_grid(buf, content, &columns, col_w, dialog.content_h);
     }
-    dialog.footer(buf, &[("esc", "close"), ("q", "quit")]);
+    dialog.footer(buf, HELP_HINTS);
+}
+
+const HELP_HINTS: &[(&str, &str)] = &[("?", "docs"), ("esc", "close"), ("q", "quit")];
+
+const DOCS_HINTS: &[(&str, &str)] = &[
+    ("↑↓", "move"),
+    ("tab", "next"),
+    ("esc", "close"),
+    ("?", "list"),
+];
+
+/// Rows of command text inside the reference, before the dialog chrome.
+const DOCS_CONTENT_ROWS: u16 = 16;
+
+/// Searchable command pages. One match fills the box. Several matches keep a
+/// short list and the selected page under it.
+fn draw_docs(buf: &mut Buffer, area: Rect, app: &App) {
+    let Some(dialog) = Dialog::open(buf, area, DOCS_CONTENT_ROWS) else {
+        return;
+    };
+    dialog.title(buf, "Commands");
+    let matches = app.docs_matches();
+    let cursor = app.docs_cursor();
+    draw_docs_query(&dialog, buf, app.docs_query(), cursor, matches.len());
+    let split = docs_split(dialog.content_h, matches.len());
+    let mut y = dialog.content_y;
+    if split.list > 0 {
+        let start = docs_window(cursor, matches.len(), split.list as usize);
+        for row in 0..split.list as usize {
+            let Some(entry) = matches.get(start + row) else {
+                break;
+            };
+            draw_docs_row(
+                buf,
+                dialog.inner_x,
+                y,
+                dialog.inner_x + dialog.text_w,
+                entry,
+                start + row == cursor,
+            );
+            y += 1;
+        }
+    }
+    if split.rule {
+        paint_rule(buf, dialog.inner_x, y, dialog.text_w);
+        y += 1;
+    }
+    if split.article > 0 {
+        if let Some(entry) = matches.get(cursor) {
+            draw_docs_article(
+                buf,
+                dialog.inner_x,
+                y,
+                dialog.inner_x + dialog.text_w,
+                split.article,
+                entry,
+            );
+        } else {
+            paint_str(
+                buf,
+                dialog.inner_x,
+                y,
+                dialog.inner_x + dialog.text_w,
+                "no match",
+                Style::default().fg(GRAY).bg(BG),
+            );
+        }
+    }
+    dialog.footer(buf, DOCS_HINTS);
+}
+
+struct DocsSplit {
+    list: u16,
+    rule: bool,
+    article: u16,
+}
+
+fn docs_split(content_h: u16, matches: usize) -> DocsSplit {
+    if matches <= 1 || content_h < 4 {
+        return DocsSplit {
+            list: 0,
+            rule: false,
+            article: content_h,
+        };
+    }
+    let list = (matches as u16).min(6).min(content_h - 4).max(1);
+    DocsSplit {
+        list,
+        rule: true,
+        article: content_h - list - 1,
+    }
+}
+
+fn docs_window(cursor: usize, matches: usize, rows: usize) -> usize {
+    if matches <= rows {
+        return 0;
+    }
+    cursor.saturating_sub(rows / 2).min(matches - rows)
+}
+
+fn draw_docs_query(dialog: &Dialog, buf: &mut Buffer, query: &str, cursor: usize, total: usize) {
+    let y = dialog.rect.y + 1;
+    let end = dialog.inner_x + dialog.text_w;
+    let page = if total == 0 {
+        String::new()
+    } else {
+        format!("{}/{}", cursor + 1, total)
+    };
+    let page_w = page.chars().count() as u16;
+    let text_end = if page_w == 0 {
+        end
+    } else {
+        end.saturating_sub(page_w + 1)
+    };
+    let mut col = paint_str(buf, dialog.inner_x, y, text_end, "❯ ", arrow_style());
+    if query.is_empty() {
+        paint_str(
+            buf,
+            col,
+            y,
+            text_end,
+            "type to search",
+            Style::default().fg(GRAY).bg(BG),
+        );
+    } else {
+        col = paint_str(buf, col, y, text_end, query, text_style());
+        if col < text_end {
+            paint_char(buf, col, y, '▍', arrow_style());
+        }
+    }
+    if page_w > 0 {
+        paint_str(
+            buf,
+            end - page_w,
+            y,
+            end,
+            &page,
+            Style::default().fg(GRAY).bg(BG),
+        );
+    }
+}
+
+fn draw_docs_row(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    end: u16,
+    entry: &crate::docs::Entry,
+    selected: bool,
+) {
+    let key_style = Style::default()
+        .fg(if selected { FG } else { FG_SECONDARY })
+        .bg(BG)
+        .add_modifier(Modifier::BOLD);
+    let name_style = if selected {
+        Style::default().fg(FG).bg(BG).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(GRAY).bg(BG)
+    };
+    let summary_style = Style::default().fg(if selected { FG } else { GRAY }).bg(BG);
+    let mut col = paint_str(
+        buf,
+        x,
+        y,
+        end,
+        if selected { "❯ " } else { "  " },
+        if selected {
+            arrow_style()
+        } else {
+            Style::default().bg(BG)
+        },
+    );
+    col = paint_field(buf, col, y, end, entry.keys, 4, key_style);
+    col = paint_gap(buf, col, y, end, 2);
+    col = paint_field(buf, col, y, end, entry.name, 10, name_style);
+    col = paint_gap(buf, col, y, end, 2);
+    paint_str(buf, col, y, end, entry.summary, summary_style);
+}
+
+fn paint_field(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    end: u16,
+    text: &str,
+    width: u16,
+    style: Style,
+) -> u16 {
+    let field_end = x.saturating_add(width).min(end);
+    let mut col = paint_str(buf, x, y, field_end, text, style);
+    while col < field_end {
+        paint_char(buf, col, y, ' ', Style::default().bg(BG));
+        col += 1;
+    }
+    col
+}
+
+fn paint_gap(buf: &mut Buffer, x: u16, y: u16, end: u16, width: u16) -> u16 {
+    let gap_end = x.saturating_add(width).min(end);
+    let mut col = x;
+    while col < gap_end {
+        paint_char(buf, col, y, ' ', Style::default().bg(BG));
+        col += 1;
+    }
+    col
+}
+
+fn paint_rule(buf: &mut Buffer, x: u16, y: u16, width: u16) {
+    let style = Style::default().fg(GRAY_DIM).bg(BG);
+    for col in x..x.saturating_add(width) {
+        paint_char(buf, col, y, '─', style);
+    }
+}
+
+fn draw_docs_article(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    end: u16,
+    rows: u16,
+    entry: &crate::docs::Entry,
+) {
+    if rows == 0 || end <= x {
+        return;
+    }
+    let head = format!("{}  {}", entry.keys, entry.name);
+    paint_str(
+        buf,
+        x,
+        y,
+        end,
+        &head,
+        Style::default().fg(FG).bg(BG).add_modifier(Modifier::BOLD),
+    );
+    if rows == 1 {
+        return;
+    }
+    paint_str(
+        buf,
+        x,
+        y + 1,
+        end,
+        entry.summary,
+        Style::default().fg(GRAY).bg(BG),
+    );
+    if rows <= 2 {
+        return;
+    }
+    let gap = u16::from(rows >= 5);
+    let body_y = y + 2 + gap;
+    let body_rows = rows - 2 - gap;
+    let width = (end - x) as usize;
+    for (row, line) in wrap_words(entry.body, width)
+        .into_iter()
+        .take(body_rows as usize)
+        .enumerate()
+    {
+        paint_str(
+            buf,
+            x,
+            body_y + row as u16,
+            end,
+            &line,
+            Style::default().fg(FG).bg(BG),
+        );
+    }
+}
+
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut line));
+        }
+        if word.chars().count() > width {
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+            }
+            for ch in word.chars() {
+                if line.chars().count() >= width {
+                    lines.push(std::mem::take(&mut line));
+                }
+                line.push(ch);
+            }
+            continue;
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// `(columns, column width)` for the shortcut grid. Prefers four columns.
@@ -907,8 +1209,10 @@ fn draw_shortcuts(buf: &mut Buffer, area: Rect, app: &App) {
 
     let var_hints = var_footer_hints(app);
     let const_hints = const_footer_hints(app);
-    let hints: &[(&str, &str)] = if app.help_open() {
-        &[("esc", "close"), ("q", "quit")]
+    let hints: &[(&str, &str)] = if app.docs_open() {
+        DOCS_HINTS
+    } else if app.help_open() {
+        HELP_HINTS
     } else if app.vars_open() {
         &var_hints
     } else if app.consts_open() {
@@ -975,6 +1279,8 @@ fn map_key(key: &KeyEvent) -> Option<Key> {
         KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => Some(Key::ShiftTab),
         KeyCode::Tab => Some(Key::Tab),
         KeyCode::Esc => Some(Key::Esc),
+        KeyCode::Up => Some(Key::Up),
+        KeyCode::Down => Some(Key::Down),
         KeyCode::Char(c) if ctrl => Some(Key::Ctrl(normalize_ctrl(c))),
         KeyCode::Char(c) => Some(Key::Char(c)),
         _ => None,
@@ -1022,6 +1328,14 @@ mod tests {
             .skip(from)
             .take(last.saturating_sub(from) + 1)
             .any(|c| c != ' ')
+    }
+
+    fn screen(app: &App, width: u16, height: u16) -> String {
+        lines(&render(app, width, height))
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     fn lines(buffer: &Buffer) -> Vec<String> {
@@ -1286,6 +1600,62 @@ mod tests {
             longest - shortest <= 1,
             "help columns should differ by at most one row"
         );
+    }
+
+    #[test]
+    fn every_shortcut_has_a_page() {
+        for group in HELP_GROUPS {
+            for (key, label) in group {
+                assert!(
+                    crate::docs::entries()
+                        .iter()
+                        .any(|entry| entry.keys == *key && entry.name == *label),
+                    "{key} {label} is missing from the command reference"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn command_reference_searches() {
+        let mut app = App::new();
+        app.keys("??");
+        let text = screen(&app, 80, 30);
+        assert!(text.contains("Commands"));
+        assert!(text.contains("type to search"));
+        assert!(text.contains("duplicates the top"));
+        assert!(!app.should_quit());
+
+        app.press(Key::Down);
+        let text = screen(&app, 80, 30);
+        assert!(text.contains("erases the last typed character"));
+        app.press(Key::Up);
+        assert_eq!(app.docs_cursor(), 0);
+
+        app.keys("isqrt");
+        assert!(!app.should_quit());
+        assert_eq!(app.docs_query(), "isqrt");
+        let text = screen(&app, 80, 30);
+        assert!(text.contains("integer square root"));
+        assert!(text.contains("10 f Q is 3"));
+        assert!(text.contains("1/1"));
+        assert!(!text.contains("type to search"));
+        assert!(!text.contains("Shortcuts"));
+
+        app.keys("\u{7f}\u{7f}\u{7f}\u{7f}\u{7f}zzz");
+        let text = screen(&app, 80, 30);
+        assert!(text.contains("no match"));
+
+        app.press(Key::Esc);
+        assert!(!app.docs_open());
+        assert!(!app.help_open());
+
+        app.keys("???");
+        assert!(app.help_open());
+        assert!(!app.docs_open());
+        let text = screen(&app, 80, 30);
+        assert!(text.contains("Shortcuts"));
+        assert!(text.contains("? for a description"));
     }
 
     #[test]

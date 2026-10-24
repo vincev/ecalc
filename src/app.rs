@@ -20,6 +20,8 @@ pub enum Key {
     ShiftTab,
     Esc,
     Ctrl(char),
+    Up,
+    Down,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +78,10 @@ pub struct App {
     prefix: Prefix,
     pending: Pending,
     help: bool,
+    /// `? ?` command pages. Typing filters them. `q` is a letter here.
+    docs_open: bool,
+    docs_query: String,
+    docs_cursor: usize,
     /// `s l` dialog. Letters and digits recall; Tab moves a page.
     vars_open: bool,
     var_page: usize,
@@ -101,6 +107,9 @@ impl App {
             prefix: Prefix::None,
             pending: Pending::None,
             help: false,
+            docs_open: false,
+            docs_query: String::new(),
+            docs_cursor: 0,
             vars_open: false,
             var_page: 0,
             var_note: String::new(),
@@ -121,6 +130,28 @@ impl App {
 
     pub fn help_open(&self) -> bool {
         self.help
+    }
+
+    pub fn docs_open(&self) -> bool {
+        self.docs_open
+    }
+
+    pub fn docs_query(&self) -> &str {
+        &self.docs_query
+    }
+
+    /// Index into [`Self::docs_matches`], clamped when the filter shrinks.
+    pub fn docs_cursor(&self) -> usize {
+        let n = self.docs_matches().len();
+        if n == 0 {
+            0
+        } else {
+            self.docs_cursor.min(n - 1)
+        }
+    }
+
+    pub(crate) fn docs_matches(&self) -> Vec<&'static crate::docs::Entry> {
+        crate::docs::search(&self.docs_query)
     }
 
     pub fn vars_open(&self) -> bool {
@@ -268,7 +299,13 @@ impl App {
         );
         let quit = match key {
             Key::Ctrl('c') | Key::Ctrl('C') => true,
-            Key::Char('q') => !naming && !numeric_pending && !self.vars_open && !self.consts_open,
+            Key::Char('q') => {
+                !naming
+                    && !numeric_pending
+                    && !self.vars_open
+                    && !self.consts_open
+                    && !self.docs_open
+            }
             _ => false,
         };
         if quit {
@@ -284,7 +321,15 @@ impl App {
             return;
         }
         if self.help {
-            self.help = false;
+            if matches!(key, Key::Char('?')) {
+                self.open_docs();
+            } else {
+                self.help = false;
+            }
+            return;
+        }
+        if self.docs_open {
+            self.press_docs(key);
             return;
         }
         if self.vars_open {
@@ -319,8 +364,46 @@ impl App {
             }
             Key::Ctrl('r') | Key::Ctrl('R') => self.engine.redo(),
             Key::Ctrl(_) => self.engine.show("unknown key"),
-            Key::Esc => {}
+            Key::Up | Key::Down | Key::Esc => {}
         }
+    }
+
+    fn open_docs(&mut self) {
+        self.help = false;
+        self.docs_open = true;
+        self.docs_query.clear();
+        self.docs_cursor = 0;
+    }
+
+    fn press_docs(&mut self, key: Key) {
+        match key {
+            Key::Char('?') => {
+                self.docs_open = false;
+                self.docs_query.clear();
+                self.docs_cursor = 0;
+                self.help = true;
+            }
+            Key::Backspace => {
+                self.docs_query.pop();
+                self.docs_cursor = 0;
+            }
+            Key::Up | Key::ShiftTab => self.move_docs(-1),
+            Key::Down | Key::Tab => self.move_docs(1),
+            Key::Char(c) => {
+                self.docs_query.push(c);
+                self.docs_cursor = 0;
+            }
+            Key::Enter | Key::Ctrl(_) | Key::Esc => {}
+        }
+    }
+
+    fn move_docs(&mut self, delta: isize) {
+        let n = self.docs_matches().len();
+        if n == 0 {
+            return;
+        }
+        let cursor = self.docs_cursor.min(n - 1) as isize;
+        self.docs_cursor = (cursor + delta).rem_euclid(n as isize) as usize;
     }
 
     fn cancel(&mut self) {
@@ -328,6 +411,9 @@ impl App {
         self.prefix = Prefix::None;
         self.pending = Pending::None;
         self.help = false;
+        self.docs_open = false;
+        self.docs_query.clear();
+        self.docs_cursor = 0;
         self.vars_open = false;
         self.var_page = 0;
         self.var_note.clear();
