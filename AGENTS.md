@@ -29,7 +29,7 @@ Quit with `q`.
 - Default fraction mode is off, matching Calc. `/` of integers that divide evenly stays an integer; otherwise it is a float at the current precision. `m f` turns fraction mode on. `:` outside entry is fraction division.
 - Floats are decimal, so `0.1 + 0.2` is `0.3`.
 - A negative square root, and non-real powers, become rectangular complex `(re, im)`. A zero imaginary part collapses back to a real.
-- Angle mode defaults to degrees. It applies to real trig and to both parts of complex trig, same idea as Calc. `P` pushes pi. `H P` pushes e.
+- Angle mode defaults to degrees. It applies to real trig and to both parts of complex trig, same idea as Calc. A degree angle is reduced modulo 360 before conversion, including a non-integer (`12345678901.5` is `181.5` degrees) and an integer float whose exponent is past 100000. `P` pushes pi. `H P` pushes e.
 - Inverse (`I`) and hyperbolic (`H`) are one-shot prefixes.
 
 ## Keys

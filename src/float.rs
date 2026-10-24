@@ -160,12 +160,22 @@ impl DecFloat {
             return Ok(Self::zero(prec));
         }
         let work = work_prec(prec);
-        let a = self.round_to(work + 2);
-        let b = rhs.round_to(work + 2);
-        let scale = work + 2;
+        // The quotient has to keep `guard` digits when the dividend's
+        // mantissa is shorter than the divisor's. `1e100 / (pi/2)` is
+        // the case argument reduction rounds to an integer.
+        let guard = work.saturating_add(2);
+        let a = self.round_to(guard);
+        let b = rhs.round_to(guard);
+        let scale = guard
+            .saturating_add(digit_count(&b.mantissa))
+            .saturating_sub(digit_count(&a.mantissa));
         let num = &a.mantissa * pow10(scale);
         let q = div_round(&num, &b.mantissa);
-        let exp = a.exponent - b.exponent - scale as i64;
+        let exp = a
+            .exponent
+            .checked_sub(b.exponent)
+            .and_then(|e| e.checked_sub(i64::from(scale)))
+            .ok_or(CalcError::Overflow)?;
         Ok(Self::from_unnormalized(q, exp, prec))
     }
 
@@ -1083,5 +1093,33 @@ mod tests {
         assert!(matches!(huge.exp(12), Err(CalcError::Overflow)));
         assert!(matches!(huge.sin(12), Err(CalcError::Overflow)));
         assert!(matches!(huge.neg().exp(12), Err(CalcError::Overflow)));
+    }
+
+    #[test]
+    fn short_dividend_keeps_divisor_digits() {
+        // 1/pi at 40 digits. The old scale stopped around 20 digits.
+        let inv = DecFloat::one(40).div(&DecFloat::pi(40), 40).unwrap();
+        assert_eq!(
+            inv.to_string(),
+            "0.3183098861837906715377675267450287240689"
+        );
+    }
+
+    #[test]
+    fn large_radian_sine_is_reduced() {
+        // Checked against Emacs Calc 31.1 at precision 140, where the
+        // reduction has enough digits of pi. Precision 12 rounds those.
+        assert_eq!(
+            p("1e100", 12).sin(12).unwrap().to_string(),
+            "-0.372376123661"
+        );
+        assert_eq!(
+            p("1e24", 12).sin(12).unwrap().to_string(),
+            "-0.996472229103"
+        );
+        assert_eq!(
+            p("1.23456789012e40", 12).sin(12).unwrap().to_string(),
+            "-0.937086713817"
+        );
     }
 }

@@ -927,14 +927,15 @@ pub fn cos(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         {
             return Ok(quadrant_cos(&n));
         }
+        // An exact degree stays exact when shifted by 90. In radians that
+        // shift is pi/2 rounded to the display precision, and it disappears
+        // against a large argument, so cosine and tangent would both be wrong.
+        if v.is_real() {
+            let shifted = add(v, &quarter_turn(mode)?, mode)?;
+            return sin(&shifted, mode);
+        }
     } else if real_is_zero(v) {
         return Ok(Value::from_int(1));
-    }
-    // cos(x) = sin(x + 90°) only for a real, in the current angle mode.
-    // A complex value uses the direct formula, so it never builds that shift.
-    if v.is_real() {
-        let shifted = add(v, &quarter_turn(mode)?, mode)?;
-        return sin(&shifted, mode);
     }
     trig_complex(v, mode, false)
 }
@@ -945,6 +946,19 @@ pub fn tan(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         && degree_mod(&n).is_multiple_of(&BigInt::from(45))
     {
         return tan_exact_degrees(&n);
+    }
+    // One division of the working-precision sine and cosine. Dividing the
+    // already rounded values moves the last digit of tan(1e100).
+    if v.is_real() {
+        let radians = to_radians(v, mode)?;
+        let (x, _) = radians.parts();
+        let arg_prec = if mode.angle == AngleMode::Degrees {
+            mode.prec + 8
+        } else {
+            mode.prec
+        };
+        let tangent = x.to_float(arg_prec)?.tan(mode.prec)?;
+        return Ok(polish(Value::Real(Real::Float(tangent)), mode.prec));
     }
     let s = sin(v, mode)?;
     let c = cos(v, mode)?;
@@ -1020,8 +1034,15 @@ fn quarter_turn(mode: &Mode) -> Result<Value, CalcError> {
 fn trig_complex(v: &Value, mode: &Mode, want_sin: bool) -> Result<Value, CalcError> {
     let radians = to_radians(v, mode)?;
     let (x, y) = radians.parts();
-    let xf = x.to_float(mode.prec)?;
-    let yf = y.to_float(mode.prec)?;
+    // Degrees are converted at prec+8. Rounding that angle back to the
+    // display precision first pushes the last sine digit the wrong way.
+    let arg_prec = if mode.angle == AngleMode::Degrees {
+        mode.prec + 8
+    } else {
+        mode.prec
+    };
+    let xf = x.to_float(arg_prec)?;
+    let yf = y.to_float(arg_prec)?;
     if yf.is_zero() {
         let (s, c) = xf.sin_cos(mode.prec)?;
         return Ok(polish(
@@ -1061,8 +1082,72 @@ fn to_radians(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
             mode.prec + 8,
         )?)));
     }
+    if let Value::Real(r) = v
+        && let Some(reduced) = reduce_real_degrees(r)
+    {
+        return Ok(Value::Real(Real::Float(degrees_to_radians(
+            &reduced,
+            mode.prec + 8,
+        )?)));
+    }
     let factor = degrees_to_radians(&DecFloat::one(mode.prec + 8), mode.prec + 8)?;
     mul(v, &Value::Real(Real::Float(factor)), mode)
+}
+
+/// Angle in `(-180, 180]`, so converting to radians keeps the fraction.
+fn reduce_real_degrees(r: &Real) -> Option<DecFloat> {
+    match r {
+        Real::Float(f) => reduce_degree_float(f),
+        Real::Rat(q) => reduce_degree_rational(q),
+        Real::Int(_) => None,
+    }
+}
+
+fn reduce_degree_float(f: &DecFloat) -> Option<DecFloat> {
+    let limit = DecFloat::from_i64(180, 8);
+    if f.abs().cmp_val(&limit) != Ordering::Greater {
+        return Some(f.clone());
+    }
+    let (man, exp) = f.signed_decimal();
+    let full = BigInt::from(360);
+    let half = BigInt::from(180);
+    if exp >= 0 {
+        let exp = u32::try_from(exp).ok()?;
+        let pow = BigInt::from(10).modpow(&BigInt::from(exp), &full);
+        let mut residue = (man.mod_floor(&full) * pow).mod_floor(&full);
+        if residue > half {
+            residue -= &full;
+        }
+        return Some(DecFloat::from_bigint(&residue, f.prec().max(8)));
+    }
+    let k = u32::try_from(exp.checked_neg()?).ok()?;
+    if k > float::MAX_INTEGER_EXPONENT {
+        return None;
+    }
+    let scale = BigInt::from(10).pow(k);
+    let modulus = &full * &scale;
+    let mut residue = man.mod_floor(&modulus);
+    if residue > &half * &scale {
+        residue -= &modulus;
+    }
+    let prec = f.prec().max(float::digit_count(&residue)).max(8);
+    Some(DecFloat::from_decimal(residue, exp, prec))
+}
+
+fn reduce_degree_rational(q: &BigRational) -> Option<DecFloat> {
+    let full = BigInt::from(360);
+    let modulus = &full * q.denom();
+    let mut residue = q.numer().mod_floor(&modulus);
+    if residue > BigInt::from(180) * q.denom() {
+        residue -= &modulus;
+    }
+    let prec = float::digit_count(&residue)
+        .max(float::digit_count(q.denom()))
+        .saturating_add(8)
+        .max(16);
+    let n = DecFloat::from_bigint(&residue, prec);
+    let d = DecFloat::from_bigint(q.denom(), prec);
+    n.div(&d, prec).ok()
 }
 
 fn degrees_to_radians(deg: &DecFloat, prec: u32) -> Result<DecFloat, CalcError> {
