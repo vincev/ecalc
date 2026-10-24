@@ -331,7 +331,7 @@ fn factorial_float(x: &DecFloat, prec: u32) -> Result<DecFloat, CalcError> {
     let (shifted, steps) = if x.cmp_val(&one) == Ordering::Greater {
         (x.clone(), 0i64)
     } else {
-        let steps = (BigInt::from(2) - x.floor_to_bigint())
+        let steps = (BigInt::from(2) - x.floor_to_bigint()?)
             .to_i64()
             .ok_or(CalcError::Overflow)?;
         if !(0..=MAX_FACTORIAL as i64).contains(&steps) {

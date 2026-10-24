@@ -259,16 +259,24 @@ impl App {
         if self.quit {
             return;
         }
-        // `q` is a letter while a name is typed or a list dialog is open.
-        // Ctrl-C still quits.
+        // `q` is a letter while a name is typed, and it cancels a numeric
+        // prompt. List dialogs ignore it. Ctrl-C still quits.
         let naming = matches!(self.pending, Pending::Var { .. });
+        let numeric_pending = matches!(
+            self.pending,
+            Pending::Precision(_) | Pending::Radix { .. } | Pending::Word(_)
+        );
         let quit = match key {
             Key::Ctrl('c') | Key::Ctrl('C') => true,
-            Key::Char('q') => !naming && !self.vars_open && !self.consts_open,
+            Key::Char('q') => !naming && !numeric_pending && !self.vars_open && !self.consts_open,
             _ => false,
         };
         if quit {
             self.quit = true;
+            return;
+        }
+        if numeric_pending && matches!(key, Key::Char('q')) {
+            self.cancel();
             return;
         }
         if matches!(key, Key::Esc) {
@@ -1128,6 +1136,40 @@ mod tests {
         assert_eq!(top("5n\nfs"), "-1");
         assert_eq!(top("5\n "), "5");
         assert_eq!(App::run_len("5\n "), 2);
+    }
+
+    #[test]
+    fn q_cancels_numeric_prompts() {
+        let mut app = App::new();
+        app.keys("42\np20");
+        app.press(Key::Char('q'));
+        assert!(!app.should_quit());
+        assert_eq!(app.engine().mode().prec, 12);
+        assert_eq!(app.top_string().as_deref(), Some("42"));
+        app.keys("1\n+");
+        assert_eq!(app.top_string().as_deref(), Some("43"));
+
+        let mut app = App::new();
+        app.keys("dr16");
+        app.press(Key::Char('q'));
+        assert!(!app.should_quit());
+        assert_eq!(app.engine().mode().radix, 10);
+
+        let mut app = App::new();
+        app.keys("bw8");
+        app.press(Key::Char('q'));
+        assert!(!app.should_quit());
+        assert_eq!(app.engine().mode().word_size, 32);
+
+        let mut app = App::new();
+        app.keys("5\nssq\n");
+        assert!(!app.should_quit());
+        assert_eq!(app.engine().message(), "stored q");
+
+        let mut app = App::new();
+        app.keys("42\n");
+        app.press(Key::Char('q'));
+        assert!(app.should_quit());
     }
 
     #[test]

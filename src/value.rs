@@ -336,7 +336,7 @@ fn floor_quot(a: &Value, b: &Value, mode: &Mode) -> Result<BigInt, CalcError> {
     let q = ar
         .to_float(mode.prec)?
         .div(&br.to_float(mode.prec)?, mode.prec)?;
-    Ok(q.floor_to_bigint())
+    q.floor_to_bigint()
 }
 
 fn add_real(a: &Real, b: &Real, mode: &Mode) -> Result<Real, CalcError> {
@@ -549,6 +549,11 @@ fn int_nth_root(a: &BigInt, n: u32) -> Option<(bool, BigInt)> {
     if a.is_zero() || a.is_one() || n == 1 {
         return Some((true, a.clone()));
     }
+    // `a < 2^bits`. When `bits <= n`, `a < 2^n`, so the floor root is 1
+    // and the power `10^(n-1)` in the Newton step never runs.
+    if a.bits() <= u64::from(n) {
+        return Some((false, BigInt::one()));
+    }
     let digs = float::digit_count(a);
     let guess_digits = digs.div_ceil(n);
     let mut guess = BigInt::from(10).pow(guess_digits.max(1));
@@ -707,10 +712,10 @@ fn floor_float(f: &DecFloat) -> Result<BigInt, CalcError> {
         return Ok(BigInt::from(-1));
     }
     // Same size bound as an exact integer conversion.
-    if f.order() > 100_000 {
+    if f.order() > i64::from(float::MAX_INTEGER_EXPONENT) {
         return Err(CalcError::Overflow);
     }
-    Ok(f.floor_to_bigint())
+    f.floor_to_bigint()
 }
 
 pub fn isqrt(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
@@ -725,7 +730,7 @@ pub fn isqrt(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         return Ok(Value::from_int(root));
     }
     let f = r.to_float(mode.prec)?.sqrt(mode.prec)?;
-    Ok(Value::from_int(f.floor_to_bigint()))
+    Ok(Value::from_int(f.floor_to_bigint()?))
 }
 
 pub fn conj(v: &Value) -> Value {
@@ -845,7 +850,7 @@ pub fn ilog(x: &Value, base: &Value, mode: &Mode) -> Result<Value, CalcError> {
     let Value::Real(r) = q else {
         return Err(CalcError::Domain("integer log needs real numbers"));
     };
-    Ok(Value::from_int(r.to_float(mode.prec)?.floor_to_bigint()))
+    Ok(Value::from_int(r.to_float(mode.prec)?.floor_to_bigint()?))
 }
 
 fn positive_int(v: &Value) -> Option<BigInt> {
@@ -1560,6 +1565,23 @@ mod tests {
                 .to_string(),
             "-2"
         );
+        let root = nth_root(
+            &Value::from_int(10),
+            &BigInt::from(1_000_000_000u32),
+            &mode(),
+        )
+        .unwrap();
+        assert_eq!(root.to_string(), "1.0000000023");
+
+        let huge = Value::Real(Real::Float(DecFloat::from_decimal(
+            BigInt::from(1),
+            4_294_967_301,
+            12,
+        )));
+        assert!(matches!(
+            idiv(&huge, &Value::from_int(1), &mode()),
+            Err(CalcError::Overflow)
+        ));
         let i = Value::complex(Real::Int(BigInt::zero()), Real::Int(BigInt::one()));
         assert_eq!(mul(&i, &i, &mode()).unwrap().to_string(), "-1");
     }

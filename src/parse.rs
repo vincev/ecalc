@@ -16,6 +16,9 @@ use num_integer::Integer;
 use num_rational::BigRational;
 use num_traits::{Num, One, Zero};
 
+/// Largest absolute exponent accepted on entry. The same cap as a radix power.
+const MAX_EXPONENT: i64 = 1_000_000;
+
 pub fn parse_value(input: &str, mode: &Mode) -> Result<Value, CalcError> {
     let s = input.trim();
     if s.is_empty() {
@@ -290,7 +293,7 @@ fn radix_power_to_real(
     as_float: bool,
     negative: bool,
 ) -> Result<Real, CalcError> {
-    if power.abs() > 1_000_000 {
+    if power.checked_abs().is_none_or(|v| v > MAX_EXPONENT) {
         return Err(CalcError::Overflow);
     }
     let magnitude = if power >= 0 {
@@ -389,6 +392,9 @@ fn parse_float(body: &str, negative: bool, mode_prec: u32) -> Result<Real, CalcE
     if i != bytes.len() || (whole.is_empty() && frac.is_empty()) {
         return Err(bad(body));
     }
+    if exp.checked_abs().is_none_or(|v| v > MAX_EXPONENT) {
+        return Err(CalcError::Overflow);
+    }
     let digits = format!("{whole}{frac}");
     let mut mantissa = if digits.bytes().all(|b| b == b'0') {
         BigInt::zero()
@@ -460,6 +466,28 @@ mod tests {
         assert_eq!(p("1.2e_3"), "0.0012");
         assert_eq!(p("1.2E+3"), "1200");
         assert_eq!(p("0.0"), "0");
+        assert_eq!(p("1e1000000"), "1e1000000");
+        assert_eq!(p("1e-1000000"), "1e-1000000");
+    }
+
+    #[test]
+    fn huge_decimal_exponents_overflow() {
+        let mode = Mode::default();
+        for entry in [
+            "1e1000001",
+            "1e-1000001",
+            "1e9223372036854775807",
+            "_1e9223372036854775807",
+        ] {
+            assert!(
+                matches!(parse_value(entry, &mode), Err(CalcError::Overflow)),
+                "{entry}"
+            );
+        }
+        assert!(matches!(
+            parse_value("1e9223372036854775808", &mode),
+            Err(CalcError::InvalidEntry(_))
+        ));
     }
 
     #[test]

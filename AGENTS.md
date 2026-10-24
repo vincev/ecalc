@@ -112,6 +112,8 @@ Entry and stack details that are easy to get wrong:
 
 - Keep `num-bigint` at 0.4.8 (`num-rational` 0.4 needs that major).
 - `DecFloat::from_decimal(mantissa, exponent, prec)` builds a typed decimal. The stored precision is the number of significant digits typed, capped at the current precision.
+- A typed exponent, decimal or radix, outside ±1000000 is overflow. `1e1000000` and `1e-1000000` still parse. An exponent that does not fit in a 64-bit integer is a bad exponent.
+- `q` quits when nothing is being typed. While precision, radix, or word size is being typed, `q` cancels that prompt and leaves the stack. A variable name can contain `q`. `q` does not quit while `K` or `s l` is open.
 - Do not polish add, sub, mul, or div. `(1/3)*3` can display as `0.999…`, and `sqrt(2)^2` as `1.999…`.
 - `L` flips inverse in `app.rs`, then calls `Engine::exp_family`. `E` does not flip. `push` and duplicate do not clear `I` or `H`.
 - `n` while typing toggles a leading `_`. `+` and `-` while typing are exponent signs, or digits inside an unclosed `(…)`. Otherwise they add and subtract. Space inside an unparsed `(…` inserts a space. `:` while typing is a fraction; on an empty entry it is fraction division.

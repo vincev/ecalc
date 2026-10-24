@@ -14,6 +14,8 @@ use std::fmt;
 pub const MIN_PRECISION: u32 = 3;
 pub const MAX_PRECISION: u32 = 1000;
 pub const DEFAULT_PRECISION: u32 = 12;
+/// Largest power of ten materialized as an integer.
+pub(crate) const MAX_INTEGER_EXPONENT: u32 = 100_000;
 
 #[derive(Clone)]
 pub struct DecFloat {
@@ -215,28 +217,38 @@ impl DecFloat {
     }
 
     /// Integer toward -infinity.
-    pub fn floor_to_bigint(&self) -> BigInt {
+    pub fn floor_to_bigint(&self) -> Result<BigInt, CalcError> {
         if self.is_zero() {
-            return BigInt::zero();
+            return Ok(BigInt::zero());
         }
         if self.exponent >= 0 {
-            return &self.mantissa * pow10(self.exponent as u32);
+            let exp = u32::try_from(self.exponent).map_err(|_| CalcError::Overflow)?;
+            if exp > MAX_INTEGER_EXPONENT {
+                return Err(CalcError::Overflow);
+            }
+            return Ok(&self.mantissa * pow10(exp));
         }
-        let shift = (-self.exponent) as u32;
+        let Some(mag) = self.exponent.checked_neg() else {
+            return Err(CalcError::Overflow);
+        };
+        let shift = u32::try_from(mag).map_err(|_| CalcError::Overflow)?;
+        if shift > MAX_INTEGER_EXPONENT {
+            return Err(CalcError::Overflow);
+        }
         let (q, r) = self.mantissa.div_rem(&pow10(shift));
         if self.is_negative() && !r.is_zero() {
-            q - 1
+            Ok(q - 1)
         } else {
-            q
+            Ok(q)
         }
     }
 
     /// Nearest integer, ties away from zero.
-    pub fn round_half_away(&self) -> BigInt {
+    pub fn round_half_away(&self) -> Result<BigInt, CalcError> {
         let half = Self::from_unnormalized(BigInt::from(5), -1, self.prec.max(4));
         let prec = self.prec.max(4) + 2;
         if self.is_negative() {
-            -self.abs().add(&half, prec).floor_to_bigint()
+            self.abs().add(&half, prec).floor_to_bigint().map(|n| -n)
         } else {
             self.add(&half, prec).floor_to_bigint()
         }
@@ -250,13 +262,13 @@ impl DecFloat {
         }
         if self.exponent >= 0 {
             let exp = u32::try_from(self.exponent).ok()?;
-            if exp > 100_000 {
+            if exp > MAX_INTEGER_EXPONENT {
                 return None;
             }
             Some(BigRational::from(&self.mantissa * pow10(exp)))
         } else {
             let exp = u32::try_from(-self.exponent).ok()?;
-            if exp > 100_000 {
+            if exp > MAX_INTEGER_EXPONENT {
                 return None;
             }
             Some(num_rational::BigRational::new(
@@ -273,13 +285,13 @@ impl DecFloat {
         }
         if self.exponent >= 0 {
             let exp = u32::try_from(self.exponent).ok()?;
-            if exp > 100_000 {
+            if exp > MAX_INTEGER_EXPONENT {
                 return None;
             }
             return Some(&self.mantissa * pow10(exp));
         }
         let shift = u32::try_from(-self.exponent).ok()?;
-        if shift > 100_000 {
+        if shift > MAX_INTEGER_EXPONENT {
             return None;
         }
         let (q, r) = self.mantissa.div_rem(&pow10(shift));
@@ -316,35 +328,32 @@ impl DecFloat {
         if self.is_zero() {
             return Ok(Self::one(prec));
         }
-        if self.order().abs() > 1_000_000_000 {
-            return Err(CalcError::Overflow);
-        }
         let work = work_prec(prec);
-        let extra = (self.order().unsigned_abs() as u32).saturating_add(8);
-        let high = work.saturating_add(extra);
+        // `n` and `r` need the extra digits. The series only needs `work`.
+        let high = reduction_prec(self.order(), work, 8)?;
         let x = self.round_to(high);
         let ln10 = Self::ln10(high);
-        let n = x.div(&ln10, high)?.round_half_away();
+        let n = x.div(&ln10, high)?.round_half_away()?;
         if n.bits() > 62 {
             return Err(CalcError::Overflow);
         }
         let r = x.sub(&ln10.mul(&Self::from_bigint(&n, high), high), high);
-        let mut reduced = r;
+        let mut reduced = r.round_to(work);
         let mut halves = 0u32;
-        let two = Self::from_i64(2, high);
-        let bound = Self::from_unnormalized(BigInt::one(), -1, high); // 0.1
+        let two = Self::from_i64(2, work);
+        let bound = Self::from_unnormalized(BigInt::one(), -1, work); // 0.1
         while reduced.abs().cmp_val(&bound) == Ordering::Greater && halves < 64 {
-            reduced = reduced.div(&two, high)?;
+            reduced = reduced.div(&two, work)?;
             halves += 1;
         }
-        let mut y = exp_series(&reduced, high)?;
+        let mut y = exp_series(&reduced, work)?;
         for _ in 0..halves {
-            y = y.mul(&y, high);
+            y = y.mul(&y, work);
         }
         let n_i = n.to_i64().ok_or(CalcError::Overflow)?;
         let exp = y.exponent.saturating_add(n_i);
         Ok(snap_close_integer(
-            Self::from_unnormalized(y.mantissa, exp, high),
+            Self::from_unnormalized(y.mantissa, exp, work),
             prec,
         ))
     }
@@ -379,13 +388,13 @@ impl DecFloat {
             return Ok((Self::zero(prec), Self::one(prec)));
         }
         let work = work_prec(prec);
-        let extra = (self.order().unsigned_abs() as u32).saturating_add(12);
-        let high = work.saturating_add(extra);
+        // The quadrant split needs the extra digits. The series only needs `work`.
+        let high = reduction_prec(self.order(), work, 12)?;
         let half_pi = Self::pi(high).div(&Self::from_i64(2, high), high)?;
         let x = self.round_to(high);
-        let q = x.div(&half_pi, high)?.round_half_away();
+        let q = x.div(&half_pi, high)?.round_half_away()?;
         let r = x.sub(&half_pi.mul(&Self::from_bigint(&q, high), high), high);
-        let (mut s, mut c) = sin_cos_series(&r, high)?;
+        let (mut s, mut c) = sin_cos_series(&r.round_to(work), work)?;
         let qmod = q.mod_floor(&BigInt::from(4));
         match qmod.to_i32().unwrap_or(0) {
             0 => {}
@@ -671,6 +680,19 @@ fn work_prec(prec: u32) -> u32 {
     prec.saturating_add(8).saturating_add(prec / 5).max(16)
 }
 
+/// Extra digits for argument reduction. Past this, `pi` and `ln10` take
+/// seconds, so the call overflows instead.
+const MAX_REDUCTION_EXTRA: u32 = 2_048;
+
+fn reduction_prec(order: i64, work: u32, pad: u32) -> Result<u32, CalcError> {
+    let mag = u32::try_from(order.unsigned_abs()).map_err(|_| CalcError::Overflow)?;
+    let extra = mag.saturating_add(pad);
+    if extra > MAX_REDUCTION_EXTRA {
+        return Err(CalcError::Overflow);
+    }
+    Ok(work.saturating_add(extra))
+}
+
 pub(crate) fn digit_count(n: &BigInt) -> u32 {
     if n.is_zero() {
         1
@@ -766,7 +788,9 @@ fn snap_close_integer(value: DecFloat, prec: u32) -> DecFloat {
     if rounded.is_zero() {
         return rounded;
     }
-    let nearest = rounded.round_half_away();
+    let Ok(nearest) = rounded.round_half_away() else {
+        return rounded;
+    };
     let as_float = DecFloat::from_bigint(&nearest, prec.saturating_add(4));
     let diff = rounded.sub(&as_float, prec.saturating_add(4));
     if diff.is_zero() {
@@ -895,6 +919,7 @@ fn sin_cos_series(x: &DecFloat, prec: u32) -> Result<(DecFloat, DecFloat), CalcE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use num_bigint::BigInt;
 
     fn p(s: &str, prec: u32) -> DecFloat {
         // Test helper: "3.14", "-0.5", "1e-3", "150".
@@ -1025,5 +1050,38 @@ mod tests {
             DecFloat::from_i64(2, 12).powi(-3, 12).unwrap().to_string(),
             "0.125"
         );
+    }
+
+    #[test]
+    fn floor_rejects_an_exponent_past_the_integer_bound() {
+        let past = DecFloat::from_decimal(BigInt::from(1), 100_001, 12);
+        assert_eq!(past.floor_to_bigint(), Err(CalcError::Overflow));
+        // 2^32 + 5 truncates to 5 if the exponent is cast to u32.
+        let wrapped = DecFloat::from_decimal(BigInt::from(1), 4_294_967_301, 12);
+        assert_eq!(wrapped.floor_to_bigint(), Err(CalcError::Overflow));
+        let min_exp = DecFloat::from_decimal(BigInt::from(1), i64::MIN, 12);
+        assert_eq!(min_exp.floor_to_bigint(), Err(CalcError::Overflow));
+        assert_eq!(
+            DecFloat::from_decimal(BigInt::from(453), -1, 12)
+                .floor_to_bigint()
+                .unwrap()
+                .to_string(),
+            "45"
+        );
+        assert_eq!(
+            DecFloat::from_decimal(BigInt::from(-453), -1, 12)
+                .floor_to_bigint()
+                .unwrap()
+                .to_string(),
+            "-46"
+        );
+    }
+
+    #[test]
+    fn huge_magnitude_transcendentals_overflow() {
+        let huge = DecFloat::from_decimal(BigInt::from(1), 10_000, 12);
+        assert!(matches!(huge.exp(12), Err(CalcError::Overflow)));
+        assert!(matches!(huge.sin(12), Err(CalcError::Overflow)));
+        assert!(matches!(huge.neg().exp(12), Err(CalcError::Overflow)));
     }
 }
