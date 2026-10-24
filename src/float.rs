@@ -368,6 +368,24 @@ impl DecFloat {
         ))
     }
 
+    /// `ln(1 + x)`, kept accurate for a small `x` where `1 + x` would round
+    /// away. Uses `ln(1 + x) = 2 artanh(x / (2 + x))`.
+    pub fn ln_1p(&self, prec: u32) -> Result<Self, CalcError> {
+        let work = work_prec(prec);
+        let x = self.round_to(work);
+        let one_plus = Self::one(work).add(&x, work);
+        if !one_plus.is_positive() {
+            return Err(CalcError::Domain("logarithm of a non-positive number"));
+        }
+        let tenth = Self::from_decimal(BigInt::one(), -1, work);
+        if x.abs().cmp_val(&tenth) == Ordering::Greater {
+            return one_plus.ln(prec);
+        }
+        let two = Self::from_i64(2, work);
+        let y = x.div(&two.add(&x, work), work)?;
+        Ok(snap_close_integer(ln_from_artanh(&y, work)?, prec))
+    }
+
     pub fn ln(&self, prec: u32) -> Result<Self, CalcError> {
         if !self.is_positive() {
             return Err(CalcError::Domain("logarithm of a non-positive number"));
@@ -801,16 +819,17 @@ fn snap_close_integer(value: DecFloat, prec: u32) -> DecFloat {
     let Ok(nearest) = rounded.round_half_away() else {
         return rounded;
     };
+    // A value that rounds to zero is a genuine small number, not an integer
+    // with a rounding speck. Snapping it would turn `exp(-100)` into `0`.
+    if nearest.is_zero() {
+        return rounded;
+    }
     let as_float = DecFloat::from_bigint(&nearest, prec.saturating_add(4));
     let diff = rounded.sub(&as_float, prec.saturating_add(4));
     if diff.is_zero() {
         return DecFloat::from_bigint(&nearest, prec);
     }
-    let scale = if nearest.is_zero() {
-        0
-    } else {
-        digit_count(&nearest) as i64 - 1
-    };
+    let scale = digit_count(&nearest) as i64 - 1;
     // Half an ulp at this magnitude is 5 * 10^(scale - prec).
     let half_ulp =
         DecFloat::from_unnormalized(BigInt::from(5), scale - prec as i64, prec.saturating_add(4));
@@ -1085,6 +1104,20 @@ mod tests {
                 .to_string(),
             "-46"
         );
+    }
+
+    #[test]
+    fn tiny_results_are_not_snapped_to_zero() {
+        // exp(-100) is 3.72e-44. It used to be reported as 0 because a value
+        // near zero was treated as a rounding speck of the integer 0.
+        let tiny = DecFloat::from_i64(-100, 12).exp(12).unwrap();
+        assert!(tiny.is_positive());
+        assert_eq!(tiny.to_string(), "3.72007597602e-44");
+
+        // ln(1 + 1e-20) keeps the small value instead of rounding 1 + x to 1.
+        let eps = DecFloat::from_decimal(BigInt::one(), -20, 12);
+        assert_eq!(eps.ln_1p(12).unwrap().to_string(), "1e-20");
+        assert_eq!(eps.ln_1p(12).unwrap().prec(), 12);
     }
 
     #[test]

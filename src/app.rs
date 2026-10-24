@@ -1009,6 +1009,18 @@ mod tests {
         assert_eq!(top("mr1e100\nS"), "-0.372376123661");
         assert_eq!(top("mr1e100\nC"), "-0.928081905075");
         assert_eq!(top("mr1e100\nT"), "0.401231961991");
+        // 1e13 mod 360 is 280, so this is cos(-80). Adding the 90-degree
+        // shift at display precision used to round the angle to +100.
+        assert_eq!(top("1e13C"), "0.173648177667");
+        assert_eq!(top("1e14C"), "0.173648177667");
+        // A decimal exponent is a float, not a huge exact rational.
+        assert_eq!(top("2\n3.14159265359^"), "8.82497782708");
+        assert_eq!(top("2\n1.2345^"), "2.3529978462");
+        // Small results are values, not rounding specks of zero.
+        assert_eq!(top("_100\nE"), "3.72007597602e-44");
+        assert_eq!(top("1e-20\nfE"), "1e-20");
+        assert_eq!(top("1e-20\nfL"), "1e-20");
+        assert_eq!(top("125.0\n3I^"), "5");
         assert_eq!(top("mr(1e100, 1)\nS"), "(-0.574606385289, -1.09068296264)");
         assert_eq!(top("(0, 1)\nG"), "90");
         assert_eq!(top("0\n_1\nfT"), "180");

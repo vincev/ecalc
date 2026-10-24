@@ -340,6 +340,11 @@ fn floor_quot(a: &Value, b: &Value, mode: &Mode) -> Result<BigInt, CalcError> {
 }
 
 fn add_real(a: &Real, b: &Real, mode: &Mode) -> Result<Real, CalcError> {
+    // Keep plain integers off `BigRational`: its reduction does a gcd that is
+    // pathologically slow for values like powers of ten.
+    if let (Real::Int(x), Real::Int(y)) = (a, b) {
+        return Ok(Real::Int(x + y));
+    }
     if let (Some(x), Some(y)) = (a.to_rational(), b.to_rational())
         && !matches!(a, Real::Float(_))
         && !matches!(b, Real::Float(_))
@@ -357,6 +362,10 @@ fn sub_real(a: &Real, b: &Real, mode: &Mode) -> Result<Real, CalcError> {
 }
 
 fn mul_real(a: &Real, b: &Real, mode: &Mode) -> Result<Real, CalcError> {
+    // See `add_real`: integer products should not build a rational.
+    if let (Real::Int(x), Real::Int(y)) = (a, b) {
+        return Ok(Real::Int(x * y));
+    }
     if let (Some(x), Some(y)) = (a.to_rational(), b.to_rational())
         && !matches!(a, Real::Float(_))
         && !matches!(b, Real::Float(_))
@@ -372,6 +381,19 @@ fn mul_real(a: &Real, b: &Real, mode: &Mode) -> Result<Real, CalcError> {
 fn div_real(a: &Real, b: &Real, mode: &Mode) -> Result<Real, CalcError> {
     if b.is_zero() {
         return Err(CalcError::DivideByZero);
+    }
+    // Integer division has the same slow-gcd hazard as integer products.
+    if let (Real::Int(x), Real::Int(y)) = (a, b) {
+        let (q, r) = x.div_rem(y);
+        if r.is_zero() {
+            return Ok(Real::Int(q));
+        }
+        if mode.fraction {
+            return Ok(Real::Rat(BigRational::new(x.clone(), y.clone())));
+        }
+        let n = DecFloat::from_bigint(x, mode.prec);
+        let d = DecFloat::from_bigint(y, mode.prec);
+        return Ok(Real::Float(n.div(&d, mode.prec)?));
     }
     if let (Some(x), Some(y)) = (a.to_rational(), b.to_rational())
         && !matches!(a, Real::Float(_))
@@ -465,8 +487,21 @@ fn pow_rational(base: &Value, exp: &BigRational, mode: &Mode) -> Result<Value, C
     if exp.denom().is_one() {
         return pow_int(base, exp.numer(), mode);
     }
-    let rooted = nth_root(base, exp.denom(), mode)?;
-    pow_int(&rooted, exp.numer(), mode)
+    // A decimal exponent carries a long numerator (pi at display precision is
+    // the common case). Building `root^numer` exactly would trip the integer
+    // power guard, so go through exp/ln instead of reporting overflow.
+    if exp.numer().bits() > 20 {
+        return pow_exp_ln(base, &Value::from_rational(exp.clone()), mode);
+    }
+    // The root is rounded, and raising it to `numer` multiplies that error by
+    // `numer`. Carry a guard digit per numerator digit so the power still
+    // lands within the display precision.
+    let guard = float::digit_count(exp.numer());
+    let mut wide = mode.clone();
+    wide.prec = mode.prec.saturating_add(guard).saturating_add(4);
+    let rooted = nth_root(base, exp.denom(), &wide)?;
+    let powered = pow_int(&rooted, exp.numer(), &wide)?;
+    Ok(polish(powered, mode.prec))
 }
 
 pub fn nth_root(base: &Value, n: &BigInt, mode: &Mode) -> Result<Value, CalcError> {
@@ -505,8 +540,16 @@ pub fn nth_root(base: &Value, n: &BigInt, mode: &Mode) -> Result<Value, CalcErro
         if r.is_zero() {
             return Ok(Value::from_int(0));
         }
-        if let Some(q) = r.to_rational()
-            && !matches!(r, Real::Float(_))
+        if matches!(r, Real::Float(_)) {
+            // A decimal that is an exact integer still gets an exact root:
+            // `125.0 I^ 3` is `5`, not `4.99999999998`. A decimal with a
+            // fraction stays a float so `0.25 Q` is `0.5`, not `1:2`.
+            if let Some(integer) = exact_int(r)
+                && let Some(root) = rational_nth_root(&BigRational::from(integer), degree)
+            {
+                return Ok(Value::from_rational(root));
+            }
+        } else if let Some(q) = r.to_rational()
             && let Some(root) = rational_nth_root(&q, degree)
         {
             return Ok(Value::from_rational(root));
@@ -577,9 +620,14 @@ fn int_nth_root(a: &BigInt, n: u32) -> Option<(bool, BigInt)> {
 }
 
 fn pow_exp_ln(base: &Value, exp: &Value, mode: &Mode) -> Result<Value, CalcError> {
-    let l = ln(base, mode)?;
-    let p = mul(exp, &l, mode)?;
-    exp_value(&p, mode)
+    // Rounding `exp * ln(base)` to display precision before the exponential
+    // moves the last digit or two. Keep guard digits until the end.
+    let mut wide = mode.clone();
+    wide.prec = mode.prec.saturating_add(8);
+    let l = ln(base, &wide)?;
+    let p = mul(exp, &l, &wide)?;
+    let result = exp_value(&p, &wide)?;
+    Ok(polish(result, mode.prec))
 }
 
 pub fn sqrt(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
@@ -812,16 +860,28 @@ pub fn expm1(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 }
 
 pub fn lnp1(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
-    add(v, &Value::from_int(1), mode).and_then(|s| ln(&s, mode))
+    match v {
+        Value::Real(r) => Ok(polish(
+            Value::Real(Real::Float(r.to_float(mode.prec)?.ln_1p(mode.prec)?)),
+            mode.prec,
+        )),
+        Value::Complex(_, _) => {
+            let sum = add(v, &Value::from_int(1), mode)?;
+            ln(&sum, mode)
+        }
+    }
 }
 
 pub fn log10(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     if let Some(k) = power_of_ten(v) {
         return Ok(Value::from_int(k));
     }
-    let l = ln(v, mode)?;
-    let base = Value::Real(Real::Float(DecFloat::ln10(mode.prec)));
-    div(&l, &base, mode)
+    let mut wide = mode.clone();
+    wide.prec = mode.prec.saturating_add(8);
+    let l = ln(v, &wide)?;
+    let base = Value::Real(Real::Float(DecFloat::ln10(wide.prec)));
+    let q = div(&l, &base, &wide)?;
+    Ok(polish(q, mode.prec))
 }
 
 pub fn exp10(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
@@ -837,9 +897,12 @@ pub fn log(x: &Value, base: &Value, mode: &Mode) -> Result<Value, CalcError> {
             return Ok(Value::from_int(k));
         }
     }
-    let num = ln(x, mode)?;
-    let den = ln(base, mode)?;
-    div(&num, &den, mode)
+    let mut wide = mode.clone();
+    wide.prec = mode.prec.saturating_add(8);
+    let num = ln(x, &wide)?;
+    let den = ln(base, &wide)?;
+    let q = div(&num, &den, &wide)?;
+    Ok(polish(q, mode.prec))
 }
 
 pub fn ilog(x: &Value, base: &Value, mode: &Mode) -> Result<Value, CalcError> {
@@ -926,13 +989,6 @@ pub fn cos(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
             && degree_mod(&n).is_multiple_of(&BigInt::from(90))
         {
             return Ok(quadrant_cos(&n));
-        }
-        // An exact degree stays exact when shifted by 90. In radians that
-        // shift is pi/2 rounded to the display precision, and it disappears
-        // against a large argument, so cosine and tangent would both be wrong.
-        if v.is_real() {
-            let shifted = add(v, &quarter_turn(mode)?, mode)?;
-            return sin(&shifted, mode);
         }
     } else if real_is_zero(v) {
         return Ok(Value::from_int(1));
@@ -1669,6 +1725,73 @@ mod tests {
         ));
         let i = Value::complex(Real::Int(BigInt::zero()), Real::Int(BigInt::one()));
         assert_eq!(mul(&i, &i, &mode()).unwrap().to_string(), "-1");
+    }
+
+    #[test]
+    fn decimal_exponents_and_decimal_roots() {
+        // A 12-digit decimal exponent is a float, not a huge rational. It
+        // used to report overflow because `root^numer` tripped the integer
+        // power guard, and the root-then-power path lost the last digits.
+        let pi_like = Value::real(Real::Float(DecFloat::from_decimal(
+            BigInt::from(314_159_265_359_i64),
+            -11,
+            12,
+        )));
+        assert_eq!(
+            pow(&Value::from_int(2), &pi_like, &mode())
+                .unwrap()
+                .to_string(),
+            "8.82497782708"
+        );
+        // A short decimal takes the root-then-power path. The guard digits
+        // keep `1.2345`'s numerator from magnifying the root's rounding.
+        let one_and_a_bit = Value::real(Real::Float(DecFloat::from_decimal(
+            BigInt::from(12_345),
+            -4,
+            5,
+        )));
+        assert_eq!(
+            pow(&Value::from_int(2), &one_and_a_bit, &mode())
+                .unwrap()
+                .to_string(),
+            "2.3529978462"
+        );
+
+        // A decimal that is an exact integer still gets an exact root, while a
+        // decimal with a fraction stays a float (`0.25 Q` is `0.5`, not `1:2`).
+        let hundred_25 = Value::real(Real::Float(DecFloat::from_decimal(
+            BigInt::from(125),
+            0,
+            12,
+        )));
+        assert_eq!(
+            nth_root(&hundred_25, &BigInt::from(3), &mode())
+                .unwrap()
+                .to_string(),
+            "5"
+        );
+        let quarter = Value::real(Real::Float(DecFloat::from_decimal(
+            BigInt::from(25),
+            -2,
+            12,
+        )));
+        assert_eq!(sqrt(&quarter, &mode()).unwrap().to_string(), "0.5");
+
+        // A small exponential is a value, not zero.
+        assert_eq!(
+            exp_value(&Value::from_int(-100), &mode())
+                .unwrap()
+                .to_string(),
+            "3.72007597602e-44"
+        );
+    }
+
+    #[test]
+    fn cosine_of_large_degrees_reduces_first() {
+        // 1e13 mod 360 is 280, so this is cos(-80). Shifting by 90 at display
+        // precision used to lose the shift and return cos(70) instead.
+        let big = Value::real(Real::Float(DecFloat::from_decimal(BigInt::one(), 13, 12)));
+        assert_eq!(cos(&big, &mode()).unwrap().to_string(), "0.173648177667");
     }
 
     #[test]
