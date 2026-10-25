@@ -108,18 +108,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
 
 [[package]]
-name = "calc"
-version = "0.2.12"
-dependencies = [
- "crossterm",
- "num-bigint",
- "num-integer",
- "num-rational",
- "num-traits",
- "ratatui",
-]
-
-[[package]]
 name = "castaway"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -320,6 +308,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
 dependencies = [
  "litrs",
+]
+
+[[package]]
+name = "ecalc"
+version = "0.2.12"
+dependencies = [
+ "crossterm",
+ "num-bigint",
+ "num-integer",
+ "num-rational",
+ "num-traits",
+ "ratatui",
 ]
 
 [[package]]

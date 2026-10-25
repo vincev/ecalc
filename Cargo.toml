@@ -1,10 +1,17 @@
 [package]
-name = "calc"
-version = "0.2.12"
-edition = "2024"
+authors = ["Vince Vasta <vince.vasta@gmail.com>"]
+categories = ["command-line-utilities", "mathematics"]
 description = "Terminal RPN calculator"
+edition = "2024"
+keywords = ["calculator", "rpn", "terminal", "tui"]
 license = "Apache-2.0"
-authors = ["Vince <vince.vasta@gmail.com>"]
+name = "ecalc"
+repository = "https://github.com/vincev/ecalc.git"
+version = "0.2.12"
+
+[[bin]]
+name = "ec"
+path = "src/main.rs"
 
 [lints.rust]
 warnings = "deny"

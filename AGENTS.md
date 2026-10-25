@@ -1,4 +1,4 @@
-# calc
+# ecalc
 
 Terminal RPN calculator in the shape of GNU Emacs Calc. Algebra, calculus,
 vectors, and matrices are out of scope (use a CAS for those).
@@ -11,7 +11,7 @@ cargo run
 ```
 
 `cargo test` does not open a terminal. `cargo run` is the full-screen UI.
-Quit with `q`.
+The binary is `ec`. Quit with `q`.
 
 ## Emacs Calc
 
