@@ -288,24 +288,27 @@ impl DecFloat {
         }
     }
 
+    /// Whether [`Self::to_integer_exact`] can return a value without building
+    /// a power of ten that is past the integer bound.
+    pub fn is_integral(&self) -> bool {
+        self.is_zero()
+            || (self.exponent >= 0
+                && u32::try_from(self.exponent).is_ok_and(|exp| exp <= MAX_INTEGER_EXPONENT))
+    }
+
     /// Exact integer when the decimal has no fractional part.
     pub fn to_integer_exact(&self) -> Option<BigInt> {
         if self.is_zero() {
             return Some(BigInt::zero());
         }
-        if self.exponent >= 0 {
-            let exp = u32::try_from(self.exponent).ok()?;
-            if exp > MAX_INTEGER_EXPONENT {
-                return None;
-            }
-            return Some(&self.mantissa * pow10(exp));
-        }
-        let shift = u32::try_from(-self.exponent).ok()?;
-        if shift > MAX_INTEGER_EXPONENT {
+        // `from_unnormalized` strips trailing zeros from the mantissa, so a
+        // negative exponent always means a real fractional part. Do not build
+        // 10^99999 just to discover that `1e-99999` is not an integer.
+        if !self.is_integral() {
             return None;
         }
-        let (q, r) = self.mantissa.div_rem(&pow10(shift));
-        if r.is_zero() { Some(q) } else { None }
+        let exp = u32::try_from(self.exponent).ok()?;
+        Some(&self.mantissa * pow10(exp))
     }
 
     pub fn sqrt(&self, prec: u32) -> Result<Self, CalcError> {
@@ -1078,6 +1081,29 @@ mod tests {
         assert_eq!(
             DecFloat::from_i64(2, 12).powi(-3, 12).unwrap().to_string(),
             "0.125"
+        );
+    }
+
+    #[test]
+    fn integer_conversion_uses_the_normalized_exponent() {
+        // 120 * 10^-1 is 12, and trailing zeros are stripped on the way in.
+        assert_eq!(
+            DecFloat::from_decimal(BigInt::from(120), -1, 12).to_integer_exact(),
+            Some(BigInt::from(12))
+        );
+        assert_eq!(
+            DecFloat::from_decimal(BigInt::from(15), -1, 12).to_integer_exact(),
+            None
+        );
+        assert_eq!(
+            DecFloat::from_decimal(BigInt::one(), -99_999, 12).to_integer_exact(),
+            None
+        );
+        assert_eq!(
+            DecFloat::from_decimal(BigInt::one(), 5, 12)
+                .to_integer_exact()
+                .map(|n| n.to_string()),
+            Some("100000".to_string())
         );
     }
 

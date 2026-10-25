@@ -291,16 +291,20 @@ impl App {
             return;
         }
         // `q` is a letter while a name is typed, and it cancels a numeric
-        // prompt. List dialogs ignore it. Ctrl-C still quits.
+        // prompt. List dialogs ignore it. A radix literal above 20 can use it
+        // as a digit: `36#q` is 26. Ctrl-C still quits.
         let naming = matches!(self.pending, Pending::Var { .. });
         let numeric_pending = matches!(
             self.pending,
             Pending::Precision(_) | Pending::Radix { .. } | Pending::Word(_)
         );
+        let radix_digit = !self.entry.is_empty()
+            && is_entry_continuation('q', &self.entry, self.engine.mode().radix);
         let quit = match key {
             Key::Ctrl('c') | Key::Ctrl('C') => true,
             Key::Char('q') => {
-                !naming
+                !radix_digit
+                    && !naming
                     && !numeric_pending
                     && !self.vars_open
                     && !self.consts_open
@@ -711,6 +715,18 @@ impl App {
     }
 
     fn press_char(&mut self, c: char) {
+        if c == ' ' {
+            self.press_space();
+            return;
+        }
+        // A letter can be a digit after `#` in a radix above 10. That check
+        // comes first so `n` and `u` do not run their commands inside
+        // `36#n` or `36#u`.
+        if !self.entry.is_empty() && is_entry_continuation(c, &self.entry, self.engine.mode().radix)
+        {
+            self.entry.push(c);
+            return;
+        }
         if c == 'u' {
             self.engine.undo();
             return;
@@ -719,20 +735,12 @@ impl App {
             self.toggle_entry_sign();
             return;
         }
-        if c == ' ' {
-            self.press_space();
-            return;
-        }
         if self.entry.is_empty() {
             if is_entry_start(c) {
                 self.entry.push(c);
                 return;
             }
             self.dispatch(c);
-            return;
-        }
-        if is_entry_continuation(c, &self.entry, self.engine.mode().radix) {
-            self.entry.push(c);
             return;
         }
         if self.commit_entry() {
@@ -1132,6 +1140,46 @@ mod tests {
         assert_eq!(top("10\n3\\"), "3");
         assert_eq!(top("_5\n3\\"), "-2");
         assert_eq!(top("_5\n3%"), "1");
+        assert_eq!(top("5\n_3\\"), "-2");
+        assert_eq!(top("5\n_3%"), "-1");
+        // Fractions and integers divide exactly before the floor.
+        assert_eq!(top("_12:1\n_12:7\n\\"), "7");
+        assert_eq!(top("_12:1\n1:7\n\\"), "-84");
+        assert_eq!(top("_12:1\n1:7\n%"), "0");
+        assert_eq!(top("12\n12:7\n\\"), "7");
+        assert_eq!(top("_12\n12:7\n\\"), "-7");
+        assert_eq!(top("1:2\n1:3\n\\"), "1");
+        assert_eq!(top("_1:2\n1:3\n\\"), "-2");
+        assert_eq!(top("1:10\n1:2\n\\"), "0");
+        assert_eq!(top("_1:10\n1:2\n\\"), "-1");
+        assert_eq!(top("_1:2\n1:3\n%"), "1:6");
+        assert_eq!(top("12:7\n2:3\n%"), "8:21");
+        assert_eq!(top("_12:7\n2:3\n%"), "2:7");
+        // Quotients in [1, 2) still floor to 1. A one-bit gap does not
+        // prove that the absolute value is below 1.
+        assert_eq!(top("3:2\n4:3\n\\"), "1");
+        assert_eq!(top("3:2\n4:3\n%"), "1:6");
+        assert_eq!(top("_3:2\n4:3\n\\"), "-2");
+        assert_eq!(top("_3:2\n4:3\n%"), "7:6");
+        assert_eq!(top("_3:2\n_4:3\n\\"), "1");
+        assert_eq!(top("_3:2\n_4:3\n%"), "-1:6");
+        assert_eq!(top("3:2\n_4:3\n\\"), "-2");
+        assert_eq!(top("3:2\n_4:3\n%"), "-7:6");
+        assert_eq!(top("3\n8:3\n\\"), "1");
+        assert_eq!(top("3\n8:3\n%"), "1:3");
+        assert_eq!(top("7:4\n5:3\n\\"), "1");
+        assert_eq!(top("7:4\n5:3\n%"), "1:12");
+        // A float follows Calc: divide at the current precision, then floor.
+        assert_eq!(top("1e20\n3\\"), "33333333333300000000");
+        assert_eq!(top("1e20\n3%"), "100000000");
+        assert_eq!(top("1e20\n7\\"), "14285714285700000000");
+        assert_eq!(top("1e20\n7%"), "100000000");
+        assert_eq!(top("0.7\n0.2\n%"), "0.1");
+        // A quotient that rounds below 1 still floors to 0 or -1 without
+        // materializing its enormous denominator.
+        assert_eq!(top("1e-99999\n1\n\\"), "0");
+        assert_eq!(top("_1e-99999\n1\n\\"), "-1");
+        assert_eq!(top("1e-99999\n1\n%"), "1e-99999");
         assert_eq!(top("1\n3/cF"), "1:3");
     }
 
@@ -1584,6 +1632,17 @@ mod tests {
         assert_eq!(top("16#FF\n"), "255");
         assert_eq!(top("16#ff\n"), "255");
         assert_eq!(top("2#1010\n"), "10");
+        // n, u, and q are ordinary digits in bases 24, 31, and 27.
+        assert_eq!(top("36#n\n"), "23");
+        assert_eq!(top("36#u\n"), "30");
+        assert_eq!(top("36#q\n"), "26");
+        assert_eq!(top("36#N\n"), "23");
+        assert_eq!(top("36#U\n"), "30");
+        assert_eq!(top("36#Q\n"), "26");
+        let mut radix_q = App::new();
+        radix_q.keys("36#q\n");
+        assert!(!radix_q.should_quit());
+        assert_eq!(radix_q.top_string().as_deref(), Some("26"));
         assert_eq!(top("16#F.8\n"), "15.5");
         assert_eq!(top("16#A:3\n"), "10:3");
         assert_eq!(top("16#F*16^2\n"), "3840");

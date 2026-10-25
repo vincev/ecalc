@@ -319,24 +319,82 @@ pub fn modulo(a: &Value, b: &Value, mode: &Mode) -> Result<Value, CalcError> {
     if !a.is_real() || !b.is_real() {
         return Err(CalcError::Domain("mod needs real numbers"));
     }
+    if b.is_zero() {
+        return Err(CalcError::DivideByZero);
+    }
+    // Int/Int stays off `BigRational`; see `floor_quot`.
+    if let (Value::Real(Real::Int(x)), Value::Real(Real::Int(y))) = (a, b) {
+        return Ok(Value::from_int(x.mod_floor(y)));
+    }
+    let (Value::Real(ar), Value::Real(br)) = (a, b) else {
+        unreachable!("both values are real");
+    };
+    // Two fractions are exact, matching Calc. `_12:1 _12:7 %` is 0. A float
+    // is not in this branch: `1e20 3 %` rounds at the current precision.
+    if !matches!(ar, Real::Float(_)) && !matches!(br, Real::Float(_)) {
+        let (Some(x), Some(y)) = (ar.to_rational(), br.to_rational()) else {
+            unreachable!("an integer or fraction converts to a rational");
+        };
+        let q = floor_ratio(&x, &y);
+        let numer = x.numer() * y.denom() - &q * x.denom() * y.numer();
+        let denom = x.denom() * y.denom();
+        return Ok(Value::from_rational(BigRational::new(numer, denom)));
+    }
+    // A float keeps the rounded behavior Calc uses.
     let q = Value::from_int(floor_quot(a, b, mode)?);
     sub(a, &mul(&q, b, mode)?, mode)
+}
+
+fn floor_ratio(x: &BigRational, y: &BigRational) -> BigInt {
+    // `x.numer * y.denom / (x.denom * y.numer)` without forming the reduced
+    // quotient: reducing powers of ten makes an extreme exponent take seconds.
+    if x.numer().is_zero() {
+        return BigInt::zero();
+    }
+    // `bits(a) + bits(b)` is at most one above `bits(a*b)`. A gap of two
+    // or more proves the numerator product is smaller, so the floor is
+    // 0 or -1 without multiplying a huge power of ten.
+    let numer_bits = x.numer().bits() + y.denom().bits();
+    let denom_bits = x.denom().bits() + y.numer().bits();
+    if numer_bits + 1 < denom_bits {
+        return if x.numer().sign() == y.numer().sign() {
+            BigInt::zero()
+        } else {
+            BigInt::from(-1)
+        };
+    }
+    let numer = x.numer() * y.denom();
+    let denom = x.denom() * y.numer();
+    numer.div_floor(&denom)
 }
 
 fn floor_quot(a: &Value, b: &Value, mode: &Mode) -> Result<BigInt, CalcError> {
     if b.is_zero() {
         return Err(CalcError::DivideByZero);
     }
+    // Keep plain integers off `BigRational`: its reduction does a gcd that is
+    // pathologically slow for values like powers of ten.
     if let (Value::Real(Real::Int(x)), Value::Real(Real::Int(y))) = (a, b) {
         return Ok(x.div_floor(y));
     }
     let (Value::Real(ar), Value::Real(br)) = (a, b) else {
         return Err(CalcError::Domain("integer division needs real numbers"));
     };
+    // Two fractions are exact, matching Calc: `_12:1 _12:7 \` is 7 and
+    // `-12 12:7 \` is -7. A float is not exact here; `1e20 3 \` uses the
+    // current precision, as Calc does.
+    if !matches!(ar, Real::Float(_)) && !matches!(br, Real::Float(_)) {
+        let (Some(x), Some(y)) = (ar.to_rational(), br.to_rational()) else {
+            unreachable!("an integer or fraction converts to a rational");
+        };
+        return Ok(floor_ratio(&x, &y));
+    }
     let q = ar
         .to_float(mode.prec)?
         .div(&br.to_float(mode.prec)?, mode.prec)?;
-    q.floor_to_bigint()
+    // `floor_float` returns 0 or -1 for a tiny quotient instead of trying to
+    // materialize 10^199998 just to find that the floor is 0.
+    floor_float(&q)
 }
 
 fn add_real(a: &Real, b: &Real, mode: &Mode) -> Result<Real, CalcError> {
@@ -345,9 +403,9 @@ fn add_real(a: &Real, b: &Real, mode: &Mode) -> Result<Real, CalcError> {
     if let (Real::Int(x), Real::Int(y)) = (a, b) {
         return Ok(Real::Int(x + y));
     }
-    if let (Some(x), Some(y)) = (a.to_rational(), b.to_rational())
-        && !matches!(a, Real::Float(_))
+    if !matches!(a, Real::Float(_))
         && !matches!(b, Real::Float(_))
+        && let (Some(x), Some(y)) = (a.to_rational(), b.to_rational())
     {
         return Ok(real_from_rational(x + y));
     }
@@ -366,9 +424,9 @@ fn mul_real(a: &Real, b: &Real, mode: &Mode) -> Result<Real, CalcError> {
     if let (Real::Int(x), Real::Int(y)) = (a, b) {
         return Ok(Real::Int(x * y));
     }
-    if let (Some(x), Some(y)) = (a.to_rational(), b.to_rational())
-        && !matches!(a, Real::Float(_))
+    if !matches!(a, Real::Float(_))
         && !matches!(b, Real::Float(_))
+        && let (Some(x), Some(y)) = (a.to_rational(), b.to_rational())
     {
         return Ok(real_from_rational(x * y));
     }
@@ -395,9 +453,9 @@ fn div_real(a: &Real, b: &Real, mode: &Mode) -> Result<Real, CalcError> {
         let d = DecFloat::from_bigint(y, mode.prec);
         return Ok(Real::Float(n.div(&d, mode.prec)?));
     }
-    if let (Some(x), Some(y)) = (a.to_rational(), b.to_rational())
-        && !matches!(a, Real::Float(_))
+    if !matches!(a, Real::Float(_))
         && !matches!(b, Real::Float(_))
+        && let (Some(x), Some(y)) = (a.to_rational(), b.to_rational())
     {
         let q = x / y;
         if q.denom().is_one() {
@@ -708,9 +766,9 @@ fn hypot_real(a: &Real, b: &Real, mode: &Mode) -> Result<Real, CalcError> {
     if b.is_zero() {
         return Ok(a.abs());
     }
-    if let (Some(x), Some(y)) = (a.to_rational(), b.to_rational())
-        && !matches!(a, Real::Float(_))
+    if !matches!(a, Real::Float(_))
         && !matches!(b, Real::Float(_))
+        && let (Some(x), Some(y)) = (a.to_rational(), b.to_rational())
     {
         let sum = &x * &x + &y * &y;
         if let Some(root) = rational_nth_root(&sum, 2) {
@@ -1614,6 +1672,28 @@ mod tests {
 
     fn mode() -> Mode {
         Mode::default()
+    }
+
+    #[test]
+    fn floor_ratio_matches_exact_division_on_the_shortcut_boundary() {
+        // A one-bit gap in the summed lengths does not prove `|q| < 1`.
+        // `3:2` / `4:3` is 4 versus 5, and the products `9` and `8` are
+        // both 4 bits, so the floor is 1. The shortcut needs a gap of two.
+        for xn in -12i64..=12 {
+            for xd in 1i64..=12 {
+                for yn in -12i64..=12 {
+                    if yn == 0 {
+                        continue;
+                    }
+                    for yd in 1i64..=12 {
+                        let x = BigRational::new(BigInt::from(xn), BigInt::from(xd));
+                        let y = BigRational::new(BigInt::from(yn), BigInt::from(yd));
+                        let exact = floor_rat(&(x.clone() / y.clone()));
+                        assert_eq!(floor_ratio(&x, &y), exact, "{x} / {y}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -13,6 +13,22 @@ cargo run
 `cargo test` does not open a terminal. `cargo run` is the full-screen UI.
 Quit with `q`.
 
+## Emacs Calc
+
+To check an exact result against GNU Emacs Calc, ask Calc in batch mode.
+This is a reference. `cargo test` does not need Emacs. `calc-eval` reads
+algebraic syntax, not these RPN keys. A fraction is `n:d`. Fraction mode
+is off, so `/` produces a float.
+
+```sh
+emacs -Q --batch -l calc -eval '(progn (princ (calc-eval "10 \\ 3")) (terpri) (princ (calc-eval "10 % 3")) (terpri))' 2>&1
+```
+
+That prints `3`, then `1`. `12 \ 12:7` is `7`. `12 \ (12/7)` is `6`, because
+Calc divides the float and then floors. A large power prints `Working...`
+lines on stderr. The value is on stdout. Do not match transcendentals
+digit for digit.
+
 ## Layout
 
 - `src/float.rs` — decimal floats (`BigInt` mantissa, base-10 exponent). Precision is significant digits, default 12. `+ - * /`, sqrt, exp, ln, sin/cos/tan, inverse trig.
@@ -94,11 +110,13 @@ Tutorial shapes live in `src/app.rs`. Parser cases are in `src/parse.rs`. The sc
 - `i * i` = `-1`
 - `sin(90 deg)` = `1`, `atan(1)` = `45` in degrees
 - `10 \ 3` = `3`, `10 % 3` = `1`, `-5 \ 3` = `-2`, `-5 % 3` = `1`
+- `12 \ 12:7` = `7`, `_12:1 _12:7 \` = `7`, `3:2 4:3 \` = `1`, `_3:2 4:3 \` = `-2`, `1e20 \ 3` = `33333333333300000000`, `1e20 % 3` = `100000000`
+- `36#q` = `26`, `36#n` = `23`, `36#u` = `30` (and `q` does not quit there)
 - `45.3 F` = `45`, `-45.3 F` = `-46`
 - `K` then `0` = `299792458` (speed of light)
 - last `K` page, `8` = `5.9722e24` (Earth mass), `A` = `7.346e22` (Moon mass), and `F` = `149597870700` (AU)
 
-Transcendentals are checked by known prefixes (pi, e, ln 2), not by matching Emacs Calc digit for digit.
+Transcendentals are checked by known prefixes (pi, e, ln 2), not by matching Emacs Calc digit for digit. Exact values can be checked with the Emacs Calc command above.
 
 ## Not in this version
 

@@ -162,7 +162,7 @@ const ENTRIES: &[Entry] = &[
         keys: "\\",
         name: "idiv",
         summary: "integer quotient",
-        body: "\\ divides and keeps the integer quotient, toward minus infinity. 10 \\ 3 is 3, and -5 \\ 3 is -2.",
+        body: "\\ divides and keeps the integer quotient, toward minus infinity. 10 \\ 3 is 3, and -5 \\ 3 is -2. An integer or a fraction divides exactly; a float rounds at the current precision.",
     },
     Entry {
         keys: "F",
@@ -174,7 +174,7 @@ const ENTRIES: &[Entry] = &[
         keys: "%",
         name: "mod",
         summary: "remainder",
-        body: "% is the remainder from integer division toward minus infinity. 10 % 3 is 1, and -5 % 3 is 1.",
+        body: "% is the remainder from integer division toward minus infinity. 10 % 3 is 1, and -5 % 3 is 1. An integer or a fraction is exact; a float rounds at the current precision.",
     },
     Entry {
         keys: ":",
