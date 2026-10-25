@@ -184,7 +184,7 @@ fn format_rat(r: &BigRational, mode: &Mode) -> String {
 fn format_float(f: &DecFloat, mode: &Mode) -> String {
     let (mantissa, exp10) = f.signed_decimal();
     if mantissa.is_zero() {
-        return format!("{}#0", mode.radix);
+        return format!("{}#0.", mode.radix);
     }
     let negative = mantissa.is_negative();
     let prec = f.prec().max(mode.prec).max(1);
@@ -212,7 +212,7 @@ fn render_float(value: RFloat, negative: bool) -> String {
     let radix = value.radix;
     let (sig, exp) = strip_trailing(value.sig, value.exp, radix);
     if sig.is_zero() {
-        return format!("{radix}#0");
+        return format!("{radix}#0.");
     }
     let digits = sig.to_str_radix(radix).to_ascii_uppercase();
     let order = exp + digits.len() as i64 - 1;
@@ -443,6 +443,11 @@ mod tests {
         assert_eq!(format_value(&Value::from_rational(ratio), &mode), "-4:3");
         let fifth = Value::real(Real::Float(float_at(5, -1, 12)));
         assert_eq!(format_value(&fifth, &mode), "0.5");
+        let earth = Value::real(Real::Float(float_at(6_378_137, 0, 12)));
+        assert_eq!(format_value(&earth, &mode), "6378137.");
+        assert_eq!(format_value(&Value::from_int(6_378_137), &mode), "6378137");
+        let zero = Value::real(Real::Float(DecFloat::zero(12)));
+        assert_eq!(format_value(&zero, &mode), "0.");
     }
 
     #[test]
@@ -478,6 +483,9 @@ mod tests {
         let hex = mode_radix(16);
         let half = Value::real(Real::Float(float_at(5, -1, 12)));
         assert_eq!(format_value(&half, &hex), "16#0.8");
+        let byte = Value::real(Real::Float(float_at(255, 0, 12)));
+        assert_eq!(format_value(&byte, &hex), "16#FF.");
+        assert_eq!(format_value(&Value::from_int(255), &hex), "16#FF");
         let fifteen = Value::real(Real::Float(float_at(155, -1, 12)));
         assert_eq!(format_value(&fifteen, &hex), "16#F.8");
         let third_digit = Value::real(Real::Float(float_at(3, -1, 12)));
@@ -530,6 +538,8 @@ mod tests {
         assert_eq!(format_value(&frac_only, &mode), "0.123454");
         let scientific = Value::real(Real::Float(float_at(1, 100, 12)));
         assert_eq!(format_value(&scientific, &mode), "1e100");
+        let whole = Value::real(Real::Float(float_at(6_378_137, 0, 12)));
+        assert_eq!(format_value(&whole, &mode), "6,378,137.");
 
         let mut hex = mode_radix(16);
         hex.group_digits = true;
@@ -598,6 +608,9 @@ mod tests {
             Value::real(Real::Float(float_at(1, 20, 12))),
             Value::real(Real::Float(float_at(5, -1, 12))),
             Value::real(Real::Float(float_at(-123_456, -3, 12))),
+            Value::real(Real::Float(float_at(255, 0, 12))),
+            Value::real(Real::Float(float_at(0, 0, 12))),
+            Value::real(Real::Float(float_at(-45, 0, 12))),
         ];
         for radix in [2_u32, 10, 16] {
             let mode = mode_radix(radix);

@@ -1929,7 +1929,14 @@ mod tests {
         for n in [-2, -1, 0, 1, 2] {
             let x = Value::from_int(n);
             let back = ln(&exp_value(&x, &precise).unwrap(), &precise).unwrap();
-            assert_eq!(back.to_string(), x.to_string(), "ln(exp({n}))");
+            // exp(0) is the integer 1, and ln of that is the integer 0.
+            // The other results are exact floats, so they keep the point.
+            let expect = if n == 0 {
+                "0".to_string()
+            } else {
+                format!("{n}.")
+            };
+            assert_eq!(back.to_string(), expect, "ln(exp({n}))");
         }
     }
 

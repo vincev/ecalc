@@ -43,7 +43,7 @@ digit for digit.
 
 - Integers stay exact (`num-bigint`). `:` entry and fraction mode use rationals (`num-rational`), shown as `n:d`.
 - Default fraction mode is off, matching Calc. `/` of integers that divide evenly stays an integer; otherwise it is a float at the current precision. `m f` turns fraction mode on. `:` outside entry is fraction division.
-- Floats are decimal, so `0.1 + 0.2` is `0.3`.
+- Floats are decimal, so `0.1 + 0.2` is `0.3`. A whole-number float keeps a trailing point (`6378137.`), including after `c f`. Scientific form stays as it is (`1e20`). An exact integer result, such as `sin(90)`, has no point.
 - A negative square root, and non-real powers, become rectangular complex `(re, im)`. A zero imaginary part collapses back to a real.
 - Angle mode defaults to degrees. It applies to real trig and to both parts of complex trig, same idea as Calc. A degree angle is reduced modulo 360 before conversion, including a non-integer (`12345678901.5` is `181.5` degrees) and an integer float whose exponent is past 100000. `P` pushes pi. `H P` pushes e.
 - Inverse (`I`) and hyperbolic (`H`) are one-shot prefixes.
@@ -110,7 +110,7 @@ Tutorial shapes live in `src/app.rs`. Parser cases are in `src/parse.rs`. The sc
 - `i * i` = `-1`
 - `sin(90 deg)` = `1`, `atan(1)` = `45` in degrees
 - `10 \ 3` = `3`, `10 % 3` = `1`, `-5 \ 3` = `-2`, `-5 % 3` = `1`
-- `12 \ 12:7` = `7`, `_12:1 _12:7 \` = `7`, `3:2 4:3 \` = `1`, `_3:2 4:3 \` = `-2`, `1e20 \ 3` = `33333333333300000000`, `1e20 % 3` = `100000000`
+- `12 \ 12:7` = `7`, `_12:1 _12:7 \` = `7`, `3:2 4:3 \` = `1`, `_3:2 4:3 \` = `-2`, `1e20 \ 3` = `33333333333300000000`, `1e20 % 3` = `100000000.`
 - `36#q` = `26`, `36#n` = `23`, `36#u` = `30` (and `q` does not quit there)
 - `45.3 F` = `45`, `-45.3 F` = `-46`
 - `K` then `0` = `299792458` (speed of light)

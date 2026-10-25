@@ -636,7 +636,8 @@ impl DecFloat {
 
     fn format_string(&self) -> String {
         if self.is_zero() {
-            return "0".to_string();
+            // A float zero is `0.`, so it is distinct from the integer 0.
+            return "0.".to_string();
         }
         let neg = if self.is_negative() { "-" } else { "" };
         let digits = self.mantissa.abs().to_str_radix(10);
@@ -681,29 +682,38 @@ pub(crate) fn scientific_mantissa(digits: &str) -> String {
     }
 }
 
+/// Fixed-point digits. A whole number keeps a trailing point (`6378137.`)
+/// so a float does not look like an integer. Scientific form is unchanged:
+/// the exponent already sets it apart.
 pub(crate) fn fixed_point(digits: &str, exponent: i64) -> String {
-    if exponent >= 0 {
+    let body = if exponent >= 0 {
         let zeros = exponent as usize;
-        return format!("{digits}{}", "0".repeat(zeros));
-    }
-    let places = (-exponent) as usize;
-    if places < digits.len() {
-        let split = digits.len() - places;
-        let (whole, frac) = digits.split_at(split);
-        let frac = frac.trim_end_matches('0');
-        if frac.is_empty() {
-            whole.to_string()
-        } else {
-            format!("{whole}.{frac}")
-        }
+        format!("{digits}{}", "0".repeat(zeros))
     } else {
-        let zeros = places - digits.len();
-        let frac = digits.trim_end_matches('0');
-        if frac.is_empty() {
-            "0".to_string()
+        let places = (-exponent) as usize;
+        if places < digits.len() {
+            let split = digits.len() - places;
+            let (whole, frac) = digits.split_at(split);
+            let frac = frac.trim_end_matches('0');
+            if frac.is_empty() {
+                whole.to_string()
+            } else {
+                format!("{whole}.{frac}")
+            }
         } else {
-            format!("0.{}{frac}", "0".repeat(zeros))
+            let zeros = places - digits.len();
+            let frac = digits.trim_end_matches('0');
+            if frac.is_empty() {
+                "0".to_string()
+            } else {
+                format!("0.{}{frac}", "0".repeat(zeros))
+            }
         }
+    };
+    if body.contains('.') {
+        body
+    } else {
+        format!("{body}.")
     }
 }
 
@@ -1043,23 +1053,23 @@ mod tests {
     #[test]
     fn exp_ln_roundtrip_and_trig() {
         let one = DecFloat::one(16);
-        assert_eq!(one.exp(16).unwrap().ln(16).unwrap().to_string(), "1");
-        assert_eq!(DecFloat::zero(12).exp(12).unwrap().to_string(), "1");
-        assert_eq!(DecFloat::one(12).ln(12).unwrap().to_string(), "0");
+        assert_eq!(one.exp(16).unwrap().ln(16).unwrap().to_string(), "1.");
+        assert_eq!(DecFloat::zero(12).exp(12).unwrap().to_string(), "1.");
+        assert_eq!(DecFloat::one(12).ln(12).unwrap().to_string(), "0.");
 
         let one_rad = DecFloat::one(16);
         assert_starts(&one_rad.sin(16).unwrap(), "0.84147098480789");
         assert_starts(&one_rad.cos(16).unwrap(), "0.54030230586813");
 
         let pi = DecFloat::pi(16);
-        assert_eq!(pi.sin(16).unwrap().to_string(), "0");
-        assert_eq!(pi.cos(16).unwrap().to_string(), "-1");
+        assert_eq!(pi.sin(16).unwrap().to_string(), "0.");
+        assert_eq!(pi.cos(16).unwrap().to_string(), "-1.");
         let half_pi = pi.div(&DecFloat::from_i64(2, 16), 16).unwrap();
-        assert_eq!(half_pi.sin(16).unwrap().to_string(), "1");
-        assert_eq!(half_pi.cos(16).unwrap().to_string(), "0");
+        assert_eq!(half_pi.sin(16).unwrap().to_string(), "1.");
+        assert_eq!(half_pi.cos(16).unwrap().to_string(), "0.");
 
         let quarter = pi.div(&DecFloat::from_i64(4, 16), 16).unwrap();
-        assert_eq!(quarter.tan(16).unwrap().to_string(), "1");
+        assert_eq!(quarter.tan(16).unwrap().to_string(), "1.");
         assert_starts(&DecFloat::one(16).atan(16).unwrap(), "0.78539816339744");
         assert_eq!(
             DecFloat::one(16).asin(16).unwrap().to_string(),
@@ -1069,14 +1079,17 @@ mod tests {
 
     #[test]
     fn sqrt_and_powers() {
-        assert_eq!(DecFloat::from_i64(4, 12).sqrt(12).unwrap().to_string(), "2");
+        assert_eq!(
+            DecFloat::from_i64(4, 12).sqrt(12).unwrap().to_string(),
+            "2."
+        );
         assert_starts(
             &DecFloat::from_i64(2, 16).sqrt(16).unwrap(),
             "1.41421356237309",
         );
         assert_eq!(
             DecFloat::from_i64(2, 12).powi(10, 12).unwrap().to_string(),
-            "1024"
+            "1024."
         );
         assert_eq!(
             DecFloat::from_i64(2, 12).powi(-3, 12).unwrap().to_string(),

@@ -169,7 +169,11 @@ fn parse_radix_number(
     let whole = &after[whole_at..i];
     let mut frac = "";
     let mut denom_s: Option<&str> = None;
+    // `16#FF.` is a float, same as a decimal `255.`. An empty fraction
+    // still counts: the point is what distinguishes it from an integer.
+    let mut saw_dot = false;
     if i < bytes.len() && bytes[i] == b'.' {
+        saw_dot = true;
         i += 1;
         let frac_at = i;
         while i < bytes.len() && radix::is_digit(bytes[i] as char, radix) {
@@ -212,7 +216,7 @@ fn parse_radix_number(
         power,
         radix,
         mode.prec,
-        !frac.is_empty() || saw_exp,
+        !frac.is_empty() || saw_exp || saw_dot,
         negative,
     )
 }
@@ -458,14 +462,14 @@ mod tests {
     fn decimals() {
         assert_eq!(p("9.5"), "9.5");
         assert_eq!(p(".5"), "0.5");
-        assert_eq!(p("5."), "5");
+        assert_eq!(p("5."), "5.");
         assert_eq!(p("_1.5"), "-1.5");
-        assert_eq!(p("1.5e1"), "15");
+        assert_eq!(p("1.5e1"), "15.");
         assert_eq!(p("1.5e20"), "1.5e20");
         assert_eq!(p("1e-6"), "1e-6");
         assert_eq!(p("1.2e_3"), "0.0012");
-        assert_eq!(p("1.2E+3"), "1200");
-        assert_eq!(p("0.0"), "0");
+        assert_eq!(p("1.2E+3"), "1200.");
+        assert_eq!(p("0.0"), "0.");
         assert_eq!(p("1e1000000"), "1e1000000");
         assert_eq!(p("1e-1000000"), "1e-1000000");
     }
@@ -527,9 +531,11 @@ mod tests {
         assert_eq!(p("_16#A"), "-10");
         assert_eq!(p("16#F.8"), "15.5");
         assert_eq!(p("16#0.8"), "0.5");
-        assert_eq!(p("8#10e1"), "64");
+        assert_eq!(p("8#10e1"), "64.");
+        assert_eq!(p("8#10."), "8.");
+        assert_eq!(p("16#FF."), "255.");
         assert_eq!(p("8#1e_2"), "0.015625");
-        assert_eq!(p("16#F*16^2"), "3840");
+        assert_eq!(p("16#F*16^2"), "3840.");
         assert_eq!(p("16#1*16^-1"), "0.0625");
         assert_eq!(p("16#A:3"), "10:3");
         assert_eq!(p("(16#3, 16#4)"), "(3, 4)");

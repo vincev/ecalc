@@ -1059,9 +1059,24 @@ mod tests {
         assert_eq!(top("1\n2\n3\n4+*-"), "-13");
         assert_eq!(top("2\n4*7\n9.5*+5\n4/+"), "75.75");
         assert_eq!(top("0.1\n0.2\n+"), "0.3");
-        assert_eq!(top("1.2e+2\n"), "120");
+        assert_eq!(top("1.2e+2\n"), "120.");
         assert_eq!(top("1.2e-1\n"), "0.12");
         assert_eq!(top("(3, -4)\n"), "(3, -4)");
+    }
+
+    #[test]
+    fn float_conversion_keeps_a_trailing_point() {
+        // Emacs Calc shows a whole-number float with a trailing point.
+        assert_eq!(top("6378137cf"), "6378137.");
+        assert_eq!(top("0cf"), "0.");
+        assert_eq!(top("_45cf"), "-45.");
+        assert_eq!(top("1:2cf"), "0.5");
+        assert_eq!(top("(3, 4)cf"), "(3., 4.)");
+        assert_eq!(top("6378137cfcF"), "6378137");
+        assert_eq!(top("6378137cfu"), "6378137");
+        assert_eq!(top("255cfd6"), "16#FF.");
+        assert_eq!(top("1e20cf"), "1e20");
+        assert_eq!(top("5.\n"), "5.");
     }
 
     #[test]
@@ -1089,9 +1104,10 @@ mod tests {
         assert_eq!(top("180C"), "-1");
         assert_eq!(top("45T"), "1");
         assert_eq!(top("1\nIT"), "45");
-        assert_eq!(top("1\n1fT"), "45");
-        assert_eq!(top("mrP2/S"), "1");
-        assert_eq!(top("mrPC"), "-1");
+        // atan2(1, 1) is a float that lands on 45, so the point stays.
+        assert_eq!(top("1\n1fT"), "45.");
+        assert_eq!(top("mrP2/S"), "1.");
+        assert_eq!(top("mrPC"), "-1.");
         assert_eq!(top("mr1\nC"), "0.540302305868");
         assert_eq!(top("1.5\nS"), "0.0261769483079");
         assert_eq!(top("12345678901.5\nS"), "-0.0261769483079");
@@ -1171,9 +1187,9 @@ mod tests {
         assert_eq!(top("7:4\n5:3\n%"), "1:12");
         // A float follows Calc: divide at the current precision, then floor.
         assert_eq!(top("1e20\n3\\"), "33333333333300000000");
-        assert_eq!(top("1e20\n3%"), "100000000");
+        assert_eq!(top("1e20\n3%"), "100000000.");
         assert_eq!(top("1e20\n7\\"), "14285714285700000000");
-        assert_eq!(top("1e20\n7%"), "100000000");
+        assert_eq!(top("1e20\n7%"), "100000000.");
         assert_eq!(top("0.7\n0.2\n%"), "0.1");
         // A quotient that rounds below 1 still floors to 0 or -1 without
         // materializing its enormous denominator.
@@ -1645,8 +1661,8 @@ mod tests {
         assert_eq!(radix_q.top_string().as_deref(), Some("26"));
         assert_eq!(top("16#F.8\n"), "15.5");
         assert_eq!(top("16#A:3\n"), "10:3");
-        assert_eq!(top("16#F*16^2\n"), "3840");
-        assert_eq!(top("8#1e+2\n"), "64");
+        assert_eq!(top("16#F*16^2\n"), "3840.");
+        assert_eq!(top("8#1e+2\n"), "64.");
         assert_eq!(top("(16#3, 16#4)\n"), "(3, 4)");
         assert_eq!(top("10n\n"), "-10");
 

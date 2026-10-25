@@ -384,7 +384,7 @@ const ENTRIES: &[Entry] = &[
         keys: "c f",
         name: "float",
         summary: "convert to a float",
-        body: "c f turns the top value into a float at the current precision.",
+        body: "c f turns the top value into a float at the current precision. A whole number keeps a trailing point, so 6378137 becomes 6378137. A float that is already written in scientific form stays that way.",
     },
     Entry {
         keys: "c F",
