@@ -1,7 +1,8 @@
 //! Full-screen stack, a rounded prompt, and a shortcut bar.
 //!
-//! Colors are the GrokNight palette from Grok Build: gray canvas, a focused
-//! prompt border, bold secondary keys, and muted labels.
+//! The live terminal keeps its own background. Foregrounds are the GrokNight
+//! palette on a dark terminal, and dark text on a light one. The headless
+//! screen test paints the GrokNight canvas.
 
 use crate::app::{App, CONST_COLUMN, Key, VAR_COLUMN};
 use ratatui::Frame;
@@ -11,7 +12,9 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
+use std::cell::Cell;
 use std::io;
+use std::time::Duration;
 
 /// Main background, `#141414`.
 const BG: Color = Color::Rgb(20, 20, 20);
@@ -27,6 +30,317 @@ const GRAY_DIM: Color = Color::Rgb(88, 88, 88);
 const PROMPT_BORDER: Color = Color::Rgb(80, 80, 88);
 /// Error text, `#f7768e`.
 const ERROR: Color = Color::Rgb(247, 118, 142);
+/// Dark text used when the terminal background is light.
+const LIGHT_FG: Color = Color::Rgb(20, 20, 20);
+/// Secondary text on a light terminal.
+const LIGHT_FG_SECONDARY: Color = Color::Rgb(58, 58, 66);
+/// Error text on a light terminal, `#b02030`.
+const LIGHT_ERROR: Color = Color::Rgb(176, 32, 48);
+
+/// One set of colors for a frame. `bg` is the terminal default in the live UI.
+#[derive(Clone, Copy)]
+struct Palette {
+    bg: Color,
+    fg: Color,
+    fg_secondary: Color,
+    gray: Color,
+    gray_dim: Color,
+    prompt_border: Color,
+    error: Color,
+}
+
+/// Painted canvas for the headless screen test, which has no terminal background.
+const GROK_NIGHT: Palette = Palette {
+    bg: BG,
+    fg: FG,
+    fg_secondary: FG_SECONDARY,
+    gray: GRAY,
+    gray_dim: GRAY_DIM,
+    prompt_border: PROMPT_BORDER,
+    error: ERROR,
+};
+
+/// GrokNight foregrounds on the terminal's own background.
+const ON_DARK_TERMINAL: Palette = Palette {
+    bg: Color::Reset,
+    ..GROK_NIGHT
+};
+
+/// Dark text on the terminal's own background.
+const ON_LIGHT_TERMINAL: Palette = Palette {
+    bg: Color::Reset,
+    fg: LIGHT_FG,
+    fg_secondary: LIGHT_FG_SECONDARY,
+    error: LIGHT_ERROR,
+    ..GROK_NIGHT
+};
+
+thread_local! {
+    static ACTIVE: Cell<Palette> = const { Cell::new(GROK_NIGHT) };
+}
+
+fn colors() -> Palette {
+    ACTIVE.with(Cell::get)
+}
+
+fn set_palette(palette: Palette) {
+    ACTIVE.with(|cell| cell.set(palette));
+}
+
+/// How long to wait for the background reply. A terminal that answers the
+/// device-attributes request returns sooner.
+const BG_QUERY_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Ask the terminal for its background and choose foregrounds. No answer keeps
+/// the dark foregrounds, still without painting a background.
+fn install_terminal_palette() {
+    let palette = if terminal_is_light() == Some(true) {
+        ON_LIGHT_TERMINAL
+    } else {
+        ON_DARK_TERMINAL
+    };
+    set_palette(palette);
+}
+
+/// `Some(true)` when black text is the more readable choice.
+fn terminal_is_light() -> Option<bool> {
+    if let Some(rgb) = query_background() {
+        return Some(background_is_light(rgb));
+    }
+    std::env::var("COLORFGBG")
+        .ok()
+        .and_then(|value| colorfgbg_is_light(&value))
+}
+
+fn background_is_light((r, g, b): (u8, u8, u8)) -> bool {
+    let bg = luminance(r, g, b);
+    contrast(0.0, bg) > contrast(1.0, bg)
+}
+
+fn luminance(r: u8, g: u8, b: u8) -> f64 {
+    0.2126 * channel_linear(r) + 0.7152 * channel_linear(g) + 0.0722 * channel_linear(b)
+}
+
+fn channel_linear(channel: u8) -> f64 {
+    let s = f64::from(channel) / 255.0;
+    if s <= 0.04045 {
+        s / 12.92
+    } else {
+        ((s + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn contrast(fg: f64, bg: f64) -> f64 {
+    let (hi, lo) = if fg > bg { (fg, bg) } else { (bg, fg) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// `COLORFGBG` is `fg;bg` or `fg;xpm;bg`. Indexes 0–6 and 8 are dark.
+fn colorfgbg_is_light(value: &str) -> Option<bool> {
+    let bg = value.split(';').next_back()?.trim();
+    let index: u16 = bg.parse().ok()?;
+    if index > 15 {
+        return None;
+    }
+    Some(!(index <= 6 || index == 8))
+}
+
+/// OSC 11, then a primary device attributes request so a terminal that ignores
+/// the color query still ends the read.
+#[cfg(unix)]
+fn query_background() -> Option<(u8, u8, u8)> {
+    use std::io::{IsTerminal, Write};
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        return None;
+    }
+    let _raw = RawMode::enter().ok()?;
+    let mut out = std::io::stdout();
+    out.write_all(b"\x1b]11;?\x07\x1b[c").ok()?;
+    out.flush().ok()?;
+    let bytes = read_tty_reply(BG_QUERY_TIMEOUT).ok()?;
+    parse_background(&bytes)
+}
+
+#[cfg(not(unix))]
+fn query_background() -> Option<(u8, u8, u8)> {
+    None
+}
+
+#[cfg(unix)]
+struct RawMode;
+
+#[cfg(unix)]
+impl RawMode {
+    fn enter() -> io::Result<Self> {
+        ratatui::crossterm::terminal::enable_raw_mode()?;
+        Ok(Self)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RawMode {
+    fn drop(&mut self) {
+        let _ = ratatui::crossterm::terminal::disable_raw_mode();
+    }
+}
+
+#[cfg(unix)]
+fn read_tty_reply(timeout: Duration) -> io::Result<Vec<u8>> {
+    use std::os::fd::AsRawFd;
+    let fd = std::io::stdin().as_raw_fd();
+    let mut got = Vec::new();
+    let deadline = std::time::Instant::now() + timeout;
+    let mut buf = [0u8; 256];
+    loop {
+        if has_device_attributes(&got) || got.len() > 2048 {
+            break;
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() || !wait_readable(fd, left)? {
+            break;
+        }
+        match read_fd(fd, &mut buf) {
+            Ok(0) => break,
+            Ok(n) => got.extend_from_slice(&buf[..n]),
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(got)
+}
+
+#[cfg(unix)]
+fn wait_readable(fd: i32, timeout: Duration) -> io::Result<bool> {
+    let mut fds = [libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    let ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    loop {
+        // Safety: `fd` is this process's stdin, and `fds` points at one pollfd.
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), 1, ms) };
+        if rc >= 0 {
+            return Ok((fds[0].revents & libc::POLLIN) != 0);
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn read_fd(fd: i32, buf: &mut [u8]) -> io::Result<usize> {
+    loop {
+        // Safety: `buf` is a live writable slice and `fd` is this process's stdin.
+        // Reading the fd directly keeps the reply out of Rust's stdin buffer.
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if n >= 0 {
+            return Ok(usize::try_from(n).unwrap_or(0));
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+/// True when `data` contains a primary device attributes reply, `ESC [ … c`.
+fn has_device_attributes(data: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 2 < data.len() {
+        if data[i] == 0x1b && data[i + 1] == b'[' {
+            let mut j = i + 2;
+            if j < data.len() && data[j] == b'?' {
+                j += 1;
+            }
+            while j < data.len() && (data[j].is_ascii_digit() || data[j] == b';') {
+                j += 1;
+            }
+            if j < data.len() && data[j] == b'c' {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The color from an OSC 11 reply anywhere in `data`.
+fn parse_background(data: &[u8]) -> Option<(u8, u8, u8)> {
+    let mut i = 0;
+    while i + 5 <= data.len() {
+        if data[i] == 0x1b && data[i + 1] == b']' && data[i + 2..].starts_with(b"11;") {
+            let rest = &data[i + 5..];
+            let end = rest
+                .iter()
+                .position(|&byte| byte == 0x07)
+                .or_else(|| rest.windows(2).position(|pair| pair == b"\x1b\\"));
+            let raw = end.map(|end| &rest[..end]).unwrap_or(rest);
+            if let Some(rgb) = parse_osc_color(raw) {
+                return Some(rgb);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn parse_osc_color(raw: &[u8]) -> Option<(u8, u8, u8)> {
+    let value = raw.trim_ascii();
+    if value.is_empty() {
+        return None;
+    }
+    if let Some(hex) = value.strip_prefix(b"#") {
+        return parse_hash(hex);
+    }
+    let value = strip_color_prefix(value, b"rgba:")
+        .or_else(|| strip_color_prefix(value, b"rgb:"))
+        .unwrap_or(value);
+    let mut parts = value.split(|&byte| byte == b'/');
+    let r = scale_channel(parts.next()?)?;
+    let g = scale_channel(parts.next()?)?;
+    let b = scale_channel(parts.next()?)?;
+    Some((r, g, b))
+}
+
+fn strip_color_prefix<'a>(value: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
+    if value.len() >= prefix.len() && value[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        Some(&value[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+fn parse_hash(hex: &[u8]) -> Option<(u8, u8, u8)> {
+    match hex.len() {
+        6 => Some((
+            scale_channel(&hex[0..2])?,
+            scale_channel(&hex[2..4])?,
+            scale_channel(&hex[4..6])?,
+        )),
+        12 => Some((
+            scale_channel(&hex[0..4])?,
+            scale_channel(&hex[4..8])?,
+            scale_channel(&hex[8..12])?,
+        )),
+        _ => None,
+    }
+}
+
+/// Scale a 1–4 digit hex channel onto 0–255, rounding to the nearest value.
+fn scale_channel(channel: &[u8]) -> Option<u8> {
+    if channel.is_empty() || channel.len() > 4 {
+        return None;
+    }
+    let text = std::str::from_utf8(channel).ok()?;
+    let value = u32::from_str_radix(text, 16).ok()?;
+    let max = (1u32 << (channel.len() * 4)) - 1;
+    let scaled = (u64::from(value) * 255 + u64::from(max) / 2) / u64::from(max);
+    u8::try_from(scaled).ok()
+}
+
 /// Columns kept clear of the screen edge, matching Grok Build's outer padding.
 const SIDE_PAD: u16 = 2;
 /// Blank columns between the prompt border and the text being typed.
@@ -45,6 +359,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
 ];
 
 pub fn run() -> io::Result<()> {
+    install_terminal_palette();
     let mut app = App::new();
     ratatui::run(|terminal| {
         loop {
@@ -81,7 +396,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let area = frame.area();
     frame
         .buffer_mut()
-        .set_style(area, Style::default().fg(FG).bg(BG));
+        .set_style(area, Style::default().fg(colors().fg).bg(colors().bg));
 
     // Prompt, then a blank row, the shortcuts, and a blank row at the screen edge.
     let chunks = Layout::vertical([
@@ -154,18 +469,21 @@ fn stack_lines(app: &App, rows: usize, width: usize) -> Vec<Line<'static>> {
     let shown = fit_stack(&wrapped, room);
     let pad = room.saturating_sub(shown.len());
     let mut lines = Vec::with_capacity(rows);
-    let blank = Style::default().bg(BG);
+    let blank = Style::default().bg(colors().bg);
     for _ in 0..pad {
         lines.push(Line::from(Span::styled(" ", blank)));
     }
-    let value = Style::default().fg(FG).bg(BG);
+    let value = Style::default().fg(colors().fg).bg(colors().bg);
     let indent = " ".repeat(STACK_INDENT);
     for text in shown {
         lines.push(Line::from(Span::styled(format!("{indent}{text}"), value)));
     }
     lines.push(Line::from(Span::styled(
         format!("{indent}."),
-        Style::default().fg(GRAY_DIM).bg(BG),
+        Style::default()
+            .fg(colors().fg)
+            .bg(colors().bg)
+            .add_modifier(Modifier::BOLD),
     )));
     lines
 }
@@ -252,7 +570,7 @@ fn draw_prompt(buf: &mut Buffer, area: Rect, app: &App) {
     if area.height < 3 || area.width < 4 {
         return;
     }
-    let border = Style::default().fg(PROMPT_BORDER).bg(BG);
+    let border = Style::default().fg(colors().prompt_border).bg(colors().bg);
     let last_x = area.x + area.width - 1;
     let top = area.y;
     let mid = area.y + 1;
@@ -271,7 +589,13 @@ fn draw_prompt(buf: &mut Buffer, area: Rect, app: &App) {
         if x == area.x || x == last_x {
             paint_char(buf, x, mid, '│', border);
         } else {
-            paint_char(buf, x, mid, ' ', Style::default().fg(FG).bg(BG));
+            paint_char(
+                buf,
+                x,
+                mid,
+                ' ',
+                Style::default().fg(colors().fg).bg(colors().bg),
+            );
         }
     }
 
@@ -297,7 +621,7 @@ fn draw_prompt(buf: &mut Buffer, area: Rect, app: &App) {
 fn paint_info(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
     let last_x = area.x + area.width - 1;
     let caption = format!("{} ", app.mode_line().replace("  ", " · "));
-    let pad_style = Style::default().bg(BG);
+    let pad_style = Style::default().bg(colors().bg);
     // One blank cell inside the left corner, so the mode line does not sit on it.
     paint_char(buf, area.x + 1, y, ' ', pad_style);
 
@@ -317,9 +641,9 @@ fn paint_info(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
         format!(" {message}")
     };
     let msg_style = if app.engine().is_error() {
-        Style::default().fg(ERROR).bg(BG)
+        Style::default().fg(colors().error).bg(colors().bg)
     } else {
-        Style::default().fg(GRAY).bg(BG)
+        Style::default().fg(colors().gray).bg(colors().bg)
     };
 
     let msg_room = (msg_end as usize).saturating_sub(area.x as usize + 1 + PROMPT_INNER as usize);
@@ -340,7 +664,7 @@ fn paint_info(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
             y,
             caption_end,
             &caption,
-            Style::default().fg(GRAY).bg(BG),
+            Style::default().fg(colors().gray).bg(colors().bg),
         );
     }
     if !msg_text.is_empty() && msg_x < msg_end {
@@ -474,14 +798,14 @@ impl Dialog {
             height,
         };
 
-        let fill = Style::default().bg(BG);
+        let fill = Style::default().bg(colors().bg);
         for y in rect.y..rect.y + rect.height {
             for x in rect.x..rect.x + rect.width {
                 paint_char(buf, x, y, ' ', fill);
             }
         }
 
-        let border = Style::default().fg(GRAY_DIM).bg(BG);
+        let border = Style::default().fg(colors().gray_dim).bg(colors().bg);
         let last_x = rect.x + rect.width - 1;
         let last_y = rect.y + rect.height - 1;
         for x in rect.x..rect.x + rect.width {
@@ -510,7 +834,7 @@ impl Dialog {
     }
 
     fn title(&self, buf: &mut Buffer, title: &str) {
-        let border = Style::default().fg(GRAY_DIM).bg(BG);
+        let border = Style::default().fg(colors().gray_dim).bg(colors().bg);
         let last_x = self.rect.x + self.rect.width - 1;
         let title_end = last_x.saturating_sub(8);
         let mut title_x = self.rect.x + 1;
@@ -521,7 +845,10 @@ impl Dialog {
             self.rect.y,
             title_end,
             title,
-            Style::default().fg(FG).bg(BG).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(colors().fg)
+                .bg(colors().bg)
+                .add_modifier(Modifier::BOLD),
         );
         paint_str(buf, title_x, self.rect.y, title_end, " ─", border);
 
@@ -534,7 +861,7 @@ impl Dialog {
                 self.rect.y,
                 last_x,
                 close,
-                Style::default().fg(GRAY).bg(BG),
+                Style::default().fg(colors().gray).bg(colors().bg),
             );
         }
     }
@@ -586,7 +913,7 @@ impl Dialog {
                 self.rect.y + 1,
                 self.inner_x + self.text_w,
                 &page_text,
-                Style::default().fg(GRAY).bg(BG),
+                Style::default().fg(colors().gray).bg(colors().bg),
             );
         }
     }
@@ -619,7 +946,11 @@ fn draw_help(buf: &mut Buffer, window: Rect, above: Rect) {
         return;
     };
     dialog.title(buf, "Shortcuts");
-    dialog.note(buf, "? for a description", Style::default().fg(GRAY).bg(BG));
+    dialog.note(
+        buf,
+        "? for a description",
+        Style::default().fg(colors().gray).bg(colors().bg),
+    );
     if dialog.content_h > 0 {
         let content = Rect {
             x: dialog.inner_x,
@@ -694,7 +1025,7 @@ fn draw_docs(buf: &mut Buffer, area: Rect, app: &App) {
                 y,
                 dialog.inner_x + dialog.text_w,
                 "no match",
-                Style::default().fg(GRAY).bg(BG),
+                Style::default().fg(colors().gray).bg(colors().bg),
             );
         }
     }
@@ -752,7 +1083,7 @@ fn draw_docs_query(dialog: &Dialog, buf: &mut Buffer, query: &str, cursor: usize
             y,
             text_end,
             "type to search",
-            Style::default().fg(GRAY).bg(BG),
+            Style::default().fg(colors().gray).bg(colors().bg),
         );
     } else {
         col = paint_str(buf, col, y, text_end, query, text_style());
@@ -767,7 +1098,7 @@ fn draw_docs_query(dialog: &Dialog, buf: &mut Buffer, query: &str, cursor: usize
             y,
             end,
             &page,
-            Style::default().fg(GRAY).bg(BG),
+            Style::default().fg(colors().gray).bg(colors().bg),
         );
     }
 }
@@ -781,15 +1112,24 @@ fn draw_docs_row(
     selected: bool,
 ) {
     let key_style = Style::default()
-        .fg(if selected { FG } else { FG_SECONDARY })
-        .bg(BG)
+        .fg(if selected {
+            colors().fg
+        } else {
+            colors().fg_secondary
+        })
+        .bg(colors().bg)
         .add_modifier(Modifier::BOLD);
     let name_style = if selected {
-        Style::default().fg(FG).bg(BG).add_modifier(Modifier::BOLD)
+        Style::default()
+            .fg(colors().fg)
+            .bg(colors().bg)
+            .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(GRAY).bg(BG)
+        Style::default().fg(colors().gray).bg(colors().bg)
     };
-    let summary_style = Style::default().fg(if selected { FG } else { GRAY }).bg(BG);
+    let summary_style = Style::default()
+        .fg(if selected { colors().fg } else { colors().gray })
+        .bg(colors().bg);
     let mut col = paint_str(
         buf,
         x,
@@ -799,7 +1139,7 @@ fn draw_docs_row(
         if selected {
             arrow_style()
         } else {
-            Style::default().bg(BG)
+            Style::default().bg(colors().bg)
         },
     );
     col = paint_field(buf, col, y, end, entry.keys, 4, key_style);
@@ -821,7 +1161,7 @@ fn paint_field(
     let field_end = x.saturating_add(width).min(end);
     let mut col = paint_str(buf, x, y, field_end, text, style);
     while col < field_end {
-        paint_char(buf, col, y, ' ', Style::default().bg(BG));
+        paint_char(buf, col, y, ' ', Style::default().bg(colors().bg));
         col += 1;
     }
     col
@@ -831,14 +1171,14 @@ fn paint_gap(buf: &mut Buffer, x: u16, y: u16, end: u16, width: u16) -> u16 {
     let gap_end = x.saturating_add(width).min(end);
     let mut col = x;
     while col < gap_end {
-        paint_char(buf, col, y, ' ', Style::default().bg(BG));
+        paint_char(buf, col, y, ' ', Style::default().bg(colors().bg));
         col += 1;
     }
     col
 }
 
 fn paint_rule(buf: &mut Buffer, x: u16, y: u16, width: u16) {
-    let style = Style::default().fg(GRAY_DIM).bg(BG);
+    let style = Style::default().fg(colors().gray_dim).bg(colors().bg);
     for col in x..x.saturating_add(width) {
         paint_char(buf, col, y, '─', style);
     }
@@ -862,7 +1202,10 @@ fn draw_docs_article(
         y,
         end,
         &head,
-        Style::default().fg(FG).bg(BG).add_modifier(Modifier::BOLD),
+        Style::default()
+            .fg(colors().fg)
+            .bg(colors().bg)
+            .add_modifier(Modifier::BOLD),
     );
     if rows == 1 {
         return;
@@ -873,7 +1216,7 @@ fn draw_docs_article(
         y + 1,
         end,
         entry.summary,
-        Style::default().fg(GRAY).bg(BG),
+        Style::default().fg(colors().gray).bg(colors().bg),
     );
     if rows <= 2 {
         return;
@@ -893,7 +1236,7 @@ fn draw_docs_article(
             body_y + row as u16,
             end,
             &line,
-            Style::default().fg(FG).bg(BG),
+            Style::default().fg(colors().fg).bg(colors().bg),
         );
     }
 }
@@ -963,11 +1306,11 @@ fn draw_help_grid(
 ) {
     let show = rows_fit as usize;
     let key_style = Style::default()
-        .fg(FG_SECONDARY)
-        .bg(BG)
+        .fg(colors().fg_secondary)
+        .bg(colors().bg)
         .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(GRAY).bg(BG);
-    let pad_style = Style::default().bg(BG);
+    let label_style = Style::default().fg(colors().gray).bg(colors().bg);
+    let pad_style = Style::default().bg(colors().bg);
     for (col, entries) in columns.iter().enumerate() {
         for (row, (key, label)) in entries.iter().enumerate().take(show) {
             let y = area.y + row as u16;
@@ -1000,13 +1343,20 @@ fn draw_centered_hints(buf: &mut Buffer, x: u16, y: u16, width: u16, hints: &[(&
     let mut col = x + (width as usize - total) as u16 / 2;
     let end = x + width;
     let key_style = Style::default()
-        .fg(FG_SECONDARY)
-        .bg(BG)
+        .fg(colors().fg_secondary)
+        .bg(colors().bg)
         .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(GRAY).bg(BG);
+    let label_style = Style::default().fg(colors().gray).bg(colors().bg);
     for (i, (key, label)) in hints.iter().enumerate() {
         if i > 0 {
-            col = paint_str(buf, col, y, end, sep, Style::default().fg(GRAY_DIM).bg(BG));
+            col = paint_str(
+                buf,
+                col,
+                y,
+                end,
+                sep,
+                Style::default().fg(colors().gray_dim).bg(colors().bg),
+            );
         }
         col = paint_str(buf, col, y, end, key, key_style);
         col = paint_str(buf, col, y, end, " ", label_style);
@@ -1034,9 +1384,9 @@ fn draw_variables(buf: &mut Buffer, area: Rect, app: &App) {
         app.var_note()
     };
     let note_style = if app.var_note().is_empty() {
-        Style::default().fg(GRAY).bg(BG)
+        Style::default().fg(colors().gray).bg(colors().bg)
     } else {
-        Style::default().fg(ERROR).bg(BG)
+        Style::default().fg(colors().error).bg(colors().bg)
     };
     dialog.note_page(buf, note, note_style, app.var_page(), app.var_pages());
 
@@ -1047,7 +1397,7 @@ fn draw_variables(buf: &mut Buffer, area: Rect, app: &App) {
             dialog.content_y,
             dialog.inner_x + dialog.text_w,
             "nothing stored",
-            Style::default().fg(GRAY).bg(BG),
+            Style::default().fg(colors().gray).bg(colors().bg),
         );
     } else if dialog.content_h > 0 {
         let col_w = (dialog.text_w as usize - HELP_GAP) / 2;
@@ -1092,9 +1442,9 @@ fn draw_constants(buf: &mut Buffer, area: Rect, app: &App) {
         app.const_note()
     };
     let note_style = if app.const_note().is_empty() {
-        Style::default().fg(GRAY).bg(BG)
+        Style::default().fg(colors().gray).bg(colors().bg)
     } else {
-        Style::default().fg(ERROR).bg(BG)
+        Style::default().fg(colors().error).bg(colors().bg)
     };
     dialog.note_page(buf, note, note_style, app.const_page(), app.const_pages());
 
@@ -1155,12 +1505,15 @@ fn paint_const_cell(
         return;
     }
     let key_style = Style::default()
-        .fg(FG_SECONDARY)
-        .bg(BG)
+        .fg(colors().fg_secondary)
+        .bg(colors().bg)
         .add_modifier(Modifier::BOLD);
-    let symbol_style = Style::default().fg(FG).bg(BG).add_modifier(Modifier::BOLD);
-    let name_style = Style::default().fg(FG).bg(BG);
-    let punct = Style::default().fg(GRAY).bg(BG);
+    let symbol_style = Style::default()
+        .fg(colors().fg)
+        .bg(colors().bg)
+        .add_modifier(Modifier::BOLD);
+    let name_style = Style::default().fg(colors().fg).bg(colors().bg);
+    let punct = Style::default().fg(colors().gray).bg(colors().bg);
     let mut col = paint_str(buf, x, y, end, &key.to_string(), key_style);
     if col >= end {
         return;
@@ -1190,11 +1543,11 @@ fn paint_var_cell(buf: &mut Buffer, x: u16, y: u16, end: u16, name: &str, value:
     }
     let width = (end - x) as usize;
     let name_style = Style::default()
-        .fg(FG_SECONDARY)
-        .bg(BG)
+        .fg(colors().fg_secondary)
+        .bg(colors().bg)
         .add_modifier(Modifier::BOLD);
-    let punct = Style::default().fg(GRAY).bg(BG);
-    let value_style = Style::default().fg(FG).bg(BG);
+    let punct = Style::default().fg(colors().gray).bg(colors().bg);
+    let value_style = Style::default().fg(colors().fg).bg(colors().bg);
     let name_len = name.chars().count();
     if name_len + 2 >= width {
         let keep = width.saturating_sub(2);
@@ -1223,7 +1576,13 @@ fn draw_shortcuts(buf: &mut Buffer, area: Rect, app: &App) {
     let y = area.y;
     let end = area.x + area.width;
     for x in area.x..end {
-        paint_char(buf, x, y, ' ', Style::default().fg(GRAY).bg(BG));
+        paint_char(
+            buf,
+            x,
+            y,
+            ' ',
+            Style::default().fg(colors().gray).bg(colors().bg),
+        );
     }
 
     let var_hints = var_footer_hints(app);
@@ -1240,11 +1599,11 @@ fn draw_shortcuts(buf: &mut Buffer, area: Rect, app: &App) {
         SHORTCUTS
     };
     let key_style = Style::default()
-        .fg(FG_SECONDARY)
-        .bg(BG)
+        .fg(colors().fg_secondary)
+        .bg(colors().bg)
         .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(GRAY).bg(BG);
-    let sep_style = Style::default().fg(GRAY_DIM).bg(BG);
+    let label_style = Style::default().fg(colors().gray).bg(colors().bg);
+    let sep_style = Style::default().fg(colors().gray_dim).bg(colors().bg);
 
     let mut x = area.x;
     for (i, (key, label)) in hints.iter().enumerate() {
@@ -1263,11 +1622,11 @@ fn draw_shortcuts(buf: &mut Buffer, area: Rect, app: &App) {
 }
 
 fn arrow_style() -> Style {
-    Style::default().fg(FG_SECONDARY).bg(BG)
+    Style::default().fg(colors().fg_secondary).bg(colors().bg)
 }
 
 fn text_style() -> Style {
-    Style::default().fg(FG).bg(BG)
+    Style::default().fg(colors().fg).bg(colors().bg)
 }
 
 fn paint_char(buf: &mut Buffer, x: u16, y: u16, ch: char, style: Style) {
@@ -1393,6 +1752,10 @@ mod tests {
         assert_eq!(col(&rows[top], '3'), typed_at);
         assert_eq!(col(&rows[oldest], '1'), typed_at);
         assert_eq!(col(&rows[dot], '.'), typed_at);
+        let marker = &buffer[(typed_at as u16, dot as u16)];
+        assert_eq!(marker.symbol(), ".");
+        assert_eq!(marker.fg, FG);
+        assert!(marker.modifier.contains(Modifier::BOLD));
         assert!(!rows.iter().any(|row| row.contains('\\')));
         assert!(
             rows.iter()
@@ -1821,5 +2184,95 @@ mod tests {
                 .any(|row| row.contains("dm") && row.contains("distance"))
         );
         assert!(rows.iter().all(|row| !row.contains("light")));
+    }
+
+    /// Puts the GrokNight canvas back even when an assertion fails.
+    struct PaletteGuard;
+
+    impl Drop for PaletteGuard {
+        fn drop(&mut self) {
+            set_palette(GROK_NIGHT);
+        }
+    }
+
+    fn contrast_ratio(fg: Color, bg: (u8, u8, u8)) -> f64 {
+        let Color::Rgb(r, g, b) = fg else {
+            panic!("expected an rgb color");
+        };
+        contrast(luminance(r, g, b), luminance(bg.0, bg.1, bg.2))
+    }
+
+    #[test]
+    fn reported_background_selects_the_text() {
+        assert!(background_is_light((255, 255, 255)));
+        assert!(background_is_light((232, 232, 232)));
+        assert!(background_is_light((128, 128, 128)));
+        assert!(!background_is_light((20, 20, 20)));
+        assert!(!background_is_light((0, 0, 0)));
+        let white = (255, 255, 255);
+        assert!(contrast_ratio(LIGHT_FG, white) >= 4.5);
+        assert!(contrast_ratio(LIGHT_FG_SECONDARY, white) >= 4.5);
+        assert!(contrast_ratio(LIGHT_ERROR, white) >= 4.5);
+        assert!(contrast_ratio(FG, (20, 20, 20)) >= 4.5);
+    }
+
+    #[test]
+    fn osc11_replies_parse() {
+        assert_eq!(
+            parse_background(b"\x1b]11;rgb:ffff/ffff/ffff\x07\x1b[?1;2c"),
+            Some((255, 255, 255))
+        );
+        assert_eq!(
+            parse_background(b"\x1b]11;rgb:1414/1414/1414\x1b\\"),
+            Some((20, 20, 20))
+        );
+        assert_eq!(
+            parse_background(b"\x1b]11;rgb:e8e8/e8e8/e8e8\x07"),
+            Some((232, 232, 232))
+        );
+        assert_eq!(
+            parse_background(b"\x1b]11;#ffffff\x07"),
+            Some((255, 255, 255))
+        );
+        assert_eq!(
+            parse_background(b"\x1b]11;#ffffffffffff\x1b\\"),
+            Some((255, 255, 255))
+        );
+        assert_eq!(
+            parse_background(b"\x1b]11;rgba:ff/00/00/ff\x07"),
+            Some((255, 0, 0))
+        );
+        assert_eq!(parse_background(b"\x1b[?1;2c"), None);
+        assert_eq!(parse_background(b"\x1b]11;rgb:zz/00/00\x07"), None);
+        assert!(has_device_attributes(b"\x1b[?1;2c"));
+        assert!(has_device_attributes(
+            b"\x1b]11;rgb:ffff/ffff/ffff\x07\x1b[?64;1;2c"
+        ));
+        assert!(!has_device_attributes(b"\x1b]11;rgb:ffff/ffff/ffff\x07"));
+    }
+
+    #[test]
+    fn colorfgbg_uses_the_background_index() {
+        assert_eq!(colorfgbg_is_light("15;0"), Some(false));
+        assert_eq!(colorfgbg_is_light("0;15"), Some(true));
+        assert_eq!(colorfgbg_is_light("default;8"), Some(false));
+        assert_eq!(colorfgbg_is_light("15;7"), Some(true));
+        assert_eq!(colorfgbg_is_light("default"), None);
+    }
+
+    #[test]
+    fn light_terminal_keeps_the_default_background() {
+        let _guard = PaletteGuard;
+        set_palette(ON_LIGHT_TERMINAL);
+        let buffer = render(&App::new(), 40, 12);
+        let cell = &buffer[(0, 0)];
+        assert_eq!(cell.bg, Color::Reset);
+        assert_eq!(cell.fg, LIGHT_FG);
+
+        set_palette(ON_DARK_TERMINAL);
+        let buffer = render(&App::new(), 40, 12);
+        let cell = &buffer[(0, 0)];
+        assert_eq!(cell.bg, Color::Reset);
+        assert_eq!(cell.fg, FG);
     }
 }

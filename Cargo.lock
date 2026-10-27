@@ -312,9 +312,10 @@ dependencies = [
 
 [[package]]
 name = "ecalc"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "crossterm",
+ "libc",
  "num-bigint",
  "num-integer",
  "num-rational",
