@@ -360,7 +360,7 @@ const ENTRIES: &[Entry] = &[
         keys: "p",
         name: "prec",
         summary: "working precision",
-        body: "p sets the precision in significant digits, then digits, then RET. The default is 12. q cancels the prompt and leaves the stack.",
+        body: "p sets the precision in significant digits, then digits, then RET. The default is 12. A float is written in full while its order runs from -2 through one less than that precision, and in scientific form past either end. q cancels the prompt and leaves the stack.",
     },
     Entry {
         keys: "m d",
@@ -384,7 +384,7 @@ const ENTRIES: &[Entry] = &[
         keys: "c f",
         name: "float",
         summary: "convert to a float",
-        body: "c f turns the top value into a float at the current precision. A whole number keeps a trailing point, so 6378137 becomes 6378137. A float that is already written in scientific form stays that way.",
+        body: "c f turns the top value into a float at the current precision. A whole number keeps a trailing point, so 6378137 becomes 6378137. At precision 12, 4.2e10 is written 42000000000. and 1e20 stays 1e20.",
     },
     Entry {
         keys: "c F",

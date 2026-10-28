@@ -1080,6 +1080,20 @@ mod tests {
     }
 
     #[test]
+    fn float_notation_follows_precision() {
+        // Emacs Calc normal format: fixed from order -2 through precision-1.
+        assert_eq!(top("4.2e10\n"), "42000000000.");
+        assert_eq!(top("1e11\n"), "100000000000.");
+        assert_eq!(top("1e12\n"), "1e12");
+        assert_eq!(top("0.01\n"), "0.01");
+        assert_eq!(top("0.001\n"), "1e-3");
+        assert_eq!(top("p6\n4.2e10\n"), "4.2e10");
+        assert_eq!(top("p20\n4.2e19\n"), "42000000000000000000.");
+        assert_eq!(top("p20\n1e20\n"), "1e20");
+        assert_eq!(top("4.2e10\ndg"), "42,000,000,000.");
+    }
+
+    #[test]
     fn powers_roots_and_exact_integers() {
         assert_eq!(top("2\n10^"), "1024");
         assert_eq!(top("2\n100^"), "1267650600228229401496703205376");
@@ -1574,7 +1588,7 @@ mod tests {
         app.press(Key::Tab);
         app.press(Key::Tab);
         app.keys("0");
-        assert_eq!(app.top_string().as_deref(), Some("0.007297352533"));
+        assert_eq!(app.top_string().as_deref(), Some("7.297352533e-3"));
         assert_eq!(app.engine().message(), "alpha");
         app.keys("K");
         app.press(Key::Tab);

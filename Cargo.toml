@@ -7,7 +7,7 @@ keywords = ["calculator", "rpn", "terminal", "tui"]
 license = "Apache-2.0"
 name = "ecalc"
 repository = "https://github.com/vincev/ecalc.git"
-version = "0.2.14"
+version = "0.2.15"
 
 [[bin]]
 name = "ec"

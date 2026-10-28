@@ -37,16 +37,14 @@ pub(crate) fn format_value(value: &Value, mode: &Mode) -> String {
 }
 
 fn format_real(real: &Real, mode: &Mode) -> String {
-    let text = if mode.radix == 10 && !mode.leading_zeros {
-        real.to_string()
-    } else {
-        match real {
-            Real::Int(n) => format_int(n, mode),
-            Real::Rat(r) if mode.radix == 10 => Real::Rat(r.clone()).to_string(),
-            Real::Rat(r) => format_rat(r, mode),
-            Real::Float(f) if mode.radix == 10 => f.to_string(),
-            Real::Float(f) => format_float(f, mode),
-        }
+    let text = match real {
+        // Decimal notation follows `p`, not the digits stored on the float.
+        Real::Float(f) if mode.radix == 10 => f.format_decimal(mode.prec),
+        Real::Int(_) | Real::Rat(_) if mode.radix == 10 && !mode.leading_zeros => real.to_string(),
+        Real::Int(n) => format_int(n, mode),
+        Real::Rat(r) if mode.radix == 10 => Real::Rat(r.clone()).to_string(),
+        Real::Rat(r) => format_rat(r, mode),
+        Real::Float(f) => format_float(f, mode),
     };
     if mode.group_digits {
         group_formatted(&text, mode.radix)
@@ -199,7 +197,7 @@ fn format_float(f: &DecFloat, mode: &Mode) -> String {
     } else {
         man.div(&scale)
     };
-    render_float(scaled.round_to(show), negative)
+    render_float(scaled.round_to(show), negative, show)
 }
 
 fn sig_digits(decimal_prec: u32, radix: u32) -> u32 {
@@ -208,7 +206,7 @@ fn sig_digits(decimal_prec: u32, radix: u32) -> u32 {
     (need + 1e-9).ceil().max(1.0) as u32
 }
 
-fn render_float(value: RFloat, negative: bool) -> String {
+fn render_float(value: RFloat, negative: bool, show: u32) -> String {
     let radix = value.radix;
     let (sig, exp) = strip_trailing(value.sig, value.exp, radix);
     if sig.is_zero() {
@@ -216,7 +214,8 @@ fn render_float(value: RFloat, negative: bool) -> String {
     }
     let digits = sig.to_str_radix(radix).to_ascii_uppercase();
     let order = exp + digits.len() as i64 - 1;
-    let body = if order >= 10 || order <= -5 {
+    // `show` is the precision measured in digits of this radix.
+    let body = if float::uses_scientific(order, show) {
         scientific(&digits, order, radix)
     } else {
         float::fixed_point(&digits, exp)
@@ -493,8 +492,9 @@ mod tests {
 
         let mut bin = mode_radix(2);
         bin.prec = 12;
+        // 2000 is 11 bits. Precision 12 is about 40 bits, so it is written out.
         let two_thousand = Value::real(Real::Float(float_at(2, 3, 1)));
-        assert_eq!(format_value(&two_thousand, &bin), "2#1.111101e10");
+        assert_eq!(format_value(&two_thousand, &bin), "2#11111010000.");
 
         let zeros = Mode {
             leading_zeros: true,
@@ -538,6 +538,14 @@ mod tests {
         assert_eq!(format_value(&frac_only, &mode), "0.123454");
         let scientific = Value::real(Real::Float(float_at(1, 100, 12)));
         assert_eq!(format_value(&scientific, &mode), "1e100");
+        let expanded = Value::real(Real::Float(float_at(42, 9, 2)));
+        assert_eq!(format_value(&expanded, &mode), "42,000,000,000.");
+        let narrow = Mode {
+            group_digits: true,
+            prec: 6,
+            ..Mode::default()
+        };
+        assert_eq!(format_value(&expanded, &narrow), "4.2e10");
         let whole = Value::real(Real::Float(float_at(6_378_137, 0, 12)));
         assert_eq!(format_value(&whole, &mode), "6,378,137.");
 

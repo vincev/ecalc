@@ -154,12 +154,7 @@ mod tests {
     #[test]
     fn published_digits_round_trip() {
         for item in CATALOG {
-            let expect = if item.symbol == "alpha" {
-                "0.007297352533"
-            } else {
-                item.literal
-            };
-            assert_eq!(value(item).to_string(), expect, "{}", item.symbol);
+            assert_eq!(value(item).to_string(), item.literal, "{}", item.symbol);
         }
     }
 }

@@ -634,7 +634,13 @@ impl DecFloat {
         diff.order() <= scale - prec as i64 + 1
     }
 
-    fn format_string(&self) -> String {
+    /// Decimal rendering at a display precision.
+    ///
+    /// This is Emacs Calc's normal format, `(float 0)`. `calc-display-sci-high`
+    /// is 0 and `calc-display-sci-low` is -3, so the number is written in full
+    /// while its order runs from -2 through `prec - 1`. The stored `self.prec`
+    /// is the digits the value keeps, which is not this display precision.
+    pub(crate) fn format_decimal(&self, prec: u32) -> String {
         if self.is_zero() {
             // A float zero is `0.`, so it is distinct from the integer 0.
             return "0.".to_string();
@@ -642,7 +648,7 @@ impl DecFloat {
         let neg = if self.is_negative() { "-" } else { "" };
         let digits = self.mantissa.abs().to_str_radix(10);
         let order = self.exponent + digits.len() as i64 - 1;
-        if order >= 10 || order <= -5 {
+        if uses_scientific(order, prec) {
             format!("{neg}{}e{order}", scientific_mantissa(&digits))
         } else {
             format!("{neg}{}", fixed_point(&digits, self.exponent))
@@ -650,9 +656,15 @@ impl DecFloat {
     }
 }
 
+/// Scientific notation when `order` is at least `prec`, or at most -3.
+pub(crate) fn uses_scientific(order: i64, prec: u32) -> bool {
+    let prec = i64::from(prec.max(1));
+    order >= prec || order <= -3
+}
+
 impl fmt::Display for DecFloat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.format_string())
+        f.write_str(&self.format_decimal(DEFAULT_PRECISION))
     }
 }
 
@@ -661,7 +673,7 @@ impl fmt::Debug for DecFloat {
         write!(
             f,
             "{} (man={}, exp={}, prec={})",
-            self.format_string(),
+            self.format_decimal(DEFAULT_PRECISION),
             self.mantissa,
             self.exponent,
             self.prec
@@ -1039,6 +1051,24 @@ mod tests {
         assert_eq!(p("75.75", 12).to_string(), "75.75");
         assert_eq!(p("1.5e20", 12).to_string(), "1.5e20");
         assert_eq!(p("1e-6", 12).to_string(), "1e-6");
+    }
+
+    #[test]
+    fn notation_follows_the_display_precision() {
+        // Emacs Calc `(float 0)`: fixed from order -2 through precision-1.
+        let typed = p("4.2e10", 2);
+        assert_eq!(typed.format_decimal(12), "42000000000.");
+        assert_eq!(typed.to_string(), "42000000000.");
+        assert_eq!(typed.format_decimal(6), "4.2e10");
+        assert_eq!(p("-4.2e10", 2).format_decimal(12), "-42000000000.");
+        assert_eq!(p("1e11", 1).format_decimal(12), "100000000000.");
+        assert_eq!(p("4.2e11", 2).format_decimal(12), "420000000000.");
+        assert_eq!(p("1e12", 1).format_decimal(12), "1e12");
+        assert_eq!(p("0.01", 1).format_decimal(12), "0.01");
+        assert_eq!(p("0.001", 1).format_decimal(12), "1e-3");
+        assert_eq!(p("1.2e-4", 2).format_decimal(12), "1.2e-4");
+        assert_eq!(p("4.2e19", 2).format_decimal(20), "42000000000000000000.");
+        assert_eq!(p("1e20", 1).format_decimal(20), "1e20");
     }
 
     #[test]

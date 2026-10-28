@@ -467,7 +467,9 @@ mod tests {
         assert_eq!(p("1.5e1"), "15.");
         assert_eq!(p("1.5e20"), "1.5e20");
         assert_eq!(p("1e-6"), "1e-6");
-        assert_eq!(p("1.2e_3"), "0.0012");
+        assert_eq!(p("1.2e_3"), "1.2e-3");
+        assert_eq!(p("4.2e10"), "42000000000.");
+        assert_eq!(p("0.01"), "0.01");
         assert_eq!(p("1.2E+3"), "1200.");
         assert_eq!(p("0.0"), "0.");
         assert_eq!(p("1e1000000"), "1e1000000");
