@@ -185,8 +185,12 @@ fn format_float(f: &DecFloat, mode: &Mode) -> String {
         return format!("{}#0.", mode.radix);
     }
     let negative = mantissa.is_negative();
-    let prec = f.prec().max(mode.prec).max(1);
-    let show = sig_digits(prec, mode.radix);
+    // Calc's significand length is one shorter than the converted precision.
+    // The fixed-or-scientific switch still uses the full conversion of `p`.
+    let mant_digits = mantissa.abs().to_str_radix(10).len() as u32;
+    let places = mode.prec.max(mant_digits).max(1);
+    let show = sig_digits(places, mode.radix).saturating_sub(1).max(1);
+    let limit = sig_digits(mode.prec.max(1), mode.radix);
     // Extra digits absorb the rounding from raising 10 to a large power.
     let keep = show.saturating_add(16);
     let man = RFloat::from_bigint(&mantissa.abs(), mode.radix, keep);
@@ -197,7 +201,7 @@ fn format_float(f: &DecFloat, mode: &Mode) -> String {
     } else {
         man.div(&scale)
     };
-    render_float(scaled.round_to(show), negative, show)
+    render_float(scaled.round_to(show), negative, limit)
 }
 
 fn sig_digits(decimal_prec: u32, radix: u32) -> u32 {
@@ -206,7 +210,7 @@ fn sig_digits(decimal_prec: u32, radix: u32) -> u32 {
     (need + 1e-9).ceil().max(1.0) as u32
 }
 
-fn render_float(value: RFloat, negative: bool, show: u32) -> String {
+fn render_float(value: RFloat, negative: bool, limit: u32) -> String {
     let radix = value.radix;
     let (sig, exp) = strip_trailing(value.sig, value.exp, radix);
     if sig.is_zero() {
@@ -214,8 +218,8 @@ fn render_float(value: RFloat, negative: bool, show: u32) -> String {
     }
     let digits = sig.to_str_radix(radix).to_ascii_uppercase();
     let order = exp + digits.len() as i64 - 1;
-    // `show` is the precision measured in digits of this radix.
-    let body = if float::uses_scientific(order, show) {
+    // `limit` is the current precision measured in digits of this radix.
+    let body = if float::uses_scientific(order, limit) {
         scientific(&digits, order, radix)
     } else {
         float::fixed_point(&digits, exp)
@@ -478,6 +482,105 @@ mod tests {
     }
 
     #[test]
+    fn binary_and_hex_precision_match_calc() {
+        use crate::parse::parse_value;
+        // Emacs Calc 31.1, normal format. Hex powers are written `*16^`, which
+        // is the form this calculator reads back.
+        let cases = [
+            (2, 6, "4.2e10", "2#1.001110001110110011e35"),
+            (2, 6, "1e12", "2#1.110100011010100101e39"),
+            (2, 6, "1e20", "2#1.010110101111000111e66"),
+            (2, 6, "0.1", "2#1.10011001100110011e-4"),
+            (2, 12, "0.125", "2#1e-3"),
+            (2, 12, "0.25", "2#0.01"),
+            (2, 12, "2000.", "2#11111010000."),
+            (2, 12, "1e12", "2#1110100011010100101001010001000000000000."),
+            (2, 12, "4.2e10", "2#100111000111011001010010010000000000."),
+            (
+                2,
+                12,
+                "1e20",
+                "2#1.0101101011110001110101111000101101011e66",
+            ),
+            (2, 12, "0.1", "2#1.1001100110011001100110011001100110011e-4"),
+            (
+                2,
+                20,
+                "1e20",
+                "2#1010110101111000111010111100010110101100011000100000000000000000000.",
+            ),
+            (
+                2,
+                20,
+                "0.1",
+                "2#1.10011001100110011001100110011001100110011001100110011001100110011e-4",
+            ),
+            (16, 6, "1e12", "16#E.8D5*16^9"),
+            (16, 6, "4.2e10", "16#9.C76*16^8"),
+            (16, 6, "1e20", "16#5.6BC*16^16"),
+            (16, 6, "0.1", "16#0.199A"),
+            (16, 6, "0.0625", "16#0.1"),
+            (16, 12, "65536.", "16#10000."),
+            (16, 12, "1e20", "16#5.6BC75E2D*16^16"),
+            (16, 12, "0.1", "16#0.19999999A"),
+            (16, 12, "0.00390625", "16#0.01"),
+            (16, 20, "1e20", "16#56BC75E2D63100000."),
+            (16, 20, "0.1", "16#0.199999999999999A"),
+        ];
+        for (radix, prec, sample, expect) in cases {
+            let entry = Mode {
+                prec,
+                ..Mode::default()
+            };
+            let display = Mode {
+                prec,
+                radix,
+                ..Mode::default()
+            };
+            let value = parse_value(sample, &entry).unwrap_or_else(|err| panic!("{sample}: {err}"));
+            assert_eq!(
+                format_value(&value, &display),
+                expect,
+                "{sample} r{radix} p{prec}"
+            );
+        }
+
+        // Powers that are exact at this precision sit on the radix window.
+        // 16^9 is order 9 and stays fixed at precision 12 (10 hex digits).
+        // 16^10 is order 10 and turns scientific.
+        let mut wide = Mode {
+            prec: 12,
+            radix: 16,
+            ..Mode::default()
+        };
+        let sixteen = Value::real(Real::Float(DecFloat::from_i64(16, 12)));
+        let pow9 = crate::value::pow(&sixteen, &Value::from_int(9), &wide).unwrap();
+        assert_eq!(format_value(&pow9, &wide), "16#1000000000.");
+        let pow10 = crate::value::pow(&sixteen, &Value::from_int(10), &wide).unwrap();
+        assert_eq!(format_value(&pow10, &wide), "16#1*16^10");
+        wide.prec = 20;
+        let sixteen = Value::real(Real::Float(DecFloat::from_i64(16, 20)));
+        let pow10 = crate::value::pow(&sixteen, &Value::from_int(10), &wide).unwrap();
+        assert_eq!(format_value(&pow10, &wide), "16#10000000000.");
+
+        let mut bin = Mode {
+            prec: 12,
+            radix: 2,
+            ..Mode::default()
+        };
+        let two = Value::real(Real::Float(DecFloat::from_i64(2, 12)));
+        let pow39 = crate::value::pow(&two, &Value::from_int(39), &bin).unwrap();
+        assert_eq!(
+            format_value(&pow39, &bin),
+            "2#1000000000000000000000000000000000000000."
+        );
+        bin.prec = 6;
+        let two = Value::real(Real::Float(DecFloat::from_i64(2, 6)));
+        let pow20 = crate::value::pow(&two, &Value::from_int(20), &bin).unwrap();
+        assert_eq!(format_value(&pow20, &bin), "2#1.000000000000000001e20");
+    }
+
+    #[test]
     fn floats_follow_the_radix() {
         let hex = mode_radix(16);
         let half = Value::real(Real::Float(float_at(5, -1, 12)));
@@ -488,7 +591,7 @@ mod tests {
         let fifteen = Value::real(Real::Float(float_at(155, -1, 12)));
         assert_eq!(format_value(&fifteen, &hex), "16#F.8");
         let third_digit = Value::real(Real::Float(float_at(3, -1, 12)));
-        assert_eq!(format_value(&third_digit, &hex), "16#0.4CCCCCCCCD");
+        assert_eq!(format_value(&third_digit, &hex), "16#0.4CCCCCCCD");
 
         let mut bin = mode_radix(2);
         bin.prec = 12;
@@ -504,9 +607,9 @@ mod tests {
 
         let huge = Value::real(Real::Float(float_at(1, 20, 12)));
         let text = format_value(&huge, &hex);
-        assert_eq!(text, "16#5.6BC75E2D6*16^16");
+        assert_eq!(text, "16#5.6BC75E2D*16^16");
         let back = crate::parse::parse_value(&text, &Mode::default()).unwrap();
-        assert_eq!(back.to_string(), "9.99999999999e19");
+        assert_eq!(back.to_string(), "9.99999999983e19");
     }
 
     #[test]
