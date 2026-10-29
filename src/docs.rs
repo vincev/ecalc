@@ -360,7 +360,7 @@ const ENTRIES: &[Entry] = &[
         keys: "p",
         name: "prec",
         summary: "working precision",
-        body: "p sets the precision in significant digits, then digits, then RET. The default is 12. A float is written in full while its order runs from -2 through one less than that precision, and in scientific form past either end. q cancels the prompt and leaves the stack.",
+        body: "p sets the precision in significant digits from the integer on top, then pops it. The default is 12, and the value must be from 3 to 1000. A float is written in full while its order runs from -2 through one less than that precision, and in scientific form past either end. Undo puts the number back and leaves the precision.",
     },
     Entry {
         keys: "m d",

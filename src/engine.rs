@@ -504,6 +504,31 @@ impl Engine {
         self.unary(value::to_fraction);
     }
 
+    /// Pop an exact integer and use it as the working precision.
+    /// A rejected value stays on the stack. Undo puts the number back and
+    /// leaves the precision, because a mode change is not saved.
+    pub fn take_precision(&mut self) {
+        let Some(top) = self.stack.last() else {
+            self.fail(CalcError::StackUnderflow);
+            return;
+        };
+        let Some(n) = exact_int(top) else {
+            self.fail(CalcError::Domain("precision needs an integer"));
+            return;
+        };
+        let Ok(prec) = u32::try_from(&n) else {
+            self.fail(CalcError::BadPrecision);
+            return;
+        };
+        if !(MIN_PRECISION..=MAX_PRECISION).contains(&prec) {
+            self.fail(CalcError::BadPrecision);
+            return;
+        }
+        self.checkpoint();
+        self.stack.pop();
+        self.set_precision(prec);
+    }
+
     pub fn set_precision(&mut self, prec: u32) {
         if !(MIN_PRECISION..=MAX_PRECISION).contains(&prec) {
             self.fail(CalcError::BadPrecision);

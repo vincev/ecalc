@@ -23,6 +23,7 @@ all = "deny"
 libc = "0.2"
 
 [dependencies]
+clap = { version = "4.6.7", features = ["derive"] }
 crossterm = "0.29.0"
 num-bigint = "0.4.8"
 num-integer = "0.1.47"

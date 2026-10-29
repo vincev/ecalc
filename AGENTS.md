@@ -13,6 +13,9 @@ cargo run
 `cargo test` does not open a terminal. `cargo run` is the full-screen UI.
 The binary is `ec`. Quit with `q`.
 
+`ec --version` prints the version. `ec -e` (`--eval`) evaluates one RPN
+string and prints the top of the stack. No arguments still opens the screen.
+
 ## Emacs Calc
 
 To check an exact result against GNU Emacs Calc, ask Calc in batch mode.
@@ -37,7 +40,7 @@ digit for digit.
 - `src/parse.rs` — entry syntax.
 - `src/engine.rs` — stack, undo, modes, operations.
 - `src/app.rs` — key mapping. Test this without a tty.
-- `src/ui.rs`, `src/main.rs` — ratatui screen.
+- `src/ui.rs`, `src/main.rs` — arguments (`clap`) and the ratatui screen.
 
 ## Number rules
 
@@ -75,7 +78,7 @@ H k c     permutations: N! / (N-M)!
 J G       conjugate, argument
 P         pi             H P  e
 K         physics constants; 0-F inserts, Tab pages
-p         set precision (then digits, RET)
+p         precision from the top, then pop (3 to 1000)
 m d m r m f                degrees, radians, fraction mode
 d 2 d 8 d 6 d 0            binary, octal, hex, decimal
 d r       radix 2–36       d z   leading zeros
@@ -114,6 +117,7 @@ Tutorial shapes live in `src/app.rs`. Parser cases are in `src/parse.rs`. The sc
 - `36#q` = `26`, `36#n` = `23`, `36#u` = `30` (and `q` does not quit there)
 - `45.3 F` = `45`, `-45.3 F` = `-46`
 - `K` then `0` = `299792458` (speed of light)
+- `ec -e '2 20 ^ d g'` = `1,048,576`
 - last `K` page, `8` = `5.9722e24` (Earth mass), `A` = `7.346e22` (Moon mass), and `F` = `149597870700` (AU)
 
 Transcendentals are checked by known prefixes (pi, e, ln 2), not by matching Emacs Calc digit for digit. Exact values can be checked with the Emacs Calc command above.
@@ -133,10 +137,11 @@ Entry and stack details that are easy to get wrong:
 - Keep `num-bigint` at 0.4.8 (`num-rational` 0.4 needs that major).
 - `DecFloat::from_decimal(mantissa, exponent, prec)` builds a typed decimal. The stored precision is the number of significant digits typed, capped at the current precision.
 - A typed exponent, decimal or radix, outside ±1000000 is overflow. `1e1000000` and `1e-1000000` still parse. An exponent that does not fit in a 64-bit integer is a bad exponent.
-- `q` quits when nothing is being typed. While precision, radix, or word size is being typed, `q` cancels that prompt and leaves the stack. A variable name can contain `q`. `q` does not quit while `K`, `s l`, or the command reference is open.
+- `q` quits when nothing is being typed. While radix or word size is being typed, `q` cancels that prompt and leaves the stack. A variable name can contain `q`. `q` does not quit while `K`, `s l`, or the command reference is open. `p` is not a prompt: it pops an integer and sets the precision.
 - Do not polish add, sub, mul, or div. `(1/3)*3` can display as `0.999…`, and `sqrt(2)^2` as `1.999…`.
 - `L` flips inverse in `app.rs`, then calls `Engine::exp_family`. `E` does not flip. `push` and duplicate do not clear `I` or `H`.
 - `n` while typing toggles a leading `_`. `+` and `-` while typing are exponent signs, or digits inside an unclosed `(…)`. Otherwise they add and subtract. Space inside an unparsed `(…` inserts a space. `:` while typing is a fraction; on an empty entry it is fraction division.
+- `ec -e` feeds words through the same keys. Whitespace, including newlines, is a separator, and a finished number is pushed at the end of each word. `2 20 ^ d g` prints `1,048,576`. Both `d g` and `dg` group. A space on the screen still pushes or duplicates. An unclosed `(…` stays open across a space, so `(3, 4)` is one value. `12 p` sets the precision and pops 12. A prompt finishes when its answer is complete (`d r 16`, `b w 64`, `s s name`). The command prints the top value. An error goes to stderr and the process exits 1. `q` and `?` stay on the screen.
 - Stack index 0 is the oldest value. The top of the stack is the last element, drawn at the bottom, with a bold `.` on the last row. The screen does not print level numbers. Values and the `.` start on the same column as the character after `❯ `. A value wider than that row is split across lines: every line but the last ends with `\`, and each later line is indented one column. When that split value is taller than the rows above `.`, the leading lines stay and still end in `\`. Older values that do not fit are left off the top.
 - `F` is floor toward minus infinity and returns an exact integer. An integer is unchanged. A fraction or a decimal float is exact (`-4:3` is `-2`). A complex number is an error. `f` is still the function prefix.
 - `k i` is the modular inverse of `a` modulo `m`, with `m` on top. The result is the integer `b` with `0 <= b < m` and `a*b ≡ 1 (mod m)`. `3 7 k i` is `5`. Both values are integers, and an exact integer float is accepted. A non-positive modulus says `modulus must be positive`. If the gcd is not 1 the stack stays and the message is `no modular inverse`. Emacs Calc gets the same `b` as the reciprocal of a modulo form.

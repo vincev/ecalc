@@ -3,6 +3,9 @@
 //! `keys` reads a string: `\n` is enter, `\t` is tab, `\u{7f}` is backspace.
 //! An operator commits a finished entry first. `n` while typing toggles a
 //! leading `_` and does not commit. Space inside an unparsed `(…` is inserted.
+//!
+//! `eval` is the script form of those same keys. Whitespace separates words,
+//! and the result is the top of the stack.
 
 use crate::consts;
 use crate::engine::Engine;
@@ -60,7 +63,6 @@ enum VarOp {
 
 enum Pending {
     None,
-    Precision(String),
     Radix { digits: String, twos: bool },
     Word(String),
     Var { op: VarOp, name: String },
@@ -211,7 +213,6 @@ impl App {
     /// Text inside the prompt, without the `❯` prefix or the cursor.
     pub fn composer_text(&self) -> String {
         match &self.pending {
-            Pending::Precision(digits) => format!("precision: {digits}"),
             Pending::Radix { digits, .. } => format!("radix: {digits}"),
             Pending::Word(digits) => format!("word: {digits}"),
             Pending::Var { op, name } => format!("{}: {name}", var_prompt(*op)),
@@ -290,14 +291,11 @@ impl App {
         if self.quit {
             return;
         }
-        // `q` is a letter while a name is typed, and it cancels a numeric
-        // prompt. List dialogs ignore it. A radix literal above 20 can use it
-        // as a digit: `36#q` is 26. Ctrl-C still quits.
+        // `q` is a letter while a name is typed, and it cancels a radix or
+        // word-size prompt. List dialogs ignore it. A radix literal above 20
+        // can use it as a digit: `36#q` is 26. Ctrl-C still quits.
         let naming = matches!(self.pending, Pending::Var { .. });
-        let numeric_pending = matches!(
-            self.pending,
-            Pending::Precision(_) | Pending::Radix { .. } | Pending::Word(_)
-        );
+        let numeric_pending = matches!(self.pending, Pending::Radix { .. } | Pending::Word(_));
         let radix_digit = !self.entry.is_empty()
             && is_entry_continuation('q', &self.entry, self.engine.mode().radix);
         let quit = match key {
@@ -526,9 +524,7 @@ impl App {
 
     fn pending_text(&mut self) -> Option<&mut String> {
         match &mut self.pending {
-            Pending::Precision(digits) | Pending::Word(digits) | Pending::Radix { digits, .. } => {
-                Some(digits)
-            }
+            Pending::Word(digits) | Pending::Radix { digits, .. } => Some(digits),
             Pending::Var { name, .. } => Some(name),
             Pending::None => None,
         }
@@ -559,10 +555,6 @@ impl App {
 
     fn finish_pending(&mut self) {
         match std::mem::replace(&mut self.pending, Pending::None) {
-            Pending::Precision(digits) => match digits.parse::<u32>() {
-                Ok(prec) => self.engine.set_precision(prec),
-                Err(_) => self.engine.fail(CalcError::BadPrecision),
-            },
             Pending::Radix { digits, twos } => match digits.parse::<u32>() {
                 Ok(radix) => self.engine.set_radix(radix, twos),
                 Err(_) => self.engine.fail(CalcError::BadRadix),
@@ -843,11 +835,7 @@ impl App {
             'G' => self.engine.arg(),
             'P' => self.engine.push_pi_or_e(),
             'K' => self.open_constants(),
-            'p' => {
-                self.engine.clear_flags();
-                self.engine.clear_message();
-                self.pending = Pending::Precision(String::new());
-            }
+            'p' => self.engine.take_precision(),
             'm' => self.prefix = Prefix::M,
             'f' => self.prefix = Prefix::F,
             'c' => self.prefix = Prefix::C,
@@ -860,6 +848,103 @@ impl App {
             _ => self.engine.show("unknown key"),
         }
     }
+
+    /// Run one script word. Stop at the first bad key so a later key cannot
+    /// clear the message.
+    fn run_word(&mut self, word: &str) -> Result<(), String> {
+        for c in word.chars() {
+            self.press(Key::Char(c));
+            self.script_boundary()?;
+        }
+        self.settle_word(false)
+    }
+
+    /// Push a finished number so the next word is a command. Keep an unclosed
+    /// `(…` open; the next word continues it. At the end of the script, finish
+    /// a prompt that never got its answer.
+    fn settle_word(&mut self, end: bool) -> Result<(), String> {
+        if self.pending_answer_ready() {
+            self.finish_pending();
+            self.script_boundary()?;
+        }
+        if !end && unclosed_paren(&self.entry) {
+            return Ok(());
+        }
+        if !self.entry.is_empty() && !self.commit_entry() {
+            return Err(self.engine.message().to_string());
+        }
+        if end && let Some(message) = self.incomplete_prompt() {
+            return Err(message.to_string());
+        }
+        Ok(())
+    }
+
+    fn finish_script(&mut self) -> Result<(), String> {
+        self.settle_word(true)?;
+        if self.consts_open() {
+            return Err(if self.const_note.is_empty() {
+                "constant list needs a choice".to_string()
+            } else {
+                self.const_note.clone()
+            });
+        }
+        if self.vars_open() {
+            return Err(if self.var_note.is_empty() {
+                "variable list needs a choice".to_string()
+            } else {
+                self.var_note.clone()
+            });
+        }
+        Ok(())
+    }
+
+    fn script_boundary(&mut self) -> Result<(), String> {
+        if self.should_quit() {
+            return Err("q quits the screen".to_string());
+        }
+        if self.help_open() || self.docs_open() {
+            return Err("help is for the screen".to_string());
+        }
+        if self.engine.is_error() {
+            return Err(self.engine.message().to_string());
+        }
+        if self.engine.message() == "unknown key" {
+            return Err("unknown key".to_string());
+        }
+        Ok(())
+    }
+
+    /// A prompt word such as `16` after `d r`, or `name` after `s s`.
+    fn pending_answer_ready(&self) -> bool {
+        match &self.pending {
+            Pending::Word(text) | Pending::Radix { digits: text, .. } => !text.is_empty(),
+            Pending::Var { name, .. } => !name.is_empty(),
+            Pending::None => false,
+        }
+    }
+
+    fn incomplete_prompt(&self) -> Option<&'static str> {
+        match &self.pending {
+            Pending::None => None,
+            Pending::Radix { .. } => Some("radix needs a number"),
+            Pending::Word(_) => Some("word size needs a number"),
+            Pending::Var { .. } => Some("variable needs a name"),
+        }
+    }
+}
+
+/// Evaluate one RPN script and return the top of the stack.
+///
+/// Whitespace separates words, so `2 20 ^ d g` groups `1048576` as
+/// `1,048,576`. A word is the same keys the screen reads. A space does not
+/// push or duplicate.
+pub fn eval(program: &str) -> Result<String, String> {
+    let mut app = App::new();
+    for word in program.split_whitespace() {
+        app.run_word(word)?;
+    }
+    app.finish_script()?;
+    app.top_string().ok_or_else(|| "empty stack".to_string())
 }
 
 fn var_prompt(op: VarOp) -> &'static str {
@@ -1087,9 +1172,9 @@ mod tests {
         assert_eq!(top("1e12\n"), "1e12");
         assert_eq!(top("0.01\n"), "0.01");
         assert_eq!(top("0.001\n"), "1e-3");
-        assert_eq!(top("p6\n4.2e10\n"), "4.2e10");
-        assert_eq!(top("p20\n4.2e19\n"), "42000000000000000000.");
-        assert_eq!(top("p20\n1e20\n"), "1e20");
+        assert_eq!(top("6p4.2e10\n"), "4.2e10");
+        assert_eq!(top("20p4.2e19\n"), "42000000000000000000.");
+        assert_eq!(top("20p1e20\n"), "1e20");
         assert_eq!(top("4.2e10\ndg"), "42,000,000,000.");
     }
 
@@ -1304,15 +1389,43 @@ mod tests {
     }
 
     #[test]
-    fn precision_entry_sign_and_cancel() {
+    fn precision_pops_an_integer() {
         let mut app = App::new();
-        app.keys("p20\n");
+        app.keys("20p");
         assert_eq!(app.engine().mode().prec, 20);
-        assert!(!app.engine().is_error());
-        app.keys("p2\n");
+        assert!(app.engine().stack().is_empty());
+        assert_eq!(app.engine().message(), "precision 20");
+        app.keys("u");
+        assert_eq!(app.top_string().as_deref(), Some("20"));
         assert_eq!(app.engine().mode().prec, 20);
-        assert!(app.engine().is_error());
 
+        let mut app = App::new();
+        app.keys("10\n2*p");
+        assert_eq!(app.engine().mode().prec, 20);
+        assert!(app.engine().stack().is_empty());
+
+        let mut app = App::new();
+        app.keys("30.p");
+        assert_eq!(app.engine().mode().prec, 30);
+        assert!(app.engine().stack().is_empty());
+
+        let mut app = App::new();
+        app.keys("2p");
+        assert_eq!(app.engine().mode().prec, 12);
+        assert!(app.engine().is_error());
+        assert_eq!(app.engine().message(), "precision must be from 3 to 1000");
+        assert_eq!(app.top_string().as_deref(), Some("2"));
+
+        let mut app = App::new();
+        app.keys("3.5p");
+        assert_eq!(app.engine().message(), "precision needs an integer");
+        assert_eq!(app.top_string().as_deref(), Some("3.5"));
+        assert_eq!(app.engine().mode().prec, 12);
+    }
+
+    #[test]
+    fn entry_sign_and_cancel() {
+        let mut app = App::new();
         app.keys("12");
         app.press(Key::Esc);
         assert!(app.engine().stack().is_empty());
@@ -1331,15 +1444,6 @@ mod tests {
 
     #[test]
     fn q_cancels_numeric_prompts() {
-        let mut app = App::new();
-        app.keys("42\np20");
-        app.press(Key::Char('q'));
-        assert!(!app.should_quit());
-        assert_eq!(app.engine().mode().prec, 12);
-        assert_eq!(app.top_string().as_deref(), Some("42"));
-        app.keys("1\n+");
-        assert_eq!(app.top_string().as_deref(), Some("43"));
-
         let mut app = App::new();
         app.keys("dr16");
         app.press(Key::Char('q'));
@@ -1724,7 +1828,7 @@ mod tests {
         assert_eq!(app.top_string().as_deref(), Some("16#C8"));
 
         let mut app = App::new();
-        app.keys("p13\n1234567.123454\ndg");
+        app.keys("13p1234567.123454\ndg");
         assert_eq!(app.top_string().as_deref(), Some("1,234,567.123454"));
         assert_eq!(app.engine().message(), "grouping");
         assert!(app.mode_line().contains("group"));
@@ -1764,6 +1868,64 @@ mod tests {
         assert_eq!(app.engine().message(), "word size 32");
         app.keys("16##FD\n");
         assert_eq!(app.top_string().as_deref(), Some("253"));
+    }
+
+    #[test]
+    fn eval_splits_words_and_prints_the_top() {
+        assert_eq!(eval("2 20 ^ d g").as_deref(), Ok("1,048,576"));
+        assert_eq!(eval("2 20 ^dg").as_deref(), Ok("1,048,576"));
+        assert_eq!(eval("2 20 ^\nd g").as_deref(), Ok("1,048,576"));
+        assert_eq!(eval("1 2 3 4 + * -").as_deref(), Ok("-13"));
+        assert_eq!(eval("1 2 3").as_deref(), Ok("3"));
+        assert_eq!(eval("2").as_deref(), Ok("2"));
+        assert_eq!(eval("90 S").as_deref(), Ok("1"));
+        assert_eq!(eval("125 3 I ^").as_deref(), Ok("5"));
+        assert_eq!(eval("5 2 H k c").as_deref(), Ok("20"));
+        assert_eq!(eval("(3, 4) A").as_deref(), Ok("5"));
+        assert_eq!(eval("(3,4) A").as_deref(), Ok("5"));
+        assert_eq!(eval("36#q").as_deref(), Ok("26"));
+        assert_eq!(eval("K 0").as_deref(), Ok("299792458"));
+        assert_eq!(eval("6 p 4.2e10").as_deref(), Ok("4.2e10"));
+        assert_eq!(eval("6p 4.2e10").as_deref(), Ok("4.2e10"));
+        assert_eq!(eval("mf 8 6 /").as_deref(), Ok("4:3"));
+        assert_eq!(eval("4.2e10 d g").as_deref(), Ok("42,000,000,000."));
+        assert_eq!(eval("10 3 \\").as_deref(), Ok("3"));
+        assert_eq!(eval("3 n b w 8 O d 6").as_deref(), Ok("16##FD"));
+        assert_eq!(eval("255 d r 16").as_deref(), Ok("16#FF"));
+        assert_eq!(eval("5 k p").as_deref(), Ok("5"));
+        assert_eq!(eval("5 s s a s r a").as_deref(), Ok("5"));
+        assert_eq!(eval("5 s s a s l a").as_deref(), Ok("5"));
+
+        let mut typed = App::new();
+        typed.keys("HP");
+        assert_eq!(eval("H P").unwrap(), typed.top_string().unwrap());
+    }
+
+    #[test]
+    fn eval_reports_errors_and_stops() {
+        assert_eq!(eval("1 0 /").unwrap_err(), "division by zero");
+        assert_eq!(eval("1 0 / 4 +").unwrap_err(), "division by zero");
+        assert_eq!(eval("5 +").unwrap_err(), "too few arguments");
+        assert_eq!(eval("1 x").unwrap_err(), "unknown key");
+        assert_eq!(eval("5 xdg").unwrap_err(), "unknown key");
+        assert_eq!(eval("").unwrap_err(), "empty stack");
+        assert_eq!(eval("  \n").unwrap_err(), "empty stack");
+        assert_eq!(eval("5 s t a").unwrap_err(), "empty stack");
+        assert_eq!(eval("q").unwrap_err(), "q quits the screen");
+        assert_eq!(eval("?").unwrap_err(), "help is for the screen");
+        assert_eq!(eval("p").unwrap_err(), "too few arguments");
+        assert_eq!(eval("2 p").unwrap_err(), "precision must be from 3 to 1000");
+        assert_eq!(
+            eval("2 p 4 +").unwrap_err(),
+            "precision must be from 3 to 1000"
+        );
+        assert_eq!(eval("3.5 p").unwrap_err(), "precision needs an integer");
+        assert_eq!(eval("d r").unwrap_err(), "radix needs a number");
+        assert_eq!(eval("b w").unwrap_err(), "word size needs a number");
+        assert_eq!(eval("s s").unwrap_err(), "variable needs a name");
+        assert_eq!(eval("5 K").unwrap_err(), "constant list needs a choice");
+        assert_eq!(eval("s l").unwrap_err(), "variable list needs a choice");
+        assert_eq!(eval("(3,").unwrap_err(), "bad entry: (3,");
     }
 
     impl App {

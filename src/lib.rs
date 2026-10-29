@@ -15,6 +15,6 @@ mod radix;
 pub mod ui;
 pub mod value;
 
-pub use app::App;
+pub use app::{App, eval};
 pub use engine::Engine;
 pub use error::CalcError;
