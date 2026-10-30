@@ -8,9 +8,9 @@
 //! and the result is the top of the stack.
 
 use crate::consts;
-use crate::engine::Engine;
-use crate::error::CalcError;
-use crate::parse::parse_value;
+use crate::engine::{Engine, Status};
+use crate::error::{CalcError, EvalError};
+use crate::parse::Entry;
 use crate::radix;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,24 +74,37 @@ pub(crate) const VAR_PAGE: usize = VAR_COLUMN * 2;
 /// Rows down one column of the constants dialog. Two columns fill a page.
 pub(crate) use consts::COLUMN as CONST_COLUMN;
 
+/// The one dialog above the prompt. Opening one closes the others.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Overlay {
+    Help,
+    /// `? ?` command pages. Typing filters them. `q` is a letter here.
+    Docs {
+        query: String,
+        cursor: usize,
+    },
+    /// `s l` dialog. Letters and digits recall; Tab moves a page.
+    Variables {
+        page: usize,
+        note: String,
+    },
+    /// `K` dialog. `0`–`F` inserts a constant; Tab moves a page.
+    Constants {
+        page: usize,
+        note: String,
+    },
+}
+
 pub struct App {
     engine: Engine,
-    entry: String,
+    entry: Entry,
     prefix: Prefix,
     pending: Pending,
-    help: bool,
-    /// `? ?` command pages. Typing filters them. `q` is a letter here.
-    docs_open: bool,
-    docs_query: String,
-    docs_cursor: usize,
-    /// `s l` dialog. Letters and digits recall; Tab moves a page.
-    vars_open: bool,
-    var_page: usize,
-    var_note: String,
-    /// `K` dialog. `0`–`F` inserts a constant; Tab moves a page.
-    consts_open: bool,
-    const_page: usize,
-    const_note: String,
+    overlay: Option<Overlay>,
+    /// One-shot inverse prefix. `L` flips it, then uses the exp/ln family.
+    inverse: bool,
+    /// One-shot hyperbolic prefix.
+    hyperbolic: bool,
     quit: bool,
 }
 
@@ -105,19 +118,12 @@ impl App {
     pub fn new() -> Self {
         Self {
             engine: Engine::new(),
-            entry: String::new(),
+            entry: Entry::new(),
             prefix: Prefix::None,
             pending: Pending::None,
-            help: false,
-            docs_open: false,
-            docs_query: String::new(),
-            docs_cursor: 0,
-            vars_open: false,
-            var_page: 0,
-            var_note: String::new(),
-            consts_open: false,
-            const_page: 0,
-            const_note: String::new(),
+            overlay: None,
+            inverse: false,
+            hyperbolic: false,
             quit: false,
         }
     }
@@ -130,38 +136,48 @@ impl App {
         self.quit
     }
 
+    pub(crate) fn overlay(&self) -> Option<&Overlay> {
+        self.overlay.as_ref()
+    }
+
     pub fn help_open(&self) -> bool {
-        self.help
+        matches!(self.overlay, Some(Overlay::Help))
     }
 
     pub fn docs_open(&self) -> bool {
-        self.docs_open
+        matches!(self.overlay, Some(Overlay::Docs { .. }))
     }
 
     pub fn docs_query(&self) -> &str {
-        &self.docs_query
+        match &self.overlay {
+            Some(Overlay::Docs { query, .. }) => query,
+            _ => "",
+        }
     }
 
     /// Index into [`Self::docs_matches`], clamped when the filter shrinks.
     pub fn docs_cursor(&self) -> usize {
+        let cursor = match &self.overlay {
+            Some(Overlay::Docs { cursor, .. }) => *cursor,
+            _ => 0,
+        };
         let n = self.docs_matches().len();
-        if n == 0 {
-            0
-        } else {
-            self.docs_cursor.min(n - 1)
-        }
+        if n == 0 { 0 } else { cursor.min(n - 1) }
     }
 
-    pub(crate) fn docs_matches(&self) -> Vec<&'static crate::docs::Entry> {
-        crate::docs::search(&self.docs_query)
+    pub(crate) fn docs_matches(&self) -> Vec<&'static crate::docs::Binding> {
+        crate::docs::search(self.docs_query())
     }
 
     pub fn vars_open(&self) -> bool {
-        self.vars_open
+        matches!(self.overlay, Some(Overlay::Variables { .. }))
     }
 
     pub fn var_page(&self) -> usize {
-        self.var_page
+        match &self.overlay {
+            Some(Overlay::Variables { page, .. }) => *page,
+            _ => 0,
+        }
     }
 
     pub fn var_pages(&self) -> usize {
@@ -169,15 +185,21 @@ impl App {
     }
 
     pub fn var_note(&self) -> &str {
-        &self.var_note
+        match &self.overlay {
+            Some(Overlay::Variables { note, .. }) => note,
+            _ => "",
+        }
     }
 
     pub fn consts_open(&self) -> bool {
-        self.consts_open
+        matches!(self.overlay, Some(Overlay::Constants { .. }))
     }
 
     pub fn const_page(&self) -> usize {
-        self.const_page
+        match &self.overlay {
+            Some(Overlay::Constants { page, .. }) => *page,
+            _ => 0,
+        }
     }
 
     pub fn const_pages(&self) -> usize {
@@ -185,17 +207,20 @@ impl App {
     }
 
     pub fn const_note(&self) -> &str {
-        &self.const_note
+        match &self.overlay {
+            Some(Overlay::Constants { note, .. }) => note,
+            _ => "",
+        }
     }
 
     /// Hex key, symbol, and short name on the current constants page.
     pub fn const_rows(&self) -> Vec<(char, &'static str, &'static str)> {
-        consts::rows(self.const_page)
+        consts::rows(self.const_page())
     }
 
     /// Names and values on the current page of the variables dialog.
     pub fn variable_rows(&self) -> Vec<(String, String)> {
-        let start = self.var_page * VAR_PAGE;
+        let start = self.var_page() * VAR_PAGE;
         self.engine
             .variable_lines()
             .into_iter()
@@ -216,11 +241,12 @@ impl App {
             Pending::Radix { digits, .. } => format!("radix: {digits}"),
             Pending::Word(digits) => format!("word: {digits}"),
             Pending::Var { op, name } => format!("{}: {name}", var_prompt(*op)),
-            Pending::None => self.entry.clone(),
+            Pending::None => self.entry.as_str().to_string(),
         }
     }
 
-    pub fn mode_line(&self) -> String {
+    /// Mode chips on the prompt border. The screen joins them with ` · `.
+    pub fn mode_line(&self) -> Vec<String> {
         let angle = match self.engine.mode().angle {
             crate::value::AngleMode::Degrees => "deg",
             crate::value::AngleMode::Radians => "rad",
@@ -253,27 +279,34 @@ impl App {
         if mode.group_digits {
             parts.push("group".to_string());
         }
-        if self.engine.inverse() {
+        if self.inverse {
             parts.push("inv".to_string());
         }
-        if self.engine.hyperbolic() {
+        if self.hyperbolic {
             parts.push("hyp".to_string());
         }
-        match self.prefix {
-            Prefix::F => parts.push("f-".to_string()),
-            Prefix::M => parts.push("m-".to_string()),
-            Prefix::C => parts.push("c-".to_string()),
-            Prefix::D => parts.push("d-".to_string()),
-            Prefix::B => parts.push("b-".to_string()),
-            Prefix::K => parts.push("k-".to_string()),
-            Prefix::S => parts.push("s-".to_string()),
-            Prefix::T => parts.push("t-".to_string()),
-            Prefix::R => parts.push("r-".to_string()),
-            Prefix::O => parts.push("O-".to_string()),
-            Prefix::Od => parts.push("Od-".to_string()),
-            Prefix::None => {}
+        let prefix = match self.prefix {
+            Prefix::F => Some("f"),
+            Prefix::M => Some("m"),
+            Prefix::C => Some("c"),
+            Prefix::D => Some("d"),
+            Prefix::B => Some("b"),
+            Prefix::K => Some("k"),
+            Prefix::S => Some("s"),
+            Prefix::T => Some("t"),
+            Prefix::R => Some("r"),
+            Prefix::O => Some("O"),
+            Prefix::Od => Some("Od"),
+            Prefix::None => None,
+        };
+        if let Some(keys) = prefix {
+            parts.push(
+                crate::docs::mode_label(keys)
+                    .unwrap_or_else(|| panic!("no mode label for {keys}"))
+                    .to_string(),
+            );
         }
-        parts.join("  ")
+        parts
     }
 
     pub fn keys(&mut self, keys: &str) {
@@ -296,18 +329,10 @@ impl App {
         // can use it as a digit: `36#q` is 26. Ctrl-C still quits.
         let naming = matches!(self.pending, Pending::Var { .. });
         let numeric_pending = matches!(self.pending, Pending::Radix { .. } | Pending::Word(_));
-        let radix_digit = !self.entry.is_empty()
-            && is_entry_continuation('q', &self.entry, self.engine.mode().radix);
+        let radix_digit = self.entry.accepts('q', self.engine.mode().radix);
         let quit = match key {
             Key::Ctrl('c') | Key::Ctrl('C') => true,
-            Key::Char('q') => {
-                !radix_digit
-                    && !naming
-                    && !numeric_pending
-                    && !self.vars_open
-                    && !self.consts_open
-                    && !self.docs_open
-            }
+            Key::Char('q') => !radix_digit && !naming && !numeric_pending && !self.blocks_quit(),
             _ => false,
         };
         if quit {
@@ -322,25 +347,28 @@ impl App {
             self.cancel();
             return;
         }
-        if self.help {
-            if matches!(key, Key::Char('?')) {
-                self.open_docs();
-            } else {
-                self.help = false;
+        match self.overlay {
+            Some(Overlay::Help) => {
+                if matches!(key, Key::Char('?')) {
+                    self.open_docs();
+                } else {
+                    self.overlay = None;
+                }
+                return;
             }
-            return;
-        }
-        if self.docs_open {
-            self.press_docs(key);
-            return;
-        }
-        if self.vars_open {
-            self.press_var_list(key);
-            return;
-        }
-        if self.consts_open {
-            self.press_const_list(key);
-            return;
+            Some(Overlay::Docs { .. }) => {
+                self.press_docs(key);
+                return;
+            }
+            Some(Overlay::Variables { .. }) => {
+                self.press_var_list(key);
+                return;
+            }
+            Some(Overlay::Constants { .. }) => {
+                self.press_const_list(key);
+                return;
+            }
+            None => {}
         }
         if !matches!(self.pending, Pending::None) {
             self.press_pending(key);
@@ -356,46 +384,53 @@ impl App {
             Key::Backspace => self.press_backspace(),
             Key::Tab => {
                 if self.commit_entry() {
-                    self.engine.swap();
+                    self.run(Engine::swap);
                 }
             }
             Key::ShiftTab => {
                 if self.commit_entry() {
-                    self.engine.roll_up();
+                    self.run(Engine::roll_up);
                 }
             }
-            Key::Ctrl('r') | Key::Ctrl('R') => self.engine.redo(),
-            Key::Ctrl(_) => self.engine.show("unknown key"),
+            Key::Ctrl('r') | Key::Ctrl('R') => self.run(Engine::redo),
+            Key::Ctrl(_) => self.run(Engine::unknown_key),
             Key::Up | Key::Down | Key::Esc => {}
         }
     }
 
+    /// `q` quits from the shortcut list. It stays a letter in the command
+    /// reference, and the variable and constant lists ignore it.
+    fn blocks_quit(&self) -> bool {
+        matches!(
+            self.overlay,
+            Some(Overlay::Docs { .. } | Overlay::Variables { .. } | Overlay::Constants { .. })
+        )
+    }
+
     fn open_docs(&mut self) {
-        self.help = false;
-        self.docs_open = true;
-        self.docs_query.clear();
-        self.docs_cursor = 0;
+        self.overlay = Some(Overlay::Docs {
+            query: String::new(),
+            cursor: 0,
+        });
     }
 
     fn press_docs(&mut self, key: Key) {
         match key {
-            Key::Char('?') => {
-                self.docs_open = false;
-                self.docs_query.clear();
-                self.docs_cursor = 0;
-                self.help = true;
-            }
-            Key::Backspace => {
-                self.docs_query.pop();
-                self.docs_cursor = 0;
-            }
+            Key::Char('?') => self.overlay = Some(Overlay::Help),
+            Key::Backspace => self.edit_docs_query(|query| {
+                query.pop();
+            }),
             Key::Up | Key::ShiftTab => self.move_docs(-1),
             Key::Down | Key::Tab => self.move_docs(1),
-            Key::Char(c) => {
-                self.docs_query.push(c);
-                self.docs_cursor = 0;
-            }
+            Key::Char(c) => self.edit_docs_query(|query| query.push(c)),
             Key::Enter | Key::Ctrl(_) | Key::Esc => {}
+        }
+    }
+
+    fn edit_docs_query(&mut self, edit: impl FnOnce(&mut String)) {
+        if let Some(Overlay::Docs { query, cursor }) = &mut self.overlay {
+            edit(query);
+            *cursor = 0;
         }
     }
 
@@ -404,56 +439,71 @@ impl App {
         if n == 0 {
             return;
         }
-        let cursor = self.docs_cursor.min(n - 1) as isize;
-        self.docs_cursor = (cursor + delta).rem_euclid(n as isize) as usize;
+        let Some(Overlay::Docs { cursor, .. }) = &mut self.overlay else {
+            return;
+        };
+        let current = (*cursor).min(n - 1) as isize;
+        *cursor = (current + delta).rem_euclid(n as isize) as usize;
     }
 
     fn cancel(&mut self) {
         self.entry.clear();
         self.prefix = Prefix::None;
         self.pending = Pending::None;
-        self.help = false;
-        self.docs_open = false;
-        self.docs_query.clear();
-        self.docs_cursor = 0;
-        self.vars_open = false;
-        self.var_page = 0;
-        self.var_note.clear();
-        self.consts_open = false;
-        self.const_page = 0;
-        self.const_note.clear();
-        self.engine.clear_flags();
+        self.overlay = None;
+        self.clear_ih();
         self.engine.clear_message();
     }
 
+    fn clear_ih(&mut self) {
+        self.inverse = false;
+        self.hyperbolic = false;
+    }
+
+    /// An operation consumes `I` and `H`. `push` and a successful `dup` do not.
+    fn run(&mut self, op: impl FnOnce(&mut Engine)) {
+        op(&mut self.engine);
+        self.clear_ih();
+    }
+
+    fn duplicate(&mut self) {
+        self.engine.dup();
+        if self.engine.is_error() {
+            self.clear_ih();
+        }
+    }
+
     fn open_variables(&mut self) {
-        self.vars_open = true;
-        self.var_page = 0;
-        self.var_note.clear();
-        self.engine.clear_flags();
+        self.overlay = Some(Overlay::Variables {
+            page: 0,
+            note: String::new(),
+        });
+        self.clear_ih();
         self.engine.clear_message();
     }
 
     fn open_constants(&mut self) {
-        self.consts_open = true;
-        self.const_page = 0;
-        self.const_note.clear();
-        self.engine.clear_flags();
+        self.overlay = Some(Overlay::Constants {
+            page: 0,
+            note: String::new(),
+        });
+        self.clear_ih();
         self.engine.clear_message();
     }
 
     fn press_const_list(&mut self, key: Key) {
         match key {
-            Key::Tab => {
-                let pages = self.const_pages();
-                turn_page(&mut self.const_page, &mut self.const_note, pages, true);
-            }
-            Key::ShiftTab => {
-                let pages = self.const_pages();
-                turn_page(&mut self.const_page, &mut self.const_note, pages, false);
-            }
+            Key::Tab => self.turn_const_page(true),
+            Key::ShiftTab => self.turn_const_page(false),
             Key::Char(c) => self.pick_constant(c),
             _ => {}
+        }
+    }
+
+    fn turn_const_page(&mut self, forward: bool) {
+        let pages = self.const_pages();
+        if let Some(Overlay::Constants { page, note }) = &mut self.overlay {
+            turn_page(page, note, pages, forward);
         }
     }
 
@@ -463,31 +513,32 @@ impl App {
         let Some(slot) = hex_slot(key) else {
             return;
         };
-        let index = self.const_page * consts::PAGE + slot;
+        let index = self.const_page() * consts::PAGE + slot;
         let Some((message, value)) = consts::get(index) else {
-            self.const_note = "no constant".to_string();
+            if let Some(Overlay::Constants { note, .. }) = &mut self.overlay {
+                *note = "no constant".to_string();
+            }
             return;
         };
-        self.consts_open = false;
-        self.const_page = 0;
-        self.const_note.clear();
+        self.overlay = None;
         self.engine.push(value);
-        self.engine.show(message);
+        self.run(|engine| engine.show(message));
     }
 
     fn press_var_list(&mut self, key: Key) {
         match key {
-            Key::Tab => {
-                let pages = self.var_pages();
-                turn_page(&mut self.var_page, &mut self.var_note, pages, true);
-            }
-            Key::ShiftTab => {
-                let pages = self.var_pages();
-                turn_page(&mut self.var_page, &mut self.var_note, pages, false);
-            }
+            Key::Tab => self.turn_var_page(true),
+            Key::ShiftTab => self.turn_var_page(false),
             Key::Char(c) if c.is_ascii_digit() => self.pick_variable(&format!("q{c}")),
             Key::Char(c) if c.is_ascii_alphabetic() => self.pick_variable(&c.to_string()),
             _ => {}
+        }
+    }
+
+    fn turn_var_page(&mut self, forward: bool) {
+        let pages = self.var_pages();
+        if let Some(Overlay::Variables { page, note }) = &mut self.overlay {
+            turn_page(page, note, pages, forward);
         }
     }
 
@@ -495,13 +546,13 @@ impl App {
     /// A missing name stays on the list. Longer names are only shown.
     fn pick_variable(&mut self, name: &str) {
         if !self.engine.has_variable(name) {
-            self.var_note = "void variable".to_string();
+            if let Some(Overlay::Variables { note, .. }) = &mut self.overlay {
+                *note = "void variable".to_string();
+            }
             return;
         }
-        self.vars_open = false;
-        self.var_page = 0;
-        self.var_note.clear();
-        self.engine.recall(name);
+        self.overlay = None;
+        self.run(|engine| engine.recall(name));
     }
 
     fn press_pending(&mut self, key: Key) {
@@ -510,7 +561,7 @@ impl App {
                 Key::Char(c) => self.push_var_char(c),
                 Key::Backspace => self.pop_pending(),
                 Key::Enter => self.finish_pending(),
-                _ => self.engine.show("type a name, then RET"),
+                _ => self.run(|engine| engine.show("type a name, then RET")),
             }
             return;
         }
@@ -518,7 +569,7 @@ impl App {
             Key::Char(c) => self.push_pending(c),
             Key::Backspace => self.pop_pending(),
             Key::Enter => self.finish_pending(),
-            _ => self.engine.show("type digits, then RET"),
+            _ => self.run(|engine| engine.show("type digits, then RET")),
         }
     }
 
@@ -556,8 +607,8 @@ impl App {
     fn finish_pending(&mut self) {
         match std::mem::replace(&mut self.pending, Pending::None) {
             Pending::Radix { digits, twos } => match digits.parse::<u32>() {
-                Ok(radix) => self.engine.set_radix(radix, twos),
-                Err(_) => self.engine.fail(CalcError::BadRadix),
+                Ok(radix) => self.run(|engine| engine.set_radix(radix, twos)),
+                Err(_) => self.run(|engine| engine.fail(CalcError::BadRadix)),
             },
             Pending::Word(digits) => self.finish_word(&digits),
             Pending::Var { op, name } => self.apply_var(op, &name),
@@ -588,20 +639,20 @@ impl App {
 
     fn apply_var(&mut self, op: VarOp, name: &str) {
         if name.is_empty() {
-            self.engine.fail(CalcError::Domain("bad variable name"));
+            self.run(|engine| engine.fail(CalcError::Domain("bad variable name")));
             return;
         }
         match op {
-            VarOp::Store { pop } => self.engine.store(name, pop),
-            VarOp::Recall => self.engine.recall(name),
-            VarOp::Unstore => self.engine.unstore(name),
+            VarOp::Store { pop } => self.run(|engine| engine.store(name, pop)),
+            VarOp::Recall => self.run(|engine| engine.recall(name)),
+            VarOp::Unstore => self.run(|engine| engine.unstore(name)),
         }
     }
 
     fn finish_word(&mut self, text: &str) {
         if text.is_empty() {
             let size = self.engine.mode().word_size;
-            self.engine.set_word_size(size);
+            self.run(|engine| engine.set_word_size(size));
             return;
         }
         let (negative, digits) =
@@ -613,14 +664,15 @@ impl App {
                 (false, text)
             };
         if digits.is_empty() {
-            self.engine.fail(CalcError::BadWordSize);
+            self.run(|engine| engine.fail(CalcError::BadWordSize));
             return;
         }
         match digits.parse::<i64>() {
-            Ok(size) => self
-                .engine
-                .set_word_size(if negative { -size } else { size }),
-            Err(_) => self.engine.fail(CalcError::BadWordSize),
+            Ok(size) => {
+                let size = if negative { -size } else { size };
+                self.run(|engine| engine.set_word_size(size));
+            }
+            Err(_) => self.run(|engine| engine.fail(CalcError::BadWordSize)),
         }
     }
 
@@ -634,7 +686,7 @@ impl App {
         let which = self.prefix;
         self.prefix = Prefix::None;
         let Key::Char(c) = key else {
-            self.engine.show("unknown key");
+            self.run(Engine::unknown_key);
             return;
         };
         if !self.commit_entry() {
@@ -642,38 +694,44 @@ impl App {
         }
         let twos = which == Prefix::Od;
         match (which, c) {
-            (Prefix::F, 'T') => self.engine.atan2(),
-            (Prefix::F, 'h') => self.engine.hypot(),
-            (Prefix::F, 'Q') => self.engine.isqrt(),
-            (Prefix::F, 'A') => self.engine.abssqr(),
-            (Prefix::F, 's') => self.engine.sign(),
-            (Prefix::F, 'I') => self.engine.ilog(),
-            (Prefix::F, 'E') => self.engine.expm1(),
-            (Prefix::F, 'L') => self.engine.lnp1(),
-            (Prefix::M, 'd') => self.engine.set_degrees(),
-            (Prefix::M, 'r') => self.engine.set_radians(),
-            (Prefix::M, 'f') => self.engine.toggle_fraction(),
-            (Prefix::C, 'f') => self.engine.to_float(),
-            (Prefix::C, 'F') => self.engine.to_fraction(),
-            (Prefix::D | Prefix::Od, '2') => self.engine.set_radix(2, twos),
-            (Prefix::D | Prefix::Od, '8') => self.engine.set_radix(8, twos),
-            (Prefix::D | Prefix::Od, '6') => self.engine.set_radix(16, twos),
-            (Prefix::D | Prefix::Od, '0') => self.engine.set_radix(10, twos),
+            (Prefix::F, 'T') => self.run(Engine::atan2),
+            (Prefix::F, 'h') => self.run(Engine::hypot),
+            (Prefix::F, 'Q') => self.run(Engine::isqrt),
+            (Prefix::F, 'A') => self.run(Engine::abssqr),
+            (Prefix::F, 's') => self.run(Engine::sign),
+            (Prefix::F, 'I') => self.run(Engine::ilog),
+            (Prefix::F, 'E') => self.run(Engine::expm1),
+            (Prefix::F, 'L') => self.run(Engine::lnp1),
+            (Prefix::M, 'd') => self.run(Engine::set_degrees),
+            (Prefix::M, 'r') => self.run(Engine::set_radians),
+            (Prefix::M, 'f') => self.run(Engine::toggle_fraction),
+            (Prefix::C, 'f') => self.run(Engine::to_float),
+            (Prefix::C, 'F') => self.run(Engine::to_fraction),
+            (Prefix::D | Prefix::Od, '2') => self.run(|engine| engine.set_radix(2, twos)),
+            (Prefix::D | Prefix::Od, '8') => self.run(|engine| engine.set_radix(8, twos)),
+            (Prefix::D | Prefix::Od, '6') => self.run(|engine| engine.set_radix(16, twos)),
+            (Prefix::D | Prefix::Od, '0') => self.run(|engine| engine.set_radix(10, twos)),
             (Prefix::D | Prefix::Od, 'r') => {
                 self.pending = Pending::Radix {
                     digits: String::new(),
                     twos,
                 };
             }
-            (Prefix::D | Prefix::Od, 'z') => self.engine.toggle_leading_zeros(),
-            (Prefix::D | Prefix::Od, 'g') => self.engine.toggle_group_digits(),
+            (Prefix::D | Prefix::Od, 'z') => self.run(Engine::toggle_leading_zeros),
+            (Prefix::D | Prefix::Od, 'g') => self.run(Engine::toggle_group_digits),
             (Prefix::B, 'w') => self.pending = Pending::Word(String::new()),
-            (Prefix::K, 'g') => self.engine.gcd(),
-            (Prefix::K, 'l') => self.engine.lcm(),
-            (Prefix::K, 'E') => self.engine.egcd(),
-            (Prefix::K, 'i') => self.engine.mod_inverse(),
-            (Prefix::K, 'p') => self.engine.prime_test(),
-            (Prefix::K, 'c') => self.engine.choose(),
+            (Prefix::K, 'g') => self.run(Engine::gcd),
+            (Prefix::K, 'l') => self.run(Engine::lcm),
+            (Prefix::K, 'E') => self.run(Engine::egcd),
+            (Prefix::K, 'i') => self.run(Engine::mod_inverse),
+            (Prefix::K, 'p') => self.run(Engine::prime_test),
+            (Prefix::K, 'c') => {
+                if self.hyperbolic {
+                    self.run(Engine::perm);
+                } else {
+                    self.run(Engine::choose);
+                }
+            }
             (Prefix::S, 's') => {
                 self.pending = Pending::Var {
                     op: VarOp::Store { pop: false },
@@ -699,10 +757,16 @@ impl App {
                 };
             }
             (Prefix::S, 'l') => self.open_variables(),
-            (Prefix::S, d) if d.is_ascii_digit() => self.engine.store(&format!("q{d}"), false),
-            (Prefix::T, d) if d.is_ascii_digit() => self.engine.store(&format!("q{d}"), true),
-            (Prefix::R, d) if d.is_ascii_digit() => self.engine.recall(&format!("q{d}")),
-            _ => self.engine.show("unknown key"),
+            (Prefix::S, d) if d.is_ascii_digit() => {
+                self.run(|engine| engine.store(&format!("q{d}"), false));
+            }
+            (Prefix::T, d) if d.is_ascii_digit() => {
+                self.run(|engine| engine.store(&format!("q{d}"), true));
+            }
+            (Prefix::R, d) if d.is_ascii_digit() => {
+                self.run(|engine| engine.recall(&format!("q{d}")));
+            }
+            _ => self.run(Engine::unknown_key),
         }
     }
 
@@ -714,24 +778,18 @@ impl App {
         // A letter can be a digit after `#` in a radix above 10. That check
         // comes first so `n` and `u` do not run their commands inside
         // `36#n` or `36#u`.
-        if !self.entry.is_empty() && is_entry_continuation(c, &self.entry, self.engine.mode().radix)
-        {
-            self.entry.push(c);
+        if self.entry.push(c, self.engine.mode().radix) {
             return;
         }
         if c == 'u' {
-            self.engine.undo();
+            self.run(Engine::undo);
             return;
         }
         if c == 'n' && !self.entry.is_empty() {
-            self.toggle_entry_sign();
+            self.entry.toggle_sign();
             return;
         }
         if self.entry.is_empty() {
-            if is_entry_start(c) {
-                self.entry.push(c);
-                return;
-            }
             self.dispatch(c);
             return;
         }
@@ -741,22 +799,19 @@ impl App {
     }
 
     fn press_space(&mut self) {
+        if self.entry.push_space(self.engine.mode()) {
+            return;
+        }
         if !self.entry.is_empty() {
-            let open = self.entry.contains('(');
-            let parsed = parse_value(&self.entry, self.engine.mode()).is_ok();
-            if open && !parsed {
-                self.entry.push(' ');
-                return;
-            }
             self.commit_entry();
             return;
         }
-        self.engine.dup();
+        self.duplicate();
     }
 
     fn press_enter(&mut self) {
         if self.entry.is_empty() {
-            self.engine.dup();
+            self.duplicate();
         } else {
             self.commit_entry();
         }
@@ -764,23 +819,9 @@ impl App {
 
     fn press_backspace(&mut self) {
         if self.entry.is_empty() {
-            self.engine.pop();
+            self.run(Engine::pop);
         } else {
             self.entry.pop();
-        }
-    }
-
-    fn toggle_entry_sign(&mut self) {
-        if let Some(rest) = self
-            .entry
-            .strip_prefix('_')
-            .or_else(|| self.entry.strip_prefix('-'))
-        {
-            self.entry = rest.to_string();
-        } else if let Some(rest) = self.entry.strip_prefix('+') {
-            self.entry = format!("_{rest}");
-        } else {
-            self.entry.insert(0, '_');
         }
     }
 
@@ -788,14 +829,14 @@ impl App {
         if self.entry.is_empty() {
             return true;
         }
-        match parse_value(&self.entry, self.engine.mode()) {
+        match self.entry.parse(self.engine.mode()) {
             Ok(value) => {
                 self.engine.push(value);
                 self.entry.clear();
                 true
             }
             Err(err) => {
-                self.engine.fail(err);
+                self.run(|engine| engine.fail(err));
                 false
             }
         }
@@ -803,55 +844,111 @@ impl App {
 
     fn dispatch(&mut self, c: char) {
         match c {
-            '+' => self.engine.add(),
-            '-' => self.engine.sub(),
-            '*' => self.engine.mul(),
-            '/' => self.engine.div(),
-            '^' => self.engine.power(),
-            '\\' => self.engine.idiv(),
-            '%' => self.engine.modulo(),
-            ':' => self.engine.fdiv(),
-            '!' => self.engine.factorial(),
+            '+' => self.run(Engine::add),
+            '-' => self.run(Engine::sub),
+            '*' => self.run(Engine::mul),
+            '/' => self.run(Engine::div),
+            '^' => {
+                if self.inverse {
+                    self.run(Engine::nth_root);
+                } else {
+                    self.run(Engine::power);
+                }
+            }
+            '\\' => self.run(Engine::idiv),
+            '%' => self.run(Engine::modulo),
+            ':' => self.run(Engine::div_fraction),
+            '!' => self.run(Engine::factorial),
             'k' => self.prefix = Prefix::K,
             's' => self.prefix = Prefix::S,
             't' => self.prefix = Prefix::T,
             'r' => self.prefix = Prefix::R,
-            'n' => self.engine.negate(),
-            '&' => self.engine.reciprocal(),
-            'Q' => self.engine.sqrt(),
-            'A' => self.engine.abs(),
-            'F' => self.engine.floor(),
-            'S' => self.engine.sine(),
-            'C' => self.engine.cosine(),
-            'T' => self.engine.tangent(),
+            'n' => self.run(Engine::negate),
+            '&' => self.run(Engine::reciprocal),
+            'Q' => {
+                if self.inverse {
+                    self.run(Engine::square);
+                } else {
+                    self.run(Engine::sqrt);
+                }
+            }
+            'A' => self.run(Engine::abs),
+            'F' => self.run(Engine::floor),
+            'S' => self.trig(Engine::sin, Engine::asin, Engine::sinh, Engine::asinh),
+            'C' => self.trig(Engine::cos, Engine::acos, Engine::cosh, Engine::acosh),
+            'T' => self.trig(Engine::tan, Engine::atan, Engine::tanh, Engine::atanh),
             'L' => {
                 // Calc's ln key flips inverse, then uses the exp family.
-                self.engine.toggle_inverse();
-                self.engine.exp_family();
+                self.inverse = !self.inverse;
+                self.exp_family();
             }
-            'E' | 'e' => self.engine.exp_family(),
-            'B' => self.engine.logarithm(),
-            'J' => self.engine.conj(),
-            'G' => self.engine.arg(),
-            'P' => self.engine.push_pi_or_e(),
+            'E' | 'e' => self.exp_family(),
+            'B' => {
+                if self.inverse {
+                    self.run(Engine::antilog);
+                } else {
+                    self.run(Engine::log);
+                }
+            }
+            'J' => self.run(Engine::conj),
+            'G' => self.run(Engine::arg),
+            'P' => {
+                if self.hyperbolic {
+                    self.run(Engine::push_e);
+                } else {
+                    self.run(Engine::push_pi);
+                }
+            }
             'K' => self.open_constants(),
-            'p' => self.engine.take_precision(),
+            'p' => self.run(Engine::take_precision),
             'm' => self.prefix = Prefix::M,
             'f' => self.prefix = Prefix::F,
             'c' => self.prefix = Prefix::C,
             'd' => self.prefix = Prefix::D,
             'b' => self.prefix = Prefix::B,
             'O' => self.prefix = Prefix::O,
-            'I' => self.engine.toggle_inverse(),
-            'H' => self.engine.toggle_hyperbolic(),
-            '?' => self.help = true,
-            _ => self.engine.show("unknown key"),
+            'I' => {
+                self.inverse = !self.inverse;
+                self.engine.clear_message();
+            }
+            'H' => {
+                self.hyperbolic = !self.hyperbolic;
+                self.engine.clear_message();
+            }
+            '?' => self.overlay = Some(Overlay::Help),
+            _ => self.run(Engine::unknown_key),
         }
+    }
+
+    fn trig(
+        &mut self,
+        plain: fn(&mut Engine),
+        inverse: fn(&mut Engine),
+        hyper: fn(&mut Engine),
+        both: fn(&mut Engine),
+    ) {
+        let op = match (self.inverse, self.hyperbolic) {
+            (false, false) => plain,
+            (true, false) => inverse,
+            (false, true) => hyper,
+            (true, true) => both,
+        };
+        self.run(op);
+    }
+
+    fn exp_family(&mut self) {
+        let op = match (self.inverse, self.hyperbolic) {
+            (false, false) => Engine::exp,
+            (true, false) => Engine::ln,
+            (false, true) => Engine::exp10,
+            (true, true) => Engine::log10,
+        };
+        self.run(op);
     }
 
     /// Run one script word. Stop at the first bad key so a later key cannot
     /// clear the message.
-    fn run_word(&mut self, word: &str) -> Result<(), String> {
+    fn run_word(&mut self, word: &str) -> Result<(), EvalError> {
         for c in word.chars() {
             self.press(Key::Char(c));
             self.script_boundary()?;
@@ -862,56 +959,70 @@ impl App {
     /// Push a finished number so the next word is a command. Keep an unclosed
     /// `(…` open; the next word continues it. At the end of the script, finish
     /// a prompt that never got its answer.
-    fn settle_word(&mut self, end: bool) -> Result<(), String> {
+    fn settle_word(&mut self, end: bool) -> Result<(), EvalError> {
         if self.pending_answer_ready() {
             self.finish_pending();
             self.script_boundary()?;
         }
-        if !end && unclosed_paren(&self.entry) {
+        if !end && self.entry.is_incomplete() {
             return Ok(());
         }
         if !self.entry.is_empty() && !self.commit_entry() {
-            return Err(self.engine.message().to_string());
+            return Err(self.eval_status());
         }
         if end && let Some(message) = self.incomplete_prompt() {
-            return Err(message.to_string());
+            return Err(EvalError::Prompt(message));
         }
         Ok(())
     }
 
-    fn finish_script(&mut self) -> Result<(), String> {
+    /// Note text when a variable or constant list is still open.
+    fn open_list_note(&self) -> Option<String> {
+        match &self.overlay {
+            Some(Overlay::Constants { note, .. } | Overlay::Variables { note, .. }) => {
+                Some(note.clone())
+            }
+            _ => None,
+        }
+    }
+
+    fn finish_script(&mut self) -> Result<(), EvalError> {
         self.settle_word(true)?;
-        if self.consts_open() {
-            return Err(if self.const_note.is_empty() {
-                "constant list needs a choice".to_string()
+        if let Some(note) = self.open_list_note() {
+            return Err(if note.is_empty() {
+                let message = match self.overlay {
+                    Some(Overlay::Constants { .. }) => "constant list needs a choice",
+                    _ => "variable list needs a choice",
+                };
+                EvalError::NeedChoice(message)
             } else {
-                self.const_note.clone()
-            });
-        }
-        if self.vars_open() {
-            return Err(if self.var_note.is_empty() {
-                "variable list needs a choice".to_string()
-            } else {
-                self.var_note.clone()
+                EvalError::Note(note)
             });
         }
         Ok(())
     }
 
-    fn script_boundary(&mut self) -> Result<(), String> {
+    fn script_boundary(&mut self) -> Result<(), EvalError> {
         if self.should_quit() {
-            return Err("q quits the screen".to_string());
+            return Err(EvalError::Quit);
         }
         if self.help_open() || self.docs_open() {
-            return Err("help is for the screen".to_string());
+            return Err(EvalError::Help);
         }
-        if self.engine.is_error() {
-            return Err(self.engine.message().to_string());
+        match self.engine.status() {
+            // A note, such as "precision 12" or "prime", leaves the script running.
+            Status::Error(_) | Status::UnknownKey => Err(self.eval_status()),
+            Status::Empty | Status::Note(_) => Ok(()),
         }
-        if self.engine.message() == "unknown key" {
-            return Err("unknown key".to_string());
+    }
+
+    fn eval_status(&self) -> EvalError {
+        match self.engine.status() {
+            Status::Error(err) => EvalError::Calc(err.clone()),
+            Status::UnknownKey => EvalError::UnknownKey,
+            Status::Note(text) => EvalError::Note(text.clone()),
+            Status::Empty => EvalError::Note(String::new()),
         }
-        Ok(())
     }
 
     /// A prompt word such as `16` after `d r`, or `name` after `s s`.
@@ -938,13 +1049,13 @@ impl App {
 /// Whitespace separates words, so `2 20 ^ d g` groups `1048576` as
 /// `1,048,576`. A word is the same keys the screen reads. A space does not
 /// push or duplicate.
-pub fn eval(program: &str) -> Result<String, String> {
+pub fn eval(program: &str) -> Result<String, EvalError> {
     let mut app = App::new();
     for word in program.split_whitespace() {
         app.run_word(word)?;
     }
     app.finish_script()?;
-    app.top_string().ok_or_else(|| "empty stack".to_string())
+    app.top_string().ok_or(EvalError::EmptyStack)
 }
 
 fn var_prompt(op: VarOp) -> &'static str {
@@ -978,157 +1089,6 @@ fn hex_slot(c: char) -> Option<usize> {
     }
 }
 
-fn is_entry_start(c: char) -> bool {
-    c.is_ascii_digit() || matches!(c, '.' | '_' | '(' | '#')
-}
-
-/// `+` and `-` stay in the entry only as an exponent sign, or inside `(…)`.
-/// After `#`, letters that are digits of that radix stay in the entry too.
-fn is_entry_continuation(c: char, entry: &str, current_radix: u32) -> bool {
-    if matches!(c, ')' | ',') && unclosed_paren(entry) {
-        return true;
-    }
-    let token = current_token(entry);
-    if radix_char_continues(token, c, current_radix) {
-        return true;
-    }
-    if matches!(c, '+' | '-') && (ends_exponent(token) || unclosed_paren(entry)) {
-        return true;
-    }
-    if token.contains('#') || c == '#' {
-        return false;
-    }
-    c.is_ascii_digit() || matches!(c, '.' | '_' | '(' | ')' | ',' | ':' | 'e' | 'E')
-}
-
-fn ends_exponent(token: &str) -> bool {
-    token.ends_with('e') || token.ends_with('E') || token.ends_with('^')
-}
-
-/// The number currently being typed, after the last `(',` or `,` of a complex.
-fn current_token(entry: &str) -> &str {
-    let mut depth = 0i32;
-    let mut start = 0usize;
-    for (i, c) in entry.char_indices() {
-        match c {
-            '(' => {
-                depth += 1;
-                start = i + c.len_utf8();
-            }
-            ')' => depth -= 1,
-            ',' if depth == 1 => start = i + c.len_utf8(),
-            _ => {}
-        }
-    }
-    entry[start..].trim()
-}
-
-fn radix_char_continues(token: &str, c: char, current_radix: u32) -> bool {
-    let body = match token.as_bytes().first() {
-        Some(b'_' | b'-' | b'+') => &token[1..],
-        _ => token,
-    };
-    if !body.contains('#') {
-        return c == '#' && body.bytes().all(|b| b.is_ascii_digit());
-    }
-    let Some((radix, after, twos)) = split_radix_prefix(body, current_radix) else {
-        // An out-of-range radix is still being typed. Keep the characters
-        // so RET can report the bad entry instead of running a command.
-        return c.is_ascii_alphanumeric();
-    };
-    radix_body_continues(after, twos, radix, c)
-}
-
-fn split_radix_prefix(body: &str, current: u32) -> Option<(u32, &str, bool)> {
-    let (radix_s, rest) = body.split_once('#')?;
-    let radix = if radix_s.is_empty() {
-        current
-    } else {
-        if !radix_s.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        let radix = radix_s.parse::<u32>().ok()?;
-        if !(2..=36).contains(&radix) {
-            return None;
-        }
-        radix
-    };
-    match rest.strip_prefix('#') {
-        Some(after) => Some((radix, after, true)),
-        None => Some((radix, rest, false)),
-    }
-}
-
-fn radix_body_continues(after: &str, twos: bool, radix: u32, c: char) -> bool {
-    if twos {
-        return radix::is_digit(c, radix);
-    }
-    if let Some(at) = exponent_at(after, radix) {
-        return exponent_continues(&after[at..], c, radix);
-    }
-    let has_dot = after.contains('.');
-    let has_colon = after.contains(':');
-    if c == '#' {
-        return after.is_empty();
-    }
-    if radix::is_digit(c, radix) {
-        return true;
-    }
-    if (c == '_' || c == '+' || c == '-') && after.ends_with(':') {
-        return true;
-    }
-    if c == '.' && !has_dot && !has_colon {
-        return true;
-    }
-    if c == ':' && !has_dot && !has_colon && after.chars().any(|ch| radix::is_digit(ch, radix)) {
-        return true;
-    }
-    let started = after.chars().any(|ch| radix::is_digit(ch, radix));
-    if (c == 'e' || c == 'E') && radix <= 14 && !has_colon && started {
-        return true;
-    }
-    c == '*' && radix >= 15 && !has_colon && started
-}
-
-fn exponent_at(after: &str, radix: u32) -> Option<usize> {
-    if radix <= 14 {
-        after.find(['e', 'E'])
-    } else {
-        after.find('*')
-    }
-}
-
-fn exponent_continues(exp: &str, c: char, radix: u32) -> bool {
-    let rest = &exp[1..];
-    if radix <= 14 {
-        if rest.is_empty() || (rest.len() == 1 && is_exp_sign(rest.as_bytes()[0])) {
-            return c.is_ascii_digit() || (rest.is_empty() && is_exp_sign(c as u8));
-        }
-        return c.is_ascii_digit();
-    }
-    if let Some(hat) = rest.find('^') {
-        let after_hat = &rest[hat + 1..];
-        if after_hat.is_empty() || (after_hat.len() == 1 && is_exp_sign(after_hat.as_bytes()[0])) {
-            return c.is_ascii_digit() || (after_hat.is_empty() && is_exp_sign(c as u8));
-        }
-        return c.is_ascii_digit();
-    }
-    if rest.is_empty() {
-        return c.is_ascii_digit();
-    }
-    rest.bytes().all(|b| b.is_ascii_digit()) && (c.is_ascii_digit() || c == '^')
-}
-
-fn is_exp_sign(c: u8) -> bool {
-    matches!(c, b'+' | b'-' | b'_')
-}
-
-fn unclosed_paren(entry: &str) -> bool {
-    let open = entry.bytes().filter(|b| *b == b'(').count();
-    let close = entry.bytes().filter(|b| *b == b')').count();
-    open > close
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1137,6 +1097,10 @@ mod tests {
         let mut app = App::new();
         app.keys(keys);
         app.top_string().unwrap_or_default()
+    }
+
+    fn mode_text(app: &App) -> String {
+        app.mode_line().join(" · ")
     }
 
     #[test]
@@ -1236,7 +1200,17 @@ mod tests {
         assert_eq!(top("0\n_1\nfT"), "180");
         assert_eq!(top("0\n0\nfT"), "0");
         assert_eq!(top("1024\n2B"), "10");
+        assert_eq!(top("1:8\n2B"), "-3");
+        assert_eq!(top("0.125\n2B"), "-3");
+        // 4^(3/2) is 8. The exponent is not an integer, so this stays a float.
+        assert_eq!(top("8\n4B"), "1.5");
         assert_eq!(top("100\nHL"), "2");
+        assert_eq!(top("1:1000\nHL"), "-3");
+        assert_eq!(top("1e-100001\nHL"), "-100001");
+        assert_eq!(top("1e100001\nHL"), "100001");
+        assert_eq!(top("0.5\n8I^"), "0.917004043205");
+        assert_eq!(top("0.5\n1:8\n^"), "0.917004043205");
+        assert_eq!(top("1.1\n7I^"), "1.0137088563");
         assert_eq!(top("2\nHE"), "100");
         assert_eq!(top("1\nL"), "0");
         assert_eq!(top("3\n4fh"), "5");
@@ -1354,7 +1328,7 @@ mod tests {
         app.keys("5\n+");
         assert_eq!(app.top_string().as_deref(), Some("5"));
         assert!(app.engine().is_error());
-        assert!(!app.engine().inverse());
+        assert!(!app.inverse);
 
         app.keys("1\n0/");
         assert_eq!(app.engine().stack().len(), 3);
@@ -1433,9 +1407,9 @@ mod tests {
         assert!(app.engine().stack().is_empty());
 
         app.keys("I");
-        assert!(app.engine().inverse());
+        assert!(app.inverse);
         app.press(Key::Esc);
-        assert!(!app.engine().inverse());
+        assert!(!app.inverse);
 
         assert_eq!(top("5n\nfs"), "-1");
         assert_eq!(top("5\n "), "5");
@@ -1801,10 +1775,10 @@ mod tests {
         assert!(app.engine().is_error());
 
         app.keys("d6");
-        assert!(app.mode_line().contains("hex"));
-        assert!(!app.mode_line().contains("twos"));
+        assert!(mode_text(&app).contains("hex"));
+        assert!(!mode_text(&app).contains("twos"));
         app.keys("dz");
-        assert!(app.mode_line().contains("zeros"));
+        assert!(mode_text(&app).contains("zeros"));
 
         let mut app = App::new();
         app.keys("1\nbw8\nd2dz");
@@ -1814,8 +1788,8 @@ mod tests {
         let mut app = App::new();
         app.keys("3n\nbw8\nOd6");
         assert_eq!(app.top_string().as_deref(), Some("16##FD"));
-        assert!(app.mode_line().contains("twos"));
-        assert!(app.mode_line().contains("w 8"));
+        assert!(mode_text(&app).contains("twos"));
+        assert!(mode_text(&app).contains("w 8"));
         app.keys("d6");
         assert_eq!(app.top_string().as_deref(), Some("-16#3"));
         assert!(!app.engine().mode().twos_complement);
@@ -1831,7 +1805,7 @@ mod tests {
         app.keys("13p1234567.123454\ndg");
         assert_eq!(app.top_string().as_deref(), Some("1,234,567.123454"));
         assert_eq!(app.engine().message(), "grouping");
-        assert!(app.mode_line().contains("group"));
+        assert!(mode_text(&app).contains("group"));
         app.keys("dg");
         assert_eq!(app.top_string().as_deref(), Some("1234567.123454"));
         assert_eq!(app.engine().message(), "no grouping");
@@ -1903,29 +1877,204 @@ mod tests {
 
     #[test]
     fn eval_reports_errors_and_stops() {
-        assert_eq!(eval("1 0 /").unwrap_err(), "division by zero");
-        assert_eq!(eval("1 0 / 4 +").unwrap_err(), "division by zero");
-        assert_eq!(eval("5 +").unwrap_err(), "too few arguments");
-        assert_eq!(eval("1 x").unwrap_err(), "unknown key");
-        assert_eq!(eval("5 xdg").unwrap_err(), "unknown key");
-        assert_eq!(eval("").unwrap_err(), "empty stack");
-        assert_eq!(eval("  \n").unwrap_err(), "empty stack");
-        assert_eq!(eval("5 s t a").unwrap_err(), "empty stack");
-        assert_eq!(eval("q").unwrap_err(), "q quits the screen");
-        assert_eq!(eval("?").unwrap_err(), "help is for the screen");
-        assert_eq!(eval("p").unwrap_err(), "too few arguments");
-        assert_eq!(eval("2 p").unwrap_err(), "precision must be from 3 to 1000");
+        fn shown(program: &str) -> (EvalError, String) {
+            let err = eval(program).unwrap_err();
+            let text = err.to_string();
+            (err, text)
+        }
         assert_eq!(
-            eval("2 p 4 +").unwrap_err(),
-            "precision must be from 3 to 1000"
+            shown("1 0 /"),
+            (
+                EvalError::Calc(CalcError::DivideByZero),
+                "division by zero".to_string()
+            )
         );
-        assert_eq!(eval("3.5 p").unwrap_err(), "precision needs an integer");
-        assert_eq!(eval("d r").unwrap_err(), "radix needs a number");
-        assert_eq!(eval("b w").unwrap_err(), "word size needs a number");
-        assert_eq!(eval("s s").unwrap_err(), "variable needs a name");
-        assert_eq!(eval("5 K").unwrap_err(), "constant list needs a choice");
-        assert_eq!(eval("s l").unwrap_err(), "variable list needs a choice");
-        assert_eq!(eval("(3,").unwrap_err(), "bad entry: (3,");
+        assert_eq!(
+            shown("1 0 / 4 +"),
+            (
+                EvalError::Calc(CalcError::DivideByZero),
+                "division by zero".to_string()
+            )
+        );
+        assert_eq!(
+            shown("5 +"),
+            (
+                EvalError::Calc(CalcError::StackUnderflow),
+                "too few arguments".to_string()
+            )
+        );
+        assert_eq!(
+            shown("1 x"),
+            (EvalError::UnknownKey, "unknown key".to_string())
+        );
+        assert_eq!(
+            shown("5 xdg"),
+            (EvalError::UnknownKey, "unknown key".to_string())
+        );
+        assert_eq!(
+            shown(""),
+            (EvalError::EmptyStack, "empty stack".to_string())
+        );
+        assert_eq!(
+            shown("  \n"),
+            (EvalError::EmptyStack, "empty stack".to_string())
+        );
+        assert_eq!(
+            shown("5 s t a"),
+            (EvalError::EmptyStack, "empty stack".to_string())
+        );
+        assert_eq!(
+            shown("q"),
+            (EvalError::Quit, "q quits the screen".to_string())
+        );
+        assert_eq!(
+            shown("?"),
+            (EvalError::Help, "help is for the screen".to_string())
+        );
+        assert_eq!(
+            shown("p"),
+            (
+                EvalError::Calc(CalcError::StackUnderflow),
+                "too few arguments".to_string()
+            )
+        );
+        assert_eq!(
+            shown("2 p"),
+            (
+                EvalError::Calc(CalcError::BadPrecision),
+                "precision must be from 3 to 1000".to_string()
+            )
+        );
+        assert_eq!(
+            shown("2 p 4 +"),
+            (
+                EvalError::Calc(CalcError::BadPrecision),
+                "precision must be from 3 to 1000".to_string()
+            )
+        );
+        assert_eq!(
+            shown("3.5 p"),
+            (
+                EvalError::Calc(CalcError::Domain("precision needs an integer")),
+                "precision needs an integer".to_string()
+            )
+        );
+        assert_eq!(
+            shown("d r"),
+            (
+                EvalError::Prompt("radix needs a number"),
+                "radix needs a number".to_string()
+            )
+        );
+        assert_eq!(
+            shown("b w"),
+            (
+                EvalError::Prompt("word size needs a number"),
+                "word size needs a number".to_string()
+            )
+        );
+        assert_eq!(
+            shown("s s"),
+            (
+                EvalError::Prompt("variable needs a name"),
+                "variable needs a name".to_string()
+            )
+        );
+        assert_eq!(
+            shown("5 K"),
+            (
+                EvalError::NeedChoice("constant list needs a choice"),
+                "constant list needs a choice".to_string()
+            )
+        );
+        assert_eq!(
+            shown("s l"),
+            (
+                EvalError::NeedChoice("variable list needs a choice"),
+                "variable list needs a choice".to_string()
+            )
+        );
+        assert_eq!(
+            shown("(3,"),
+            (
+                EvalError::Calc(CalcError::InvalidEntry("(3,".to_string())),
+                "bad entry: (3,".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn every_binding_reaches_a_command() {
+        for binding in crate::docs::bindings() {
+            let mut app = App::new();
+            for key in binding_keys(binding.keys) {
+                app.press(key);
+            }
+            assert!(
+                !matches!(app.engine().status(), Status::UnknownKey),
+                "{}",
+                binding.keys
+            );
+        }
+    }
+
+    #[test]
+    fn prefix_labels_come_from_the_bindings() {
+        let mut app = App::new();
+        app.press(Key::Char('f'));
+        assert!(mode_text(&app).contains("f-"));
+
+        let mut app = App::new();
+        app.press(Key::Char('O'));
+        assert!(mode_text(&app).contains("O-"));
+        assert!(!mode_text(&app).contains("Od-"));
+        app.press(Key::Char('d'));
+        assert!(mode_text(&app).contains("Od-"));
+    }
+
+    #[test]
+    fn binding_words_are_single_keys() {
+        assert_eq!(binding_keys("C-r"), vec![Key::Ctrl('r')]);
+        assert_eq!(binding_keys("S-Tab"), vec![Key::ShiftTab]);
+        assert_eq!(binding_keys("ret"), vec![Key::Enter]);
+        assert_eq!(binding_keys("del"), vec![Key::Backspace]);
+        assert_eq!(binding_keys("tab"), vec![Key::Tab]);
+        assert_eq!(binding_keys("Esc"), vec![Key::Esc]);
+        assert_eq!(binding_keys("I Q"), vec![Key::Char('I'), Key::Char('Q')]);
+        assert_eq!(
+            binding_keys("Hk c"),
+            vec![Key::Char('H'), Key::Char('k'), Key::Char('c')]
+        );
+    }
+
+    fn binding_keys(keys: &str) -> Vec<Key> {
+        let mut rest = keys;
+        let mut out = Vec::new();
+        while !rest.is_empty() {
+            if rest.starts_with(' ') {
+                rest = &rest[1..];
+                continue;
+            }
+            let (key, tail) = if let Some(tail) = rest.strip_prefix("C-r") {
+                (Key::Ctrl('r'), tail)
+            } else if let Some(tail) = rest.strip_prefix("S-Tab") {
+                (Key::ShiftTab, tail)
+            } else if let Some(tail) = rest.strip_prefix("Esc") {
+                (Key::Esc, tail)
+            } else if let Some(tail) = rest.strip_prefix("ret") {
+                (Key::Enter, tail)
+            } else if let Some(tail) = rest.strip_prefix("del") {
+                (Key::Backspace, tail)
+            } else if let Some(tail) = rest.strip_prefix("tab") {
+                (Key::Tab, tail)
+            } else {
+                let c = rest.chars().next().expect("key");
+                (Key::Char(c), &rest[c.len_utf8()..])
+            };
+            out.push(key);
+            rest = tail;
+        }
+        out
     }
 
     impl App {

@@ -4,7 +4,7 @@
 //! palette on a dark terminal, and dark text on a light one. The headless
 //! screen test paints the GrokNight canvas.
 
-use crate::app::{App, CONST_COLUMN, Key, VAR_COLUMN};
+use crate::app::{App, CONST_COLUMN, Key, Overlay, VAR_COLUMN};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -12,7 +12,6 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
-use std::cell::Cell;
 use std::io;
 use std::time::Duration;
 
@@ -75,31 +74,18 @@ const ON_LIGHT_TERMINAL: Palette = Palette {
     ..GROK_NIGHT
 };
 
-thread_local! {
-    static ACTIVE: Cell<Palette> = const { Cell::new(GROK_NIGHT) };
-}
-
-fn colors() -> Palette {
-    ACTIVE.with(Cell::get)
-}
-
-fn set_palette(palette: Palette) {
-    ACTIVE.with(|cell| cell.set(palette));
-}
-
 /// How long to wait for the background reply. A terminal that answers the
 /// device-attributes request returns sooner.
 const BG_QUERY_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// Ask the terminal for its background and choose foregrounds. No answer keeps
 /// the dark foregrounds, still without painting a background.
-fn install_terminal_palette() {
-    let palette = if terminal_is_light() == Some(true) {
+fn terminal_palette() -> Palette {
+    if terminal_is_light() == Some(true) {
         ON_LIGHT_TERMINAL
     } else {
         ON_DARK_TERMINAL
-    };
-    set_palette(palette);
+    }
 }
 
 /// `Some(true)` when black text is the more readable choice.
@@ -161,6 +147,7 @@ fn query_background() -> Option<(u8, u8, u8)> {
     parse_background(&bytes)
 }
 
+/// Windows does not ask for the background, so the dark foregrounds stay.
 #[cfg(not(unix))]
 fn query_background() -> Option<(u8, u8, u8)> {
     None
@@ -349,21 +336,12 @@ const PROMPT_INNER: u16 = 1;
 /// That is the left border, the inner pad, and the `❯ ` prefix.
 const STACK_INDENT: usize = 1 + PROMPT_INNER as usize + 2;
 
-const SHORTCUTS: &[(&str, &str)] = &[
-    ("ret", "push"),
-    ("tab", "swap"),
-    ("del", "pop"),
-    ("u", "undo"),
-    ("?", "help"),
-    ("q", "quit"),
-];
-
 pub fn run() -> io::Result<()> {
-    install_terminal_palette();
+    let palette = terminal_palette();
     let mut app = App::new();
     ratatui::run(|terminal| {
         loop {
-            terminal.draw(|frame| draw(frame, &app))?;
+            terminal.draw(|frame| draw(frame, &app, palette))?;
             if wait_for_redraw(&mut app)? {
                 break;
             }
@@ -392,11 +370,11 @@ fn wait_for_redraw(app: &mut App) -> io::Result<bool> {
     }
 }
 
-pub fn draw(frame: &mut Frame, app: &App) {
+fn draw(frame: &mut Frame, app: &App, palette: Palette) {
     let area = frame.area();
     frame
         .buffer_mut()
-        .set_style(area, Style::default().fg(colors().fg).bg(colors().bg));
+        .set_style(area, Style::default().fg(palette.fg).bg(palette.bg));
 
     // Prompt, then a blank row, the shortcuts, and a blank row at the screen edge.
     let chunks = Layout::vertical([
@@ -408,20 +386,20 @@ pub fn draw(frame: &mut Frame, app: &App) {
     ])
     .split(inset_sides(area));
 
-    draw_stack(frame.buffer_mut(), chunks[0], app);
-    draw_prompt(frame.buffer_mut(), chunks[1], app);
-    draw_shortcuts(frame.buffer_mut(), chunks[3], app);
-    if app.help_open() {
-        draw_help(frame.buffer_mut(), area, above_prompt(area, chunks[1]));
-    }
-    if app.docs_open() {
-        draw_docs(frame.buffer_mut(), area, app);
-    }
-    if app.vars_open() {
-        draw_variables(frame.buffer_mut(), area, app);
-    }
-    if app.consts_open() {
-        draw_constants(frame.buffer_mut(), area, app);
+    draw_stack(frame.buffer_mut(), chunks[0], app, palette);
+    draw_prompt(frame.buffer_mut(), chunks[1], app, palette);
+    draw_shortcuts(frame.buffer_mut(), chunks[3], app, palette);
+    match app.overlay() {
+        Some(Overlay::Help) => draw_help(
+            frame.buffer_mut(),
+            area,
+            above_prompt(area, chunks[1]),
+            palette,
+        ),
+        Some(Overlay::Docs { .. }) => draw_docs(frame.buffer_mut(), area, app, palette),
+        Some(Overlay::Variables { .. }) => draw_variables(frame.buffer_mut(), area, app, palette),
+        Some(Overlay::Constants { .. }) => draw_constants(frame.buffer_mut(), area, app, palette),
+        None => {}
     }
 }
 
@@ -446,15 +424,15 @@ fn inset_sides(area: Rect) -> Rect {
     }
 }
 
-fn draw_stack(buf: &mut Buffer, area: Rect, app: &App) {
+fn draw_stack(buf: &mut Buffer, area: Rect, app: &App, palette: Palette) {
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let lines = stack_lines(app, area.height as usize, area.width as usize);
+    let lines = stack_lines(app, area.height as usize, area.width as usize, palette);
     Paragraph::new(lines).render(area, buf);
 }
 
-fn stack_lines(app: &App, rows: usize, width: usize) -> Vec<Line<'static>> {
+fn stack_lines(app: &App, rows: usize, width: usize, palette: Palette) -> Vec<Line<'static>> {
     if rows == 0 {
         return Vec::new();
     }
@@ -469,11 +447,11 @@ fn stack_lines(app: &App, rows: usize, width: usize) -> Vec<Line<'static>> {
     let shown = fit_stack(&wrapped, room);
     let pad = room.saturating_sub(shown.len());
     let mut lines = Vec::with_capacity(rows);
-    let blank = Style::default().bg(colors().bg);
+    let blank = Style::default().bg(palette.bg);
     for _ in 0..pad {
         lines.push(Line::from(Span::styled(" ", blank)));
     }
-    let value = Style::default().fg(colors().fg).bg(colors().bg);
+    let value = Style::default().fg(palette.fg).bg(palette.bg);
     let indent = " ".repeat(STACK_INDENT);
     for text in shown {
         lines.push(Line::from(Span::styled(format!("{indent}{text}"), value)));
@@ -481,8 +459,8 @@ fn stack_lines(app: &App, rows: usize, width: usize) -> Vec<Line<'static>> {
     lines.push(Line::from(Span::styled(
         format!("{indent}."),
         Style::default()
-            .fg(colors().fg)
-            .bg(colors().bg)
+            .fg(palette.fg)
+            .bg(palette.bg)
             .add_modifier(Modifier::BOLD),
     )));
     lines
@@ -566,11 +544,11 @@ fn fit_stack(wrapped: &[Vec<String>], room: usize) -> Vec<String> {
     shown
 }
 
-fn draw_prompt(buf: &mut Buffer, area: Rect, app: &App) {
+fn draw_prompt(buf: &mut Buffer, area: Rect, app: &App, palette: Palette) {
     if area.height < 3 || area.width < 4 {
         return;
     }
-    let border = Style::default().fg(colors().prompt_border).bg(colors().bg);
+    let border = Style::default().fg(palette.prompt_border).bg(palette.bg);
     let last_x = area.x + area.width - 1;
     let top = area.y;
     let mid = area.y + 1;
@@ -594,7 +572,7 @@ fn draw_prompt(buf: &mut Buffer, area: Rect, app: &App) {
                 x,
                 mid,
                 ' ',
-                Style::default().fg(colors().fg).bg(colors().bg),
+                Style::default().fg(palette.fg).bg(palette.bg),
             );
         }
     }
@@ -602,26 +580,26 @@ fn draw_prompt(buf: &mut Buffer, area: Rect, app: &App) {
     let text_start = area.x + 1 + PROMPT_INNER;
     let text_end = last_x.saturating_sub(PROMPT_INNER);
     let mut x = text_start;
-    x = paint_str(buf, x, mid, text_end, "❯ ", arrow_style());
+    x = paint_str(buf, x, mid, text_end, "❯ ", arrow_style(palette));
     let typed = app.composer_text();
-    x = paint_str(buf, x, mid, text_end, &typed, text_style());
+    x = paint_str(buf, x, mid, text_end, &typed, text_style(palette));
     if x < text_end {
         paint_char(
             buf,
             x,
             mid,
             ' ',
-            text_style().add_modifier(Modifier::REVERSED),
+            text_style(palette).add_modifier(Modifier::REVERSED),
         );
     }
 
-    paint_info(buf, area, bottom, app);
+    paint_info(buf, area, bottom, app, palette);
 }
 
-fn paint_info(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
+fn paint_info(buf: &mut Buffer, area: Rect, y: u16, app: &App, palette: Palette) {
     let last_x = area.x + area.width - 1;
-    let caption = format!("{} ", app.mode_line().replace("  ", " · "));
-    let pad_style = Style::default().bg(colors().bg);
+    let caption = format!("{} ", app.mode_line().join(" · "));
+    let pad_style = Style::default().bg(palette.bg);
     // One blank cell inside the left corner, so the mode line does not sit on it.
     paint_char(buf, area.x + 1, y, ' ', pad_style);
 
@@ -641,9 +619,9 @@ fn paint_info(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
         format!(" {message}")
     };
     let msg_style = if app.engine().is_error() {
-        Style::default().fg(colors().error).bg(colors().bg)
+        Style::default().fg(palette.error).bg(palette.bg)
     } else {
-        Style::default().fg(colors().gray).bg(colors().bg)
+        Style::default().fg(palette.gray).bg(palette.bg)
     };
 
     let msg_room = (msg_end as usize).saturating_sub(area.x as usize + 1 + PROMPT_INNER as usize);
@@ -664,7 +642,7 @@ fn paint_info(buf: &mut Buffer, area: Rect, y: u16, app: &App) {
             y,
             caption_end,
             &caption,
-            Style::default().fg(colors().gray).bg(colors().bg),
+            Style::default().fg(palette.gray).bg(palette.bg),
         );
     }
     if !msg_text.is_empty() && msg_x < msg_end {
@@ -682,96 +660,12 @@ const HELP_FOOTER: u16 = 2;
 const HELP_COLS: usize = 4;
 /// Blank columns between shortcut columns.
 const HELP_GAP: usize = 2;
-/// Narrowest column that still fits `key` plus a short label.
-const HELP_COL_MIN: usize = 12;
-/// Key field width. Every binding here is at most this many characters.
-const HELP_KEY_W: usize = 4;
-
-/// One topic per column. Lengths differ by at most one row. A narrow terminal stacks later topics under earlier ones.
-const HELP_GROUPS: [&[(&str, &str)]; 4] = [
-    &[
-        ("ret", "push"),
-        ("del", "pop"),
-        ("tab", "swap"),
-        ("TAB", "roll"),
-        ("u", "undo"),
-        ("C-r", "redo"),
-        ("n", "negate"),
-        ("&", "recip"),
-        ("Q", "sqrt"),
-        ("I Q", "square"),
-        ("I ^", "root"),
-        ("A", "abs"),
-        ("f A", "abs^2"),
-        ("I", "inverse"),
-        ("s s", "store"),
-        ("s t", "into"),
-        ("s r", "recall"),
-        ("s u", "unstore"),
-        ("s l", "list"),
-    ],
-    &[
-        ("+", "add"),
-        ("-", "sub"),
-        ("*", "mul"),
-        ("/", "div"),
-        ("^", "power"),
-        ("\\", "idiv"),
-        ("F", "floor"),
-        ("%", "mod"),
-        (":", "fraction"),
-        ("!", "fact"),
-        ("k g", "gcd"),
-        ("k l", "lcm"),
-        ("k E", "egcd"),
-        ("k i", "invmod"),
-        ("k p", "prime"),
-        ("k c", "choose"),
-        ("Hk c", "perm"),
-        ("P", "pi"),
-        ("J", "conj"),
-    ],
-    &[
-        ("S", "sin"),
-        ("C", "cos"),
-        ("T", "tan"),
-        ("L", "ln"),
-        ("E", "exp"),
-        ("B", "log"),
-        ("I B", "antilog"),
-        ("H L", "log10"),
-        ("H E", "10^x"),
-        ("f T", "atan2"),
-        ("f h", "hypot"),
-        ("f Q", "isqrt"),
-        ("f E", "expm1"),
-        ("f L", "lnp1"),
-        ("f I", "ilog"),
-        ("f s", "sign"),
-        ("G", "arg"),
-        ("K", "const"),
-    ],
-    &[
-        ("p", "prec"),
-        ("m d", "deg"),
-        ("m r", "rad"),
-        ("m f", "fractions"),
-        ("c f", "float"),
-        ("c F", "fraction"),
-        ("d 2", "bin"),
-        ("d 8", "oct"),
-        ("d 6", "hex"),
-        ("d 0", "dec"),
-        ("d r", "radix"),
-        ("d z", "zeros"),
-        ("d g", "group"),
-        ("b w", "word"),
-        ("O d", "twos"),
-        ("Esc", "cancel"),
-        ("H P", "e"),
-        ("H", "hyp"),
-    ],
-];
+/// Narrowest column that still fits `S-Tab` plus the longest label.
+const HELP_COL_MIN: usize = 15;
+/// Shortcut box. Four columns of [`HELP_COL_MIN`] fit, including the frame.
+const HELP_DIALOG_W: u16 = 72;
+/// Command, variable, and constant boxes.
+const DIALOG_W: u16 = 68;
 
 /// Gray `┌┐` frame shared by the shortcuts, variable, and constant boxes.
 struct Dialog {
@@ -780,12 +674,19 @@ struct Dialog {
     text_w: u16,
     content_y: u16,
     content_h: u16,
+    palette: Palette,
 }
 
 impl Dialog {
-    fn open(buf: &mut Buffer, area: Rect, content_rows: u16) -> Option<Self> {
+    fn open(
+        buf: &mut Buffer,
+        area: Rect,
+        content_rows: u16,
+        width: u16,
+        palette: Palette,
+    ) -> Option<Self> {
         let chrome_y = 2 + HELP_V_PAD + HELP_FOOTER;
-        let width = 68u16.min(area.width);
+        let width = width.min(area.width);
         let inner_w = width.saturating_sub(2 + HELP_H_PAD * 2);
         if inner_w < 8 || area.height < chrome_y {
             return None;
@@ -798,14 +699,14 @@ impl Dialog {
             height,
         };
 
-        let fill = Style::default().bg(colors().bg);
+        let fill = Style::default().bg(palette.bg);
         for y in rect.y..rect.y + rect.height {
             for x in rect.x..rect.x + rect.width {
                 paint_char(buf, x, y, ' ', fill);
             }
         }
 
-        let border = Style::default().fg(colors().gray_dim).bg(colors().bg);
+        let border = Style::default().fg(palette.gray_dim).bg(palette.bg);
         let last_x = rect.x + rect.width - 1;
         let last_y = rect.y + rect.height - 1;
         for x in rect.x..rect.x + rect.width {
@@ -830,11 +731,14 @@ impl Dialog {
             text_w: rect.width.saturating_sub(2 + HELP_H_PAD * 2),
             content_y: rect.y + 1 + HELP_V_PAD,
             content_h: rect.height.saturating_sub(chrome_y),
+            palette,
         })
     }
 
     fn title(&self, buf: &mut Buffer, title: &str) {
-        let border = Style::default().fg(colors().gray_dim).bg(colors().bg);
+        let border = Style::default()
+            .fg(self.palette.gray_dim)
+            .bg(self.palette.bg);
         let last_x = self.rect.x + self.rect.width - 1;
         let title_end = last_x.saturating_sub(8);
         let mut title_x = self.rect.x + 1;
@@ -846,8 +750,8 @@ impl Dialog {
             title_end,
             title,
             Style::default()
-                .fg(colors().fg)
-                .bg(colors().bg)
+                .fg(self.palette.fg)
+                .bg(self.palette.bg)
                 .add_modifier(Modifier::BOLD),
         );
         paint_str(buf, title_x, self.rect.y, title_end, " ─", border);
@@ -861,7 +765,7 @@ impl Dialog {
                 self.rect.y,
                 last_x,
                 close,
-                Style::default().fg(colors().gray).bg(colors().bg),
+                Style::default().fg(self.palette.gray).bg(self.palette.bg),
             );
         }
     }
@@ -913,28 +817,28 @@ impl Dialog {
                 self.rect.y + 1,
                 self.inner_x + self.text_w,
                 &page_text,
-                Style::default().fg(colors().gray).bg(colors().bg),
+                Style::default().fg(self.palette.gray).bg(self.palette.bg),
             );
         }
     }
 
     fn footer(&self, buf: &mut Buffer, hints: &[(&str, &str)]) {
         let y = self.rect.y + self.rect.height - 2;
-        draw_centered_hints(buf, self.inner_x, y, self.text_w, hints);
+        draw_centered_hints(buf, self.inner_x, y, self.text_w, hints, self.palette);
     }
 }
 
 /// Shortcuts box above the input. The same number of rows sits above the frame
 /// as between the frame and the prompt, and the frame is centered on the
 /// input's width. A terminal too short for that band uses the whole window.
-fn draw_help(buf: &mut Buffer, window: Rect, above: Rect) {
+fn draw_help(buf: &mut Buffer, window: Rect, above: Rect, palette: Palette) {
     let chrome = 2 + HELP_V_PAD + HELP_FOOTER;
     let area = if above.width >= 10 && above.height >= chrome {
         above
     } else {
         window
     };
-    let width = 68u16.min(area.width);
+    let width = HELP_DIALOG_W.min(area.width);
     let inner_w = width.saturating_sub(2 + HELP_H_PAD * 2);
     if inner_w < 8 {
         return;
@@ -942,14 +846,14 @@ fn draw_help(buf: &mut Buffer, window: Rect, above: Rect) {
     let (cols, col_w) = help_layout(inner_w);
     let columns = help_columns(cols);
     let grid_rows = columns.iter().map(|column| column.len()).max().unwrap_or(0) as u16;
-    let Some(dialog) = Dialog::open(buf, area, grid_rows) else {
+    let Some(dialog) = Dialog::open(buf, area, grid_rows, width, palette) else {
         return;
     };
     dialog.title(buf, "Shortcuts");
     dialog.note(
         buf,
         "? for a description",
-        Style::default().fg(colors().gray).bg(colors().bg),
+        Style::default().fg(palette.gray).bg(palette.bg),
     );
     if dialog.content_h > 0 {
         let content = Rect {
@@ -958,33 +862,42 @@ fn draw_help(buf: &mut Buffer, window: Rect, above: Rect) {
             width: dialog.text_w,
             height: dialog.content_h,
         };
-        draw_help_grid(buf, content, &columns, col_w, dialog.content_h);
+        draw_help_grid(buf, content, &columns, col_w, dialog.content_h, palette);
     }
     dialog.footer(buf, HELP_HINTS);
 }
 
 const HELP_HINTS: &[(&str, &str)] = &[("?", "docs"), ("esc", "close"), ("q", "quit")];
 
-const DOCS_HINTS: &[(&str, &str)] = &[
-    ("↑↓", "move"),
-    ("tab", "next"),
-    ("esc", "close"),
-    ("?", "list"),
-];
+fn docs_hints() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("↑↓", "move"),
+        (crate::docs::keys_named("swap"), "next"),
+        ("esc", "close"),
+        ("?", "list"),
+    ]
+}
 
 /// Rows of command text inside the reference, before the dialog chrome.
 const DOCS_CONTENT_ROWS: u16 = 16;
 
 /// Searchable command pages. One match fills the box. Several matches keep a
 /// short list and the selected page under it.
-fn draw_docs(buf: &mut Buffer, area: Rect, app: &App) {
-    let Some(dialog) = Dialog::open(buf, area, DOCS_CONTENT_ROWS) else {
+fn draw_docs(buf: &mut Buffer, area: Rect, app: &App, palette: Palette) {
+    let Some(dialog) = Dialog::open(buf, area, DOCS_CONTENT_ROWS, DIALOG_W, palette) else {
         return;
     };
     dialog.title(buf, "Commands");
     let matches = app.docs_matches();
     let cursor = app.docs_cursor();
-    draw_docs_query(&dialog, buf, app.docs_query(), cursor, matches.len());
+    draw_docs_query(
+        &dialog,
+        buf,
+        app.docs_query(),
+        cursor,
+        matches.len(),
+        palette,
+    );
     let split = docs_split(dialog.content_h, matches.len());
     let mut y = dialog.content_y;
     if split.list > 0 {
@@ -1000,12 +913,13 @@ fn draw_docs(buf: &mut Buffer, area: Rect, app: &App) {
                 dialog.inner_x + dialog.text_w,
                 entry,
                 start + row == cursor,
+                palette,
             );
             y += 1;
         }
     }
     if split.rule {
-        paint_rule(buf, dialog.inner_x, y, dialog.text_w);
+        paint_rule(buf, dialog.inner_x, y, dialog.text_w, palette);
         y += 1;
     }
     if split.article > 0 {
@@ -1017,6 +931,7 @@ fn draw_docs(buf: &mut Buffer, area: Rect, app: &App) {
                 dialog.inner_x + dialog.text_w,
                 split.article,
                 entry,
+                palette,
             );
         } else {
             paint_str(
@@ -1025,11 +940,12 @@ fn draw_docs(buf: &mut Buffer, area: Rect, app: &App) {
                 y,
                 dialog.inner_x + dialog.text_w,
                 "no match",
-                Style::default().fg(colors().gray).bg(colors().bg),
+                Style::default().fg(palette.gray).bg(palette.bg),
             );
         }
     }
-    dialog.footer(buf, DOCS_HINTS);
+    let hints = docs_hints();
+    dialog.footer(buf, &hints);
 }
 
 struct DocsSplit {
@@ -1061,7 +977,14 @@ fn docs_window(cursor: usize, matches: usize, rows: usize) -> usize {
     cursor.saturating_sub(rows / 2).min(matches - rows)
 }
 
-fn draw_docs_query(dialog: &Dialog, buf: &mut Buffer, query: &str, cursor: usize, total: usize) {
+fn draw_docs_query(
+    dialog: &Dialog,
+    buf: &mut Buffer,
+    query: &str,
+    cursor: usize,
+    total: usize,
+    palette: Palette,
+) {
     let y = dialog.rect.y + 1;
     let end = dialog.inner_x + dialog.text_w;
     let page = if total == 0 {
@@ -1075,7 +998,7 @@ fn draw_docs_query(dialog: &Dialog, buf: &mut Buffer, query: &str, cursor: usize
     } else {
         end.saturating_sub(page_w + 1)
     };
-    let mut col = paint_str(buf, dialog.inner_x, y, text_end, "❯ ", arrow_style());
+    let mut col = paint_str(buf, dialog.inner_x, y, text_end, "❯ ", arrow_style(palette));
     if query.is_empty() {
         paint_str(
             buf,
@@ -1083,12 +1006,12 @@ fn draw_docs_query(dialog: &Dialog, buf: &mut Buffer, query: &str, cursor: usize
             y,
             text_end,
             "type to search",
-            Style::default().fg(colors().gray).bg(colors().bg),
+            Style::default().fg(palette.gray).bg(palette.bg),
         );
     } else {
-        col = paint_str(buf, col, y, text_end, query, text_style());
+        col = paint_str(buf, col, y, text_end, query, text_style(palette));
         if col < text_end {
-            paint_char(buf, col, y, '▍', arrow_style());
+            paint_char(buf, col, y, '▍', arrow_style(palette));
         }
     }
     if page_w > 0 {
@@ -1098,7 +1021,7 @@ fn draw_docs_query(dialog: &Dialog, buf: &mut Buffer, query: &str, cursor: usize
             y,
             end,
             &page,
-            Style::default().fg(colors().gray).bg(colors().bg),
+            Style::default().fg(palette.gray).bg(palette.bg),
         );
     }
 }
@@ -1108,28 +1031,29 @@ fn draw_docs_row(
     x: u16,
     y: u16,
     end: u16,
-    entry: &crate::docs::Entry,
+    entry: &crate::docs::Binding,
     selected: bool,
+    palette: Palette,
 ) {
     let key_style = Style::default()
         .fg(if selected {
-            colors().fg
+            palette.fg
         } else {
-            colors().fg_secondary
+            palette.fg_secondary
         })
-        .bg(colors().bg)
+        .bg(palette.bg)
         .add_modifier(Modifier::BOLD);
     let name_style = if selected {
         Style::default()
-            .fg(colors().fg)
-            .bg(colors().bg)
+            .fg(palette.fg)
+            .bg(palette.bg)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(colors().gray).bg(colors().bg)
+        Style::default().fg(palette.gray).bg(palette.bg)
     };
     let summary_style = Style::default()
-        .fg(if selected { colors().fg } else { colors().gray })
-        .bg(colors().bg);
+        .fg(if selected { palette.fg } else { palette.gray })
+        .bg(palette.bg);
     let mut col = paint_str(
         buf,
         x,
@@ -1137,18 +1061,28 @@ fn draw_docs_row(
         end,
         if selected { "❯ " } else { "  " },
         if selected {
-            arrow_style()
+            arrow_style(palette)
         } else {
-            Style::default().bg(colors().bg)
+            Style::default().bg(palette.bg)
         },
     );
-    col = paint_field(buf, col, y, end, entry.keys, 4, key_style);
-    col = paint_gap(buf, col, y, end, 2);
-    col = paint_field(buf, col, y, end, entry.name, 10, name_style);
-    col = paint_gap(buf, col, y, end, 2);
+    col = paint_field(
+        buf,
+        col,
+        y,
+        end,
+        entry.keys,
+        crate::docs::KEY_WIDTH as u16,
+        key_style,
+        palette,
+    );
+    col = paint_gap(buf, col, y, end, 2, palette);
+    col = paint_field(buf, col, y, end, entry.name, 10, name_style, palette);
+    col = paint_gap(buf, col, y, end, 2, palette);
     paint_str(buf, col, y, end, entry.summary, summary_style);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint_field(
     buf: &mut Buffer,
     x: u16,
@@ -1157,28 +1091,29 @@ fn paint_field(
     text: &str,
     width: u16,
     style: Style,
+    palette: Palette,
 ) -> u16 {
     let field_end = x.saturating_add(width).min(end);
     let mut col = paint_str(buf, x, y, field_end, text, style);
     while col < field_end {
-        paint_char(buf, col, y, ' ', Style::default().bg(colors().bg));
+        paint_char(buf, col, y, ' ', Style::default().bg(palette.bg));
         col += 1;
     }
     col
 }
 
-fn paint_gap(buf: &mut Buffer, x: u16, y: u16, end: u16, width: u16) -> u16 {
+fn paint_gap(buf: &mut Buffer, x: u16, y: u16, end: u16, width: u16, palette: Palette) -> u16 {
     let gap_end = x.saturating_add(width).min(end);
     let mut col = x;
     while col < gap_end {
-        paint_char(buf, col, y, ' ', Style::default().bg(colors().bg));
+        paint_char(buf, col, y, ' ', Style::default().bg(palette.bg));
         col += 1;
     }
     col
 }
 
-fn paint_rule(buf: &mut Buffer, x: u16, y: u16, width: u16) {
-    let style = Style::default().fg(colors().gray_dim).bg(colors().bg);
+fn paint_rule(buf: &mut Buffer, x: u16, y: u16, width: u16, palette: Palette) {
+    let style = Style::default().fg(palette.gray_dim).bg(palette.bg);
     for col in x..x.saturating_add(width) {
         paint_char(buf, col, y, '─', style);
     }
@@ -1190,7 +1125,8 @@ fn draw_docs_article(
     y: u16,
     end: u16,
     rows: u16,
-    entry: &crate::docs::Entry,
+    entry: &crate::docs::Binding,
+    palette: Palette,
 ) {
     if rows == 0 || end <= x {
         return;
@@ -1203,8 +1139,8 @@ fn draw_docs_article(
         end,
         &head,
         Style::default()
-            .fg(colors().fg)
-            .bg(colors().bg)
+            .fg(palette.fg)
+            .bg(palette.bg)
             .add_modifier(Modifier::BOLD),
     );
     if rows == 1 {
@@ -1216,7 +1152,7 @@ fn draw_docs_article(
         y + 1,
         end,
         entry.summary,
-        Style::default().fg(colors().gray).bg(colors().bg),
+        Style::default().fg(palette.gray).bg(palette.bg),
     );
     if rows <= 2 {
         return;
@@ -1236,7 +1172,7 @@ fn draw_docs_article(
             body_y + row as u16,
             end,
             &line,
-            Style::default().fg(colors().fg).bg(colors().bg),
+            Style::default().fg(palette.fg).bg(palette.bg),
         );
     }
 }
@@ -1277,7 +1213,8 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
 /// `(columns, column width)` for the shortcut grid. Prefers four columns.
 fn help_layout(width: u16) -> (usize, usize) {
     let width = width as usize;
-    let mut cols = HELP_COLS.min(HELP_GROUPS.len()).max(1);
+    let groups = crate::docs::help_groups();
+    let mut cols = HELP_COLS.min(groups.len()).max(1);
     while cols > 1 && cols * HELP_COL_MIN + (cols - 1) * HELP_GAP > width {
         cols -= 1;
     }
@@ -1285,13 +1222,15 @@ fn help_layout(width: u16) -> (usize, usize) {
     (cols, col_w.max(1))
 }
 
+/// One topic per column. A narrow terminal stacks later topics under earlier ones.
 fn help_columns(cols: usize) -> Vec<Vec<(&'static str, &'static str)>> {
+    let groups = crate::docs::help_groups();
     let cols = cols.max(1);
-    if cols >= HELP_GROUPS.len() {
-        return HELP_GROUPS.iter().map(|group| group.to_vec()).collect();
+    if cols >= groups.len() {
+        return groups;
     }
     let mut columns = vec![Vec::new(); cols];
-    for (index, group) in HELP_GROUPS.iter().enumerate() {
+    for (index, group) in groups.iter().enumerate() {
         columns[index % cols].extend_from_slice(group);
     }
     columns
@@ -1303,21 +1242,22 @@ fn draw_help_grid(
     columns: &[Vec<(&str, &str)>],
     col_w: usize,
     rows_fit: u16,
+    palette: Palette,
 ) {
     let show = rows_fit as usize;
     let key_style = Style::default()
-        .fg(colors().fg_secondary)
-        .bg(colors().bg)
+        .fg(palette.fg_secondary)
+        .bg(palette.bg)
         .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(colors().gray).bg(colors().bg);
-    let pad_style = Style::default().bg(colors().bg);
+    let label_style = Style::default().fg(palette.gray).bg(palette.bg);
+    let pad_style = Style::default().bg(palette.bg);
     for (col, entries) in columns.iter().enumerate() {
         for (row, (key, label)) in entries.iter().enumerate().take(show) {
             let y = area.y + row as u16;
             let x = area.x + (col * (col_w + HELP_GAP)) as u16;
             let end = x + col_w as u16;
             let mut cursor = paint_str(buf, x, y, end, key, key_style);
-            let label_at = x + HELP_KEY_W as u16 + 1;
+            let label_at = x + crate::docs::KEY_WIDTH as u16 + 1;
             while cursor < label_at.min(end) {
                 paint_char(buf, cursor, y, ' ', pad_style);
                 cursor += 1;
@@ -1330,7 +1270,14 @@ fn draw_help_grid(
 }
 
 /// `key label` groups, centered, separated by `  |  `.
-fn draw_centered_hints(buf: &mut Buffer, x: u16, y: u16, width: u16, hints: &[(&str, &str)]) {
+fn draw_centered_hints(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    hints: &[(&str, &str)],
+    palette: Palette,
+) {
     let sep = "  |  ";
     let total = hints
         .iter()
@@ -1343,10 +1290,10 @@ fn draw_centered_hints(buf: &mut Buffer, x: u16, y: u16, width: u16, hints: &[(&
     let mut col = x + (width as usize - total) as u16 / 2;
     let end = x + width;
     let key_style = Style::default()
-        .fg(colors().fg_secondary)
-        .bg(colors().bg)
+        .fg(palette.fg_secondary)
+        .bg(palette.bg)
         .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(colors().gray).bg(colors().bg);
+    let label_style = Style::default().fg(palette.gray).bg(palette.bg);
     for (i, (key, label)) in hints.iter().enumerate() {
         if i > 0 {
             col = paint_str(
@@ -1355,7 +1302,7 @@ fn draw_centered_hints(buf: &mut Buffer, x: u16, y: u16, width: u16, hints: &[(&
                 y,
                 end,
                 sep,
-                Style::default().fg(colors().gray_dim).bg(colors().bg),
+                Style::default().fg(palette.gray_dim).bg(palette.bg),
             );
         }
         col = paint_str(buf, col, y, end, key, key_style);
@@ -1365,7 +1312,7 @@ fn draw_centered_hints(buf: &mut Buffer, x: u16, y: u16, width: u16, hints: &[(&
 }
 
 /// Stored variables, ten to a page: five down the left column, five down the right.
-fn draw_variables(buf: &mut Buffer, area: Rect, app: &App) {
+fn draw_variables(buf: &mut Buffer, area: Rect, app: &App, palette: Palette) {
     let rows = app.variable_rows();
     let grid_rows = if rows.is_empty() {
         1
@@ -1374,7 +1321,7 @@ fn draw_variables(buf: &mut Buffer, area: Rect, app: &App) {
         let right = rows.len().saturating_sub(VAR_COLUMN);
         left.max(right) as u16
     };
-    let Some(dialog) = Dialog::open(buf, area, grid_rows) else {
+    let Some(dialog) = Dialog::open(buf, area, grid_rows, DIALOG_W, palette) else {
         return;
     };
     dialog.title(buf, "Variables");
@@ -1384,9 +1331,9 @@ fn draw_variables(buf: &mut Buffer, area: Rect, app: &App) {
         app.var_note()
     };
     let note_style = if app.var_note().is_empty() {
-        Style::default().fg(colors().gray).bg(colors().bg)
+        Style::default().fg(palette.gray).bg(palette.bg)
     } else {
-        Style::default().fg(colors().error).bg(colors().bg)
+        Style::default().fg(palette.error).bg(palette.bg)
     };
     dialog.note_page(buf, note, note_style, app.var_page(), app.var_pages());
 
@@ -1397,7 +1344,7 @@ fn draw_variables(buf: &mut Buffer, area: Rect, app: &App) {
             dialog.content_y,
             dialog.inner_x + dialog.text_w,
             "nothing stored",
-            Style::default().fg(colors().gray).bg(colors().bg),
+            Style::default().fg(palette.gray).bg(palette.bg),
         );
     } else if dialog.content_h > 0 {
         let col_w = (dialog.text_w as usize - HELP_GAP) / 2;
@@ -1415,6 +1362,7 @@ fn draw_variables(buf: &mut Buffer, area: Rect, app: &App) {
                 x + col_w as u16,
                 name,
                 value,
+                palette,
             );
         }
     }
@@ -1424,7 +1372,7 @@ fn draw_variables(buf: &mut Buffer, area: Rect, app: &App) {
 }
 
 /// Physics constants, sixteen to a page: eight down each column.
-fn draw_constants(buf: &mut Buffer, area: Rect, app: &App) {
+fn draw_constants(buf: &mut Buffer, area: Rect, app: &App, palette: Palette) {
     let rows = app.const_rows();
     let left = rows.len().min(CONST_COLUMN);
     let right = rows.len().saturating_sub(CONST_COLUMN);
@@ -1432,7 +1380,7 @@ fn draw_constants(buf: &mut Buffer, area: Rect, app: &App) {
     if grid_rows == 0 {
         return;
     }
-    let Some(dialog) = Dialog::open(buf, area, grid_rows) else {
+    let Some(dialog) = Dialog::open(buf, area, grid_rows, DIALOG_W, palette) else {
         return;
     };
     dialog.title(buf, "Constants");
@@ -1442,9 +1390,9 @@ fn draw_constants(buf: &mut Buffer, area: Rect, app: &App) {
         app.const_note()
     };
     let note_style = if app.const_note().is_empty() {
-        Style::default().fg(colors().gray).bg(colors().bg)
+        Style::default().fg(palette.gray).bg(palette.bg)
     } else {
-        Style::default().fg(colors().error).bg(colors().bg)
+        Style::default().fg(palette.error).bg(palette.bg)
     };
     dialog.note_page(buf, note, note_style, app.const_page(), app.const_pages());
 
@@ -1465,6 +1413,7 @@ fn draw_constants(buf: &mut Buffer, area: Rect, app: &App) {
                 *key,
                 symbol,
                 name,
+                palette,
             );
         }
     }
@@ -1484,14 +1433,15 @@ fn const_footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
 fn page_hints(pages: usize) -> Vec<(&'static str, &'static str)> {
     let mut hints = Vec::new();
     if pages > 1 {
-        hints.push(("tab", "next"));
-        hints.push(("TAB", "prev"));
+        hints.push((crate::docs::keys_named("swap"), "next"));
+        hints.push((crate::docs::keys_named("roll"), "prev"));
     }
     hints.push(("esc", "close"));
     hints
 }
 
 /// `0 c     light`, cutting the name with `..` when the cell is too narrow.
+#[allow(clippy::too_many_arguments)]
 fn paint_const_cell(
     buf: &mut Buffer,
     x: u16,
@@ -1500,20 +1450,21 @@ fn paint_const_cell(
     key: char,
     symbol: &str,
     name: &str,
+    palette: Palette,
 ) {
     if end <= x {
         return;
     }
     let key_style = Style::default()
-        .fg(colors().fg_secondary)
-        .bg(colors().bg)
+        .fg(palette.fg_secondary)
+        .bg(palette.bg)
         .add_modifier(Modifier::BOLD);
     let symbol_style = Style::default()
-        .fg(colors().fg)
-        .bg(colors().bg)
+        .fg(palette.fg)
+        .bg(palette.bg)
         .add_modifier(Modifier::BOLD);
-    let name_style = Style::default().fg(colors().fg).bg(colors().bg);
-    let punct = Style::default().fg(colors().gray).bg(colors().bg);
+    let name_style = Style::default().fg(palette.fg).bg(palette.bg);
+    let punct = Style::default().fg(palette.gray).bg(palette.bg);
     let mut col = paint_str(buf, x, y, end, &key.to_string(), key_style);
     if col >= end {
         return;
@@ -1537,17 +1488,25 @@ fn paint_const_cell(
 }
 
 /// `name: value`, cutting the value with `..` when the cell is too narrow.
-fn paint_var_cell(buf: &mut Buffer, x: u16, y: u16, end: u16, name: &str, value: &str) {
+fn paint_var_cell(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    end: u16,
+    name: &str,
+    value: &str,
+    palette: Palette,
+) {
     if end <= x {
         return;
     }
     let width = (end - x) as usize;
     let name_style = Style::default()
-        .fg(colors().fg_secondary)
-        .bg(colors().bg)
+        .fg(palette.fg_secondary)
+        .bg(palette.bg)
         .add_modifier(Modifier::BOLD);
-    let punct = Style::default().fg(colors().gray).bg(colors().bg);
-    let value_style = Style::default().fg(colors().fg).bg(colors().bg);
+    let punct = Style::default().fg(palette.gray).bg(palette.bg);
+    let value_style = Style::default().fg(palette.fg).bg(palette.bg);
     let name_len = name.chars().count();
     if name_len + 2 >= width {
         let keep = width.saturating_sub(2);
@@ -1569,7 +1528,7 @@ fn paint_var_cell(buf: &mut Buffer, x: u16, y: u16, end: u16, name: &str, value:
     paint_str(buf, col, y, end, "..", punct);
 }
 
-fn draw_shortcuts(buf: &mut Buffer, area: Rect, app: &App) {
+fn draw_shortcuts(buf: &mut Buffer, area: Rect, app: &App, palette: Palette) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -1581,29 +1540,27 @@ fn draw_shortcuts(buf: &mut Buffer, area: Rect, app: &App) {
             x,
             y,
             ' ',
-            Style::default().fg(colors().gray).bg(colors().bg),
+            Style::default().fg(palette.gray).bg(palette.bg),
         );
     }
 
     let var_hints = var_footer_hints(app);
     let const_hints = const_footer_hints(app);
-    let hints: &[(&str, &str)] = if app.docs_open() {
-        DOCS_HINTS
-    } else if app.help_open() {
-        HELP_HINTS
-    } else if app.vars_open() {
-        &var_hints
-    } else if app.consts_open() {
-        &const_hints
-    } else {
-        SHORTCUTS
+    let docs = docs_hints();
+    let bar = crate::docs::shortcuts();
+    let hints: &[(&str, &str)] = match app.overlay() {
+        Some(Overlay::Docs { .. }) => &docs,
+        Some(Overlay::Help) => HELP_HINTS,
+        Some(Overlay::Variables { .. }) => &var_hints,
+        Some(Overlay::Constants { .. }) => &const_hints,
+        None => &bar,
     };
     let key_style = Style::default()
-        .fg(colors().fg_secondary)
-        .bg(colors().bg)
+        .fg(palette.fg_secondary)
+        .bg(palette.bg)
         .add_modifier(Modifier::BOLD);
-    let label_style = Style::default().fg(colors().gray).bg(colors().bg);
-    let sep_style = Style::default().fg(colors().gray_dim).bg(colors().bg);
+    let label_style = Style::default().fg(palette.gray).bg(palette.bg);
+    let sep_style = Style::default().fg(palette.gray_dim).bg(palette.bg);
 
     let mut x = area.x;
     for (i, (key, label)) in hints.iter().enumerate() {
@@ -1621,12 +1578,12 @@ fn draw_shortcuts(buf: &mut Buffer, area: Rect, app: &App) {
     }
 }
 
-fn arrow_style() -> Style {
-    Style::default().fg(colors().fg_secondary).bg(colors().bg)
+fn arrow_style(palette: Palette) -> Style {
+    Style::default().fg(palette.fg_secondary).bg(palette.bg)
 }
 
-fn text_style() -> Style {
-    Style::default().fg(colors().fg).bg(colors().bg)
+fn text_style(palette: Palette) -> Style {
+    Style::default().fg(palette.fg).bg(palette.bg)
 }
 
 fn paint_char(buf: &mut Buffer, x: u16, y: u16, ch: char, style: Style) {
@@ -1683,7 +1640,7 @@ mod tests {
     fn render(app: &App, width: u16, height: u16) -> Buffer {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| draw(frame, app)).unwrap();
+        terminal.draw(|frame| draw(frame, app, GROK_NIGHT)).unwrap();
         terminal.backend().buffer().clone()
     }
 
@@ -2027,17 +1984,13 @@ mod tests {
     }
 
     #[test]
-    fn every_shortcut_has_a_page() {
-        for group in HELP_GROUPS {
-            for (key, label) in group {
-                assert!(
-                    crate::docs::entries()
-                        .iter()
-                        .any(|entry| entry.keys == *key && entry.name == *label),
-                    "{key} {label} is missing from the command reference"
-                );
-            }
-        }
+    fn help_shows_the_shift_tab_label() {
+        let mut app = App::new();
+        app.keys("?");
+        let text = screen(&app, 90, 40);
+        assert!(text.contains("S-Tab"));
+        assert!(text.contains("fractions"));
+        assert!(!text.contains("TAB"));
     }
 
     #[test]
@@ -2114,7 +2067,7 @@ mod tests {
         assert!(rows.iter().any(|row| row.contains("Variables")));
         assert!(rows.iter().any(|row| row.contains("1/2")));
         assert!(rows.iter().any(|row| row.contains("tab:next")));
-        assert!(rows.iter().any(|row| row.contains("TAB:prev")));
+        assert!(rows.iter().any(|row| row.contains("S-Tab:prev")));
         assert!(rows.iter().all(|row| !row.contains("k:")));
         assert!(rows.iter().all(|row| !row.contains("ret:push")));
 
@@ -2123,7 +2076,7 @@ mod tests {
         assert!(rows.iter().any(|row| row.contains("k:")));
         assert!(rows.iter().any(|row| row.contains("2/2")));
         assert!(rows.iter().any(|row| row.contains("tab:next")));
-        assert!(rows.iter().any(|row| row.contains("TAB:prev")));
+        assert!(rows.iter().any(|row| row.contains("S-Tab:prev")));
         assert!(rows.iter().all(|row| !row.contains("a:")));
 
         let mut app = App::new();
@@ -2156,7 +2109,7 @@ mod tests {
             "eight names down each column"
         );
         assert!(rows.iter().any(|row| row.contains("tab:next")));
-        assert!(rows.iter().any(|row| row.contains("TAB:prev")));
+        assert!(rows.iter().any(|row| row.contains("S-Tab:prev")));
         assert!(rows.iter().all(|row| !row.contains("ret:push")));
         assert!(rows.iter().all(|row| !row.contains("eps0")));
 
@@ -2165,7 +2118,7 @@ mod tests {
         let rows = lines(&render(&app, 64, 24));
         assert!(rows.iter().any(|row| row.contains("3/3")));
         assert!(rows.iter().any(|row| row.contains("tab:next")));
-        assert!(rows.iter().any(|row| row.contains("TAB:prev")));
+        assert!(rows.iter().any(|row| row.contains("S-Tab:prev")));
         assert!(
             rows.iter()
                 .any(|row| row.contains("alpha") && row.contains("fine") && row.contains("Me")),
@@ -2184,15 +2137,6 @@ mod tests {
                 .any(|row| row.contains("dm") && row.contains("distance"))
         );
         assert!(rows.iter().all(|row| !row.contains("light")));
-    }
-
-    /// Puts the GrokNight canvas back even when an assertion fails.
-    struct PaletteGuard;
-
-    impl Drop for PaletteGuard {
-        fn drop(&mut self) {
-            set_palette(GROK_NIGHT);
-        }
     }
 
     fn contrast_ratio(fg: Color, bg: (u8, u8, u8)) -> f64 {
@@ -2262,16 +2206,19 @@ mod tests {
 
     #[test]
     fn light_terminal_keeps_the_default_background() {
-        let _guard = PaletteGuard;
-        set_palette(ON_LIGHT_TERMINAL);
-        let buffer = render(&App::new(), 40, 12);
-        let cell = &buffer[(0, 0)];
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &App::new(), ON_LIGHT_TERMINAL))
+            .unwrap();
+        let cell = &terminal.backend().buffer()[(0, 0)];
         assert_eq!(cell.bg, Color::Reset);
         assert_eq!(cell.fg, LIGHT_FG);
 
-        set_palette(ON_DARK_TERMINAL);
-        let buffer = render(&App::new(), 40, 12);
-        let cell = &buffer[(0, 0)];
+        terminal
+            .draw(|frame| draw(frame, &App::new(), ON_DARK_TERMINAL))
+            .unwrap();
+        let cell = &terminal.backend().buffer()[(0, 0)];
         assert_eq!(cell.bg, Color::Reset);
         assert_eq!(cell.fg, FG);
     }

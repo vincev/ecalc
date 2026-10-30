@@ -2,17 +2,25 @@
 //!
 //! Index 0 is the oldest value. The last element is stack level 1.
 //! A checkpoint is taken only after a computation succeeds. It saves the
-//! stack and the variables. Mode changes are not undoable. `push` and `dup` leave
-//! the inverse and hyperbolic flags alone so `125 RET 3 I ^` works.
+//! stack and the variables. Mode changes are not undoable. `push` and `dup`
+//! only change the stack, so a one-shot prefix can survive them.
 
 use crate::comb;
 use crate::error::CalcError;
 use crate::float::{MAX_PRECISION, MIN_PRECISION};
 use crate::radix::{self, MAX_RADIX, MAX_WORD_SIZE, MIN_RADIX, MIN_WORD_SIZE};
-use crate::value::{self, AngleMode, Mode, Real, Value};
-use num_bigint::BigInt;
-use num_traits::One;
+use crate::value::{self, AngleMode, Mode, Value};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
+
+/// What the prompt's message slot is showing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Status {
+    Empty,
+    Note(String),
+    Error(CalcError),
+    UnknownKey,
+}
 
 const UNDO_CAP: usize = 100;
 pub(crate) const MAX_VAR_LEN: usize = 32;
@@ -30,10 +38,7 @@ pub struct Engine {
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
     mode: Mode,
-    inverse: bool,
-    hyperbolic: bool,
-    message: String,
-    error: bool,
+    status: Status,
 }
 
 impl Default for Engine {
@@ -50,10 +55,7 @@ impl Engine {
             undo: Vec::new(),
             redo: Vec::new(),
             mode: Mode::default(),
-            inverse: false,
-            hyperbolic: false,
-            message: String::new(),
-            error: false,
+            status: Status::Empty,
         }
     }
 
@@ -61,20 +63,22 @@ impl Engine {
         &self.mode
     }
 
-    pub fn inverse(&self) -> bool {
-        self.inverse
+    pub fn status(&self) -> &Status {
+        &self.status
     }
 
-    pub fn hyperbolic(&self) -> bool {
-        self.hyperbolic
-    }
-
-    pub fn message(&self) -> &str {
-        &self.message
+    /// Text for the prompt. An error uses [`CalcError`]'s display.
+    pub fn message(&self) -> Cow<'_, str> {
+        match &self.status {
+            Status::Empty => Cow::Borrowed(""),
+            Status::Note(text) => Cow::Borrowed(text.as_str()),
+            Status::Error(err) => Cow::Owned(err.to_string()),
+            Status::UnknownKey => Cow::Borrowed("unknown key"),
+        }
     }
 
     pub fn is_error(&self) -> bool {
-        self.error
+        matches!(self.status, Status::Error(_))
     }
 
     pub fn stack(&self) -> &[Value] {
@@ -93,36 +97,24 @@ impl Engine {
             .collect()
     }
 
-    pub fn clear_flags(&mut self) {
-        self.inverse = false;
-        self.hyperbolic = false;
-    }
-
     pub fn clear_message(&mut self) {
-        self.message.clear();
-        self.error = false;
-    }
-
-    pub fn toggle_inverse(&mut self) {
-        self.inverse = !self.inverse;
-        self.clear_message();
-    }
-
-    pub fn toggle_hyperbolic(&mut self) {
-        self.hyperbolic = !self.hyperbolic;
-        self.clear_message();
+        self.status = Status::Empty;
     }
 
     pub fn show(&mut self, msg: impl Into<String>) {
-        self.message = msg.into();
-        self.error = false;
-        self.clear_flags();
+        self.note(msg);
+    }
+
+    pub fn unknown_key(&mut self) {
+        self.status = Status::UnknownKey;
     }
 
     pub fn fail(&mut self, err: CalcError) {
-        self.message = err.to_string();
-        self.error = true;
-        self.clear_flags();
+        self.status = Status::Error(err);
+    }
+
+    fn note(&mut self, msg: impl Into<String>) {
+        self.status = Status::Note(msg.into());
     }
 
     pub fn push(&mut self, value: Value) {
@@ -187,7 +179,6 @@ impl Engine {
             self.redo.remove(0);
         }
         self.clear_message();
-        self.clear_flags();
     }
 
     pub fn redo(&mut self) {
@@ -201,7 +192,6 @@ impl Engine {
             self.undo.remove(0);
         }
         self.clear_message();
-        self.clear_flags();
     }
 
     /// Copy the top of the stack into `name`. `pop` removes it afterwards.
@@ -285,8 +275,8 @@ impl Engine {
         self.binop(value::div);
     }
 
-    pub fn fdiv(&mut self) {
-        self.binop(value::fdiv);
+    pub fn div_fraction(&mut self) {
+        self.binop(value::div_fraction);
     }
 
     pub fn idiv(&mut self) {
@@ -310,13 +300,14 @@ impl Engine {
         self.binop(comb::mod_inverse);
     }
 
-    /// `k c` chooses. `H k c` counts permutations. The count is on top.
+    /// `k c`. The count is on top.
     pub fn choose(&mut self) {
-        if self.hyperbolic {
-            self.binop(comb::perm);
-        } else {
-            self.binop(comb::choose);
-        }
+        self.binop(comb::choose);
+    }
+
+    /// `H k c`. The count is on top.
+    pub fn perm(&mut self) {
+        self.binop(comb::perm);
     }
 
     /// `y` is on top and `x` is under it. Push `a`, `b`, and `g` so `g` is on top and `a*x + b*y = g`.
@@ -356,15 +347,16 @@ impl Engine {
     }
 
     pub fn power(&mut self) {
-        if !self.inverse {
-            self.binop(value::pow);
-            return;
-        }
+        self.binop(value::pow);
+    }
+
+    /// Degree on top. An integer degree uses an exact root when there is one.
+    pub fn nth_root(&mut self) {
         if self.stack.len() < 2 {
             self.fail(CalcError::StackUnderflow);
             return;
         }
-        let degree = exact_int(self.stack.last().unwrap());
+        let degree = value::exact_int(self.stack.last().unwrap());
         if let Some(n) = degree {
             self.binop(move |base, _, mode| value::nth_root(base, &n, mode));
         } else {
@@ -376,11 +368,11 @@ impl Engine {
     }
 
     pub fn sqrt(&mut self) {
-        if self.inverse {
-            self.unary(value::square);
-        } else {
-            self.unary(value::sqrt);
-        }
+        self.unary(value::sqrt);
+    }
+
+    pub fn square(&mut self) {
+        self.unary(value::square);
     }
 
     pub fn negate(&mut self) {
@@ -399,50 +391,78 @@ impl Engine {
         self.unary(value::floor);
     }
 
-    pub fn sine(&mut self) {
-        self.unary(match (self.inverse, self.hyperbolic) {
-            (false, false) => value::sin,
-            (true, false) => value::asin,
-            (false, true) => value::sinh,
-            (true, true) => value::asinh,
-        });
+    pub fn sin(&mut self) {
+        self.unary(value::sin);
     }
 
-    pub fn cosine(&mut self) {
-        self.unary(match (self.inverse, self.hyperbolic) {
-            (false, false) => value::cos,
-            (true, false) => value::acos,
-            (false, true) => value::cosh,
-            (true, true) => value::acosh,
-        });
+    pub fn asin(&mut self) {
+        self.unary(value::asin);
     }
 
-    pub fn tangent(&mut self) {
-        self.unary(match (self.inverse, self.hyperbolic) {
-            (false, false) => value::tan,
-            (true, false) => value::atan,
-            (false, true) => value::tanh,
-            (true, true) => value::atanh,
-        });
+    pub fn sinh(&mut self) {
+        self.unary(value::sinh);
     }
 
-    /// Dispatches on the flags already set. `L` flips inverse before this.
-    pub fn exp_family(&mut self) {
-        self.unary(match (self.inverse, self.hyperbolic) {
-            (false, false) => value::exp_value,
-            (true, false) => value::ln,
-            (false, true) => value::exp10,
-            (true, true) => value::log10,
-        });
+    pub fn asinh(&mut self) {
+        self.unary(value::asinh);
     }
 
-    /// `B` is log with the base on top. Inverse is base^exponent, also base on top.
-    pub fn logarithm(&mut self) {
-        if self.inverse {
-            self.binop(|exponent, base, mode| value::pow(base, exponent, mode));
-        } else {
-            self.binop(value::log);
-        }
+    pub fn cos(&mut self) {
+        self.unary(value::cos);
+    }
+
+    pub fn acos(&mut self) {
+        self.unary(value::acos);
+    }
+
+    pub fn cosh(&mut self) {
+        self.unary(value::cosh);
+    }
+
+    pub fn acosh(&mut self) {
+        self.unary(value::acosh);
+    }
+
+    pub fn tan(&mut self) {
+        self.unary(value::tan);
+    }
+
+    pub fn atan(&mut self) {
+        self.unary(value::atan);
+    }
+
+    pub fn tanh(&mut self) {
+        self.unary(value::tanh);
+    }
+
+    pub fn atanh(&mut self) {
+        self.unary(value::atanh);
+    }
+
+    pub fn exp(&mut self) {
+        self.unary(value::exp_value);
+    }
+
+    pub fn ln(&mut self) {
+        self.unary(value::ln);
+    }
+
+    pub fn exp10(&mut self) {
+        self.unary(value::exp10);
+    }
+
+    pub fn log10(&mut self) {
+        self.unary(value::log10);
+    }
+
+    /// Base on top.
+    pub fn log(&mut self) {
+        self.binop(value::log);
+    }
+
+    /// Base on top, raised to the buried power.
+    pub fn antilog(&mut self) {
+        self.binop(|exponent, base, mode| value::pow(base, exponent, mode));
     }
 
     pub fn atan2(&mut self) {
@@ -485,14 +505,13 @@ impl Engine {
         self.unary(value::arg);
     }
 
-    pub fn push_pi_or_e(&mut self) {
-        let hyperbolic = self.hyperbolic;
-        self.clear_flags();
-        let value = if hyperbolic {
-            value::e_const(&self.mode)
-        } else {
-            value::pi(&self.mode)
-        };
+    pub fn push_pi(&mut self) {
+        let value = value::pi(&self.mode);
+        self.push(value);
+    }
+
+    pub fn push_e(&mut self) {
+        let value = value::e_const(&self.mode);
         self.push(value);
     }
 
@@ -512,7 +531,7 @@ impl Engine {
             self.fail(CalcError::StackUnderflow);
             return;
         };
-        let Some(n) = exact_int(top) else {
+        let Some(n) = value::exact_int(top) else {
             self.fail(CalcError::Domain("precision needs an integer"));
             return;
         };
@@ -535,34 +554,26 @@ impl Engine {
             return;
         }
         self.mode.prec = prec;
-        self.message = format!("precision {prec}");
-        self.error = false;
-        self.clear_flags();
+        self.note(format!("precision {prec}"));
     }
 
     pub fn set_degrees(&mut self) {
         self.mode.angle = AngleMode::Degrees;
-        self.message = "degrees".to_string();
-        self.error = false;
-        self.clear_flags();
+        self.note("degrees");
     }
 
     pub fn set_radians(&mut self) {
         self.mode.angle = AngleMode::Radians;
-        self.message = "radians".to_string();
-        self.error = false;
-        self.clear_flags();
+        self.note("radians");
     }
 
     pub fn toggle_fraction(&mut self) {
         self.mode.fraction = !self.mode.fraction;
-        self.message = if self.mode.fraction {
-            "fraction mode".to_string()
+        self.note(if self.mode.fraction {
+            "fraction mode"
         } else {
-            "float mode".to_string()
-        };
-        self.error = false;
-        self.clear_flags();
+            "float mode"
+        });
     }
 
     /// `twos` is Calc's `O` prefix: two's complement for the radix being set.
@@ -588,25 +599,21 @@ impl Engine {
 
     pub fn toggle_leading_zeros(&mut self) {
         self.mode.leading_zeros = !self.mode.leading_zeros;
-        self.message = if self.mode.leading_zeros {
-            "leading zeros".to_string()
+        self.note(if self.mode.leading_zeros {
+            "leading zeros"
         } else {
-            "no leading zeros".to_string()
-        };
-        self.error = false;
-        self.clear_flags();
+            "no leading zeros"
+        });
     }
 
     /// `d g`. Integer digits are clumped; the fractional part stays plain.
     pub fn toggle_group_digits(&mut self) {
         self.mode.group_digits = !self.mode.group_digits;
-        self.message = if self.mode.group_digits {
-            "grouping".to_string()
+        self.note(if self.mode.group_digits {
+            "grouping"
         } else {
-            "no grouping".to_string()
-        };
-        self.error = false;
-        self.clear_flags();
+            "no grouping"
+        });
     }
 
     pub fn set_word_size(&mut self, size: i64) {
@@ -615,24 +622,19 @@ impl Engine {
             return;
         }
         self.mode.word_size = size;
-        self.message = format!("word size {size}");
-        self.error = false;
-        self.clear_flags();
+        self.note(format!("word size {size}"));
     }
 
     fn note_mode(&mut self, name: String, twos: bool) {
-        self.message = if twos {
+        self.note(if twos {
             format!("{name}, two's complement")
         } else {
             name
-        };
-        self.error = false;
-        self.clear_flags();
+        });
     }
 
     fn succeed(&mut self) {
         self.clear_message();
-        self.clear_flags();
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -710,13 +712,4 @@ pub(crate) fn extends_var(name: &str, c: char) -> bool {
     next.push_str(name);
     next.push(c);
     valid_var(&next)
-}
-
-fn exact_int(value: &Value) -> Option<BigInt> {
-    match value {
-        Value::Real(Real::Int(n)) => Some(n.clone()),
-        Value::Real(Real::Rat(q)) if q.denom().is_one() => Some(q.numer().clone()),
-        Value::Real(Real::Float(f)) => f.to_integer_exact(),
-        _ => None,
-    }
 }

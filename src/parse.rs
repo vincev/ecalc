@@ -1,5 +1,8 @@
 //! Numeric entry.
 //!
+//! [`Entry`] is the number being typed. It decides which keys stay in the
+//! buffer. [`parse_value`] reads a finished string. The two share one grammar.
+//!
 //! Integers stay exact. `a:b` is a rational when neither side has a decimal
 //! point or an exponent. A dot or an exponent makes a decimal float.
 //! `_` is a minus sign, including in an exponent. `(re, im)` is rectangular.
@@ -436,6 +439,256 @@ fn bad(s: &str) -> CalcError {
     CalcError::InvalidEntry(s.to_string())
 }
 
+/// The number being typed.
+///
+/// `push` keeps a key when it belongs to this number. `n` toggles a leading
+/// `_`. Space stays only inside an unparsed `(…)`. An unclosed parenthesis
+/// is incomplete, so a script word leaves it open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    text: String,
+}
+
+impl Entry {
+    pub fn new() -> Self {
+        Self {
+            text: String::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    pub fn clear(&mut self) {
+        self.text.clear();
+    }
+
+    pub fn pop(&mut self) {
+        self.text.pop();
+    }
+
+    /// `q` is a digit of a radix literal above 20, so it must not quit.
+    pub fn accepts(&self, c: char, radix: u32) -> bool {
+        if self.text.is_empty() {
+            is_entry_start(c)
+        } else {
+            is_entry_continuation(c, &self.text, radix)
+        }
+    }
+
+    /// Keep `c` when [`Self::accepts`] says it belongs to the number.
+    pub fn push(&mut self, c: char, radix: u32) -> bool {
+        if self.accepts(c, radix) {
+            self.text.push(c);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Space inside an unparsed `(…` stays in the entry.
+    /// A finished number, and an empty entry, leave the space for the caller.
+    pub fn push_space(&mut self, mode: &Mode) -> bool {
+        if self.text.is_empty() {
+            return false;
+        }
+        let open = self.text.contains('(');
+        let parsed = parse_value(&self.text, mode).is_ok();
+        if open && !parsed {
+            self.text.push(' ');
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn parse(&self, mode: &Mode) -> Result<Value, CalcError> {
+        parse_value(&self.text, mode)
+    }
+
+    /// More `(` than `)`. The next script word can finish the value.
+    pub fn is_incomplete(&self) -> bool {
+        unclosed_paren(&self.text)
+    }
+
+    /// `n` while typing toggles a leading `_` and does not commit.
+    pub fn toggle_sign(&mut self) {
+        if let Some(rest) = self
+            .text
+            .strip_prefix('_')
+            .or_else(|| self.text.strip_prefix('-'))
+        {
+            self.text = rest.to_string();
+        } else if let Some(rest) = self.text.strip_prefix('+') {
+            self.text = format!("_{rest}");
+        } else {
+            self.text.insert(0, '_');
+        }
+    }
+}
+
+impl Default for Entry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn is_entry_start(c: char) -> bool {
+    c.is_ascii_digit() || matches!(c, '.' | '_' | '(' | '#')
+}
+
+/// `+` and `-` stay in the entry only as an exponent sign, or inside `(…)`.
+/// After `#`, letters that are digits of that radix stay in the entry too.
+fn is_entry_continuation(c: char, entry: &str, current_radix: u32) -> bool {
+    if matches!(c, ')' | ',') && unclosed_paren(entry) {
+        return true;
+    }
+    let token = current_token(entry);
+    if radix_char_continues(token, c, current_radix) {
+        return true;
+    }
+    if matches!(c, '+' | '-') && (ends_exponent(token) || unclosed_paren(entry)) {
+        return true;
+    }
+    if token.contains('#') || c == '#' {
+        return false;
+    }
+    c.is_ascii_digit() || matches!(c, '.' | '_' | '(' | ')' | ',' | ':' | 'e' | 'E')
+}
+
+fn ends_exponent(token: &str) -> bool {
+    token.ends_with('e') || token.ends_with('E') || token.ends_with('^')
+}
+
+/// The number currently being typed, after the last `(`, or `,` of a complex.
+fn current_token(entry: &str) -> &str {
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, c) in entry.char_indices() {
+        match c {
+            '(' => {
+                depth += 1;
+                start = i + c.len_utf8();
+            }
+            ')' => depth -= 1,
+            ',' if depth == 1 => start = i + c.len_utf8(),
+            _ => {}
+        }
+    }
+    entry[start..].trim()
+}
+
+fn radix_char_continues(token: &str, c: char, current_radix: u32) -> bool {
+    let body = match token.as_bytes().first() {
+        Some(b'_' | b'-' | b'+') => &token[1..],
+        _ => token,
+    };
+    if !body.contains('#') {
+        return c == '#' && body.bytes().all(|b| b.is_ascii_digit());
+    }
+    let Some((radix, after, twos)) = split_radix_prefix(body, current_radix) else {
+        // An out-of-range radix is still being typed. Keep the characters
+        // so RET can report the bad entry instead of running a command.
+        return c.is_ascii_alphanumeric();
+    };
+    radix_body_continues(after, twos, radix, c)
+}
+
+fn split_radix_prefix(body: &str, current: u32) -> Option<(u32, &str, bool)> {
+    let (radix_s, rest) = body.split_once('#')?;
+    let radix = if radix_s.is_empty() {
+        current
+    } else {
+        if !radix_s.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let radix = radix_s.parse::<u32>().ok()?;
+        if !(2..=36).contains(&radix) {
+            return None;
+        }
+        radix
+    };
+    match rest.strip_prefix('#') {
+        Some(after) => Some((radix, after, true)),
+        None => Some((radix, rest, false)),
+    }
+}
+
+fn radix_body_continues(after: &str, twos: bool, radix: u32, c: char) -> bool {
+    if twos {
+        return radix::is_digit(c, radix);
+    }
+    if let Some(at) = exponent_at(after, radix) {
+        return exponent_continues(&after[at..], c, radix);
+    }
+    let has_dot = after.contains('.');
+    let has_colon = after.contains(':');
+    if c == '#' {
+        return after.is_empty();
+    }
+    if radix::is_digit(c, radix) {
+        return true;
+    }
+    if (c == '_' || c == '+' || c == '-') && after.ends_with(':') {
+        return true;
+    }
+    if c == '.' && !has_dot && !has_colon {
+        return true;
+    }
+    if c == ':' && !has_dot && !has_colon && after.chars().any(|ch| radix::is_digit(ch, radix)) {
+        return true;
+    }
+    let started = after.chars().any(|ch| radix::is_digit(ch, radix));
+    if (c == 'e' || c == 'E') && radix <= 14 && !has_colon && started {
+        return true;
+    }
+    c == '*' && radix >= 15 && !has_colon && started
+}
+
+fn exponent_at(after: &str, radix: u32) -> Option<usize> {
+    if radix <= 14 {
+        after.find(['e', 'E'])
+    } else {
+        after.find('*')
+    }
+}
+
+fn exponent_continues(exp: &str, c: char, radix: u32) -> bool {
+    let rest = &exp[1..];
+    if radix <= 14 {
+        if rest.is_empty() || (rest.len() == 1 && is_exp_sign(rest.as_bytes()[0])) {
+            return c.is_ascii_digit() || (rest.is_empty() && is_exp_sign(c as u8));
+        }
+        return c.is_ascii_digit();
+    }
+    if let Some(hat) = rest.find('^') {
+        let after_hat = &rest[hat + 1..];
+        if after_hat.is_empty() || (after_hat.len() == 1 && is_exp_sign(after_hat.as_bytes()[0])) {
+            return c.is_ascii_digit() || (after_hat.is_empty() && is_exp_sign(c as u8));
+        }
+        return c.is_ascii_digit();
+    }
+    if rest.is_empty() {
+        return c.is_ascii_digit();
+    }
+    rest.bytes().all(|b| b.is_ascii_digit()) && (c.is_ascii_digit() || c == '^')
+}
+
+fn is_exp_sign(c: u8) -> bool {
+    matches!(c, b'+' | b'-' | b'_')
+}
+
+fn unclosed_paren(entry: &str) -> bool {
+    let open = entry.bytes().filter(|b| *b == b'(').count();
+    let close = entry.bytes().filter(|b| *b == b')').count();
+    open > close
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,5 +812,172 @@ mod tests {
             parse_value("2##11110101", &word).unwrap().to_string(),
             "-11"
         );
+    }
+
+    /// `+8` and a leading `-` parse, but those keys are operators until an exponent.
+    fn type_entry(sample: &str, mode: &Mode) -> Entry {
+        let mut entry = Entry::new();
+        for c in sample.chars() {
+            let kept = if c == ' ' {
+                entry.push_space(mode)
+            } else {
+                entry.push(c, mode.radix)
+            };
+            assert!(kept, "{sample:?} rejected {c:?} after {:?}", entry.as_str());
+        }
+        assert_eq!(entry.as_str(), sample);
+        entry
+    }
+
+    #[test]
+    fn finished_literals_are_keystroke_sequences() {
+        let mode = Mode::default();
+        for sample in [
+            "42",
+            "_3",
+            "3:4",
+            "_4:3",
+            "4:_2",
+            "9.5",
+            ".5",
+            "5.",
+            "1.5e1",
+            "1.5e20",
+            "1e-6",
+            "1.2e_3",
+            "1.2E+3",
+            "1e1000000",
+            "(3, 4)",
+            "(3,4)",
+            "( 0 , 1 )",
+            "_(3, 4)",
+            "(1:2, 3:4)",
+            "(1.5, _2)",
+            "16#FF",
+            "16#ff",
+            "2#1010",
+            "8#17",
+            "36#Z",
+            "_16#A",
+            "16#F.8",
+            "8#10e1",
+            "8#10.",
+            "16#FF.",
+            "8#1e_2",
+            "16#F*16^2",
+            "16#1*16^-1",
+            "16#A:3",
+            "(16#3, 16#4)",
+            "16##FD",
+            "2##11110101",
+        ] {
+            let entry = type_entry(sample, &mode);
+            assert!(!entry.is_incomplete(), "{sample}");
+            assert_eq!(
+                entry.parse(&mode).unwrap().to_string(),
+                p(sample),
+                "{sample}"
+            );
+        }
+
+        let hex = Mode {
+            radix: 16,
+            ..Mode::default()
+        };
+        let entry = type_entry("#FF", &hex);
+        assert_eq!(entry.parse(&hex).unwrap().to_string(), "255");
+    }
+
+    #[test]
+    fn open_keystrokes_are_not_values() {
+        let mode = Mode::default();
+        for sample in [
+            "(3, 4", "1e", "1e+", "16#", "1:", "_", "1.2.3", "(1)", "1:0", "99#zz",
+        ] {
+            let entry = type_entry(sample, &mode);
+            assert!(entry.parse(&mode).is_err(), "{sample}");
+        }
+        assert!(type_entry("(3, 4", &mode).is_incomplete());
+        assert!(!type_entry("1e", &mode).is_incomplete());
+    }
+
+    /// Fixed seed. The same keystrokes and the same junk strings run every time.
+    #[test]
+    fn typed_entry_parses_or_stays_short_of_a_value() {
+        let mut rng = Rng(0xEC41_C0DE);
+        let strokes = [
+            '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'q',
+            'n', 'u', 'z', 'A', 'E', 'F', 'Z', '.', '_', '(', ')', ',', ':', '#', '+', '-', '*',
+            ' ',
+        ];
+        let radices = [2u32, 8, 10, 16, 36];
+        for _ in 0..300 {
+            let radix = radices[rng.index(radices.len())];
+            let mode = Mode {
+                radix,
+                ..Mode::default()
+            };
+            let mut entry = Entry::new();
+            for _ in 0..(1 + rng.index(28)) {
+                let c = strokes[rng.index(strokes.len())];
+                if c == ' ' {
+                    let _ = entry.push_space(&mode);
+                } else {
+                    let _ = entry.push(c, radix);
+                }
+            }
+            let text = entry.as_str().to_string();
+            let replay = type_entry(&text, &mode);
+            assert_eq!(replay.as_str(), text);
+            if let Ok(value) = entry.parse(&mode) {
+                assert!(!entry.is_incomplete(), "{text:?} at radix {radix}");
+                assert_eq!(replay.parse(&mode).unwrap().to_string(), value.to_string());
+            }
+        }
+    }
+
+    #[test]
+    fn parse_does_not_panic_on_random_text() {
+        let mut rng = Rng(0xA11C_5EED);
+        let mode = Mode::default();
+        let strokes = ['0', '9', '.', '_', '(', ')', ',', ':', 'e', '#', ' ', 'q'];
+        for _ in 0..250 {
+            let mut s = String::new();
+            for _ in 0..rng.index(36) {
+                let n = rng.next();
+                let c = match n % 5 {
+                    0 => char::from(b' ' + u8::try_from(n % 95).unwrap()),
+                    1 => char::from_u32(0xA0 + u32::try_from((n >> 8) % 400).unwrap()).unwrap(),
+                    _ => strokes[rng.index(strokes.len())],
+                };
+                s.push(c);
+            }
+            match parse_value(&s, &mode) {
+                Ok(value) => {
+                    let _shown = value.to_string();
+                }
+                Err(err) => {
+                    let _shown = err.to_string();
+                }
+            }
+        }
+    }
+
+    /// xorshift64. The seed is part of the test, so a failure names the same input.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn index(&mut self, n: usize) -> usize {
+            usize::try_from(self.next() % u64::try_from(n).unwrap()).unwrap()
+        }
     }
 }

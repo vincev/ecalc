@@ -9,7 +9,9 @@ use num_bigint::BigInt;
 use num_integer::Integer;
 use num_traits::{One, Signed, ToPrimitive, Zero};
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::fmt;
+use std::sync::{LazyLock, Mutex};
 
 pub const MIN_PRECISION: u32 = 3;
 pub const MAX_PRECISION: u32 = 1000;
@@ -337,6 +339,53 @@ impl DecFloat {
         Ok(snap_close_integer(guess, prec))
     }
 
+    /// Positive integer root. Degree 2 is [`Self::sqrt`].
+    pub fn nth_root(&self, n: u32, prec: u32) -> Result<Self, CalcError> {
+        if n == 0 {
+            return Err(CalcError::Domain("root degree must not be zero"));
+        }
+        if self.is_negative() {
+            return Err(CalcError::Domain("root of a negative number"));
+        }
+        if n == 1 || self.is_zero() {
+            return Ok(self.round_to(prec));
+        }
+        if n == 2 {
+            return self.sqrt(prec);
+        }
+        let work = work_prec(prec);
+        let x = self.round_to(work);
+        let mut guess = nth_root_guess(&x, n, work)?;
+        let degree = Self::from_i64(i64::from(n), work);
+        let degree_m1 = Self::from_i64(i64::from(n - 1), work);
+        let mut converged = false;
+        for _ in 0..80 {
+            let power = guess.powi(i64::from(n - 1), work)?;
+            if power.is_zero() {
+                break;
+            }
+            let next = degree_m1
+                .mul(&guess, work)
+                .add(&x.div(&power, work)?, work)
+                .div(&degree, work)?;
+            if next.nearly(&guess, work.saturating_sub(1)) {
+                guess = next;
+                converged = true;
+                break;
+            }
+            guess = next;
+        }
+        if !converged {
+            // Newton is sensitive when the degree is large. Fall back to the
+            // well-conditioned exp(ln(x) / n) form rather than return a guess
+            // that never settled.
+            let ln = self.ln(work)?;
+            let scaled = ln.div(&DecFloat::from_i64(i64::from(n), work), work)?;
+            return Ok(snap_close_integer(scaled.exp(work)?, prec));
+        }
+        Ok(snap_close_integer(guess, prec))
+    }
+
     pub fn exp(&self, prec: u32) -> Result<Self, CalcError> {
         if self.is_zero() {
             return Ok(Self::one(prec));
@@ -351,24 +400,18 @@ impl DecFloat {
             return Err(CalcError::Overflow);
         }
         let r = x.sub(&ln10.mul(&Self::from_bigint(&n, high), high), high);
-        let mut reduced = r.round_to(work);
-        let mut halves = 0u32;
-        let two = Self::from_i64(2, work);
-        let bound = Self::from_unnormalized(BigInt::one(), -1, work); // 0.1
-        while reduced.abs().cmp_val(&bound) == Ordering::Greater && halves < 64 {
-            reduced = reduced.div(&two, work)?;
-            halves += 1;
-        }
-        let mut y = exp_series(&reduced, work)?;
-        for _ in 0..halves {
-            y = y.mul(&y, work);
-        }
+        let y = exp_reduced(&r.round_to(work), work)?;
         let n_i = n.to_i64().ok_or(CalcError::Overflow)?;
         let exp = y.exponent.saturating_add(n_i);
         Ok(snap_close_integer(
             Self::from_unnormalized(y.mantissa, exp, work),
             prec,
         ))
+    }
+
+    /// `exp(x) - 1`, kept accurate when `x` is small.
+    pub fn exp_minus_one(&self, prec: u32) -> Result<Self, CalcError> {
+        exp_minus_one_series(self, prec)
     }
 
     /// `ln(1 + x)`, kept accurate for a small `x` where `1 + x` would round
@@ -394,24 +437,31 @@ impl DecFloat {
             return Err(CalcError::Domain("logarithm of a non-positive number"));
         }
         let work = work_prec(prec);
-        let mut powered = self.order();
+        let powered = self.order();
         let mut m = self.round_to(work + 4);
         m.exponent -= powered;
         m.prec = work + 4;
-        // Keep the argument of the series inside [1/sqrt(10), sqrt(10)).
-        let sqrt10 =
-            Self::from_unnormalized(BigInt::from(3_162_277_660_168_379_i64), -15, work + 4);
-        if m.cmp_val(&sqrt10) != Ordering::Less {
-            m.exponent -= 1;
-            powered += 1;
+        // Halve into [1/sqrt(2), sqrt(2)), so the artanh argument stays near 0.17.
+        let sqrt2 = Self::sqrt2(work + 4);
+        let mut halves = 0i64;
+        while m.cmp_val(&sqrt2) != Ordering::Less && halves < 8 {
+            m = m.div(&Self::from_i64(2, work + 4), work + 4)?;
+            halves += 1;
         }
         let one = Self::one(work + 4);
         let y = m
             .sub(&one, work + 4)
             .div(&m.add(&one, work + 4), work + 4)?;
-        let ln_m = ln_from_artanh(&y, work + 4)?;
-        let scaled = Self::ln10(work + 6).mul(&Self::from_i64(powered, work + 6), work + 6);
-        Ok(snap_close_integer(ln_m.add(&scaled, work + 4), prec))
+        let mut sum = ln_from_artanh(&y, work + 4)?;
+        if halves != 0 {
+            let scaled = Self::ln2(work + 6).mul(&Self::from_i64(halves, work + 6), work + 6);
+            sum = sum.add(&scaled, work + 4);
+        }
+        if powered != 0 {
+            let scaled = Self::ln10(work + 6).mul(&Self::from_i64(powered, work + 6), work + 6);
+            sum = sum.add(&scaled, work + 4);
+        }
+        Ok(snap_close_integer(sum, prec))
     }
 
     pub fn sin_cos(&self, prec: u32) -> Result<(Self, Self), CalcError> {
@@ -577,22 +627,28 @@ impl DecFloat {
     }
 
     pub fn pi(prec: u32) -> Self {
-        let work = prec.saturating_add(8).max(16);
-        let a = atan_series(&recip_int(5, work), work);
-        let b = atan_series(&recip_int(239, work), work);
-        a.mul(&Self::from_i64(16, work), work)
-            .sub(&b.mul(&Self::from_i64(4, work), work), work)
-            .round_to(prec)
+        with_const(ConstId::Pi, prec, |prec| {
+            pi_unrounded(const_work(prec)).round_to(prec)
+        })
+    }
+
+    pub fn ln2(prec: u32) -> Self {
+        with_const(ConstId::Ln2, prec, |prec| {
+            ln2_unrounded(const_work(prec)).round_to(prec)
+        })
     }
 
     pub fn ln10(prec: u32) -> Self {
-        // ln(10) = 3 ln(2) + ln(5/4), and ln((1+y)/(1-y)) = 2 artanh(y).
-        let work = prec.saturating_add(8).max(16);
-        let ln2 = ln_from_artanh(&recip_int(3, work), work).expect("ln2");
-        let ln_5_4 = ln_from_artanh(&recip_int(9, work), work).expect("ln(5/4)");
-        ln2.mul(&Self::from_i64(3, work), work)
-            .add(&ln_5_4, work)
-            .round_to(prec)
+        with_const(ConstId::Ln10, prec, |prec| {
+            let work = const_work(prec);
+            // ln(10) = 3 ln(2) + ln(5/4). The series for ln(2) runs at `work`,
+            // matching the digits from before the cache.
+            let ln2 = ln2_unrounded(work);
+            let ln_5_4 = ln_from_artanh(&recip_int(9, work), work).expect("ln(5/4)");
+            ln2.mul(&Self::from_i64(3, work), work)
+                .add(&ln_5_4, work)
+                .round_to(prec)
+        })
     }
 
     /// Round to `prec` and collapse values that sit a hair below an integer.
@@ -601,7 +657,27 @@ impl DecFloat {
     }
 
     pub fn e(prec: u32) -> Self {
-        Self::one(prec.saturating_add(4)).exp(prec).expect("exp(1)")
+        with_const(ConstId::E, prec, |prec| {
+            let root = Self::sqrt_e(prec.saturating_add(4));
+            root.mul(&root, prec.saturating_add(4)).round_to(prec)
+        })
+    }
+
+    pub(crate) fn sqrt_e(prec: u32) -> Self {
+        with_const(ConstId::SqrtE, prec, |prec| {
+            let half = Self::from_decimal(BigInt::from(5), -1, prec.saturating_add(4));
+            half.exp(prec).expect("sqrt e")
+        })
+    }
+
+    pub(crate) fn sqrt2(prec: u32) -> Self {
+        with_const(ConstId::Sqrt2, prec, |prec| {
+            let work = const_work(prec);
+            Self::from_i64(2, work)
+                .sqrt(work)
+                .expect("sqrt 2")
+                .round_to(prec)
+        })
     }
 
     fn from_unnormalized(mantissa: BigInt, exponent: i64, prec: u32) -> Self {
@@ -808,6 +884,120 @@ fn strip_trailing_zeros(mantissa: &mut BigInt, exponent: &mut i64) {
     }
 }
 
+/// Extra digits the constant series keep before the final rounding.
+fn const_work(prec: u32) -> u32 {
+    prec.saturating_add(8).max(16)
+}
+
+/// A low-precision initial guess for Newton's nth root.
+///
+/// An integer root of the scaled mantissa is not good enough: for large
+/// degrees it can be off by a factor of two, and the Newton iteration has a
+/// narrow convergence basin. The exp/ln form is accurate enough at 16–24
+/// digits, and those constants are cached.
+fn nth_root_guess(x: &DecFloat, n: u32, work: u32) -> Result<DecFloat, CalcError> {
+    let guess_prec = work.clamp(16, 24);
+    let x = x.round_to(guess_prec);
+    let ln = x.ln(guess_prec)?;
+    let scaled = ln.div(&DecFloat::from_i64(i64::from(n), guess_prec), guess_prec)?;
+    Ok(scaled.exp(guess_prec)?.round_to(work))
+}
+
+fn pi_unrounded(prec: u32) -> DecFloat {
+    let a = atan_series(&recip_int(5, prec), prec);
+    let b = atan_series(&recip_int(239, prec), prec);
+    a.mul(&DecFloat::from_i64(16, prec), prec)
+        .sub(&b.mul(&DecFloat::from_i64(4, prec), prec), prec)
+}
+
+fn ln2_unrounded(prec: u32) -> DecFloat {
+    // ln(2) = 2 artanh(1/3).
+    ln_from_artanh(&recip_int(3, prec), prec).expect("ln2")
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+enum ConstId {
+    Pi,
+    Ln2,
+    Ln10,
+    E,
+    SqrtE,
+    Sqrt2,
+}
+
+struct ConstSlot {
+    prec: u32,
+    value: DecFloat,
+}
+
+fn const_cache() -> &'static Mutex<HashMap<ConstId, ConstSlot>> {
+    static CACHE: LazyLock<Mutex<HashMap<ConstId, ConstSlot>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    &CACHE
+}
+
+/// 110 significant digits from the series above. A request that fits in the
+/// table is a rounding, and a wider request replaces the slot. `e` is
+/// `sqrt(e)^2` and is computed, because that formula is not this table.
+fn seed_text(id: ConstId) -> Option<&'static str> {
+    match id {
+        ConstId::Pi => Some(
+            "3.1415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679821480865",
+        ),
+        ConstId::Ln2 => Some(
+            "0.69314718055994530941723212145817656807550013436025525412068000949339362196969471560586332699641868754200148102",
+        ),
+        ConstId::Ln10 => Some(
+            "2.302585092994045684017991454684364207601101488628772976033327900967572609677352480235997205089598298341967784",
+        ),
+        ConstId::Sqrt2 => Some(
+            "1.4142135623730950488016887242096980785696718753769480731766797379907324784621070388503875343276415727350138462",
+        ),
+        ConstId::E | ConstId::SqrtE => None,
+    }
+}
+
+fn parse_seed(text: &str) -> DecFloat {
+    let (head, frac) = text.split_once('.').expect("constant seed");
+    let mut digits = String::with_capacity(head.len() + frac.len());
+    digits.push_str(head);
+    digits.push_str(frac);
+    let mantissa = BigInt::parse_bytes(digits.as_bytes(), 10).expect("constant seed");
+    let prec = digit_count(&mantissa);
+    DecFloat::from_unnormalized(mantissa, -(frac.len() as i64), prec)
+}
+
+fn load_const(id: ConstId, prec: u32) -> Option<DecFloat> {
+    let guard = const_cache().lock().unwrap_or_else(|err| err.into_inner());
+    let slot = guard.get(&id)?;
+    (slot.prec >= prec).then(|| slot.value.round_to(prec))
+}
+
+fn store_const(id: ConstId, prec: u32, value: DecFloat) {
+    let mut guard = const_cache().lock().unwrap_or_else(|err| err.into_inner());
+    let replace = guard.get(&id).is_none_or(|slot| slot.prec < prec);
+    if replace {
+        guard.insert(id, ConstSlot { prec, value });
+    }
+}
+
+fn with_const(id: ConstId, prec: u32, compute: impl FnOnce(u32) -> DecFloat) -> DecFloat {
+    if let Some(hit) = load_const(id, prec) {
+        return hit;
+    }
+    if let Some(text) = seed_text(id) {
+        let seed = parse_seed(text);
+        if seed.prec() >= prec {
+            let rounded = seed.round_to(prec);
+            store_const(id, seed.prec(), seed);
+            return rounded;
+        }
+    }
+    let value = compute(prec);
+    store_const(id, prec, value.clone());
+    value
+}
+
 fn recip_int(n: i64, prec: u32) -> DecFloat {
     DecFloat::one(prec)
         .div(&DecFloat::from_i64(n, prec), prec)
@@ -865,21 +1055,47 @@ fn snap_close_integer(value: DecFloat, prec: u32) -> DecFloat {
     }
 }
 
-fn exp_series(x: &DecFloat, prec: u32) -> Result<DecFloat, CalcError> {
-    let mut sum = DecFloat::one(prec);
-    let mut term = DecFloat::one(prec);
-    let limit = prec as usize * 3 + 40;
-    for k in 1..=limit {
+/// `exp(x) - 1`, accurate when `x` is small.
+fn exp_minus_one_series(x: &DecFloat, prec: u32) -> Result<DecFloat, CalcError> {
+    let mut term = x.round_to(prec + 4);
+    let mut sum = term.clone();
+    for k in 2..(prec as i64 + 30) {
         term = term
-            .mul(x, prec)
-            .div(&DecFloat::from_i64(k as i64, prec), prec)?;
-        let done = negligible(&term, &sum, prec);
-        sum = sum.add(&term, prec);
-        if done {
+            .mul(x, prec + 4)
+            .div(&DecFloat::from_i64(k, prec + 4), prec + 4)?;
+        sum = sum.add(&term, prec + 4);
+        if term.order() < sum.order() - prec as i64 - 2 {
             break;
         }
     }
     Ok(sum)
+}
+
+/// `exp` of a remainder already reduced by a multiple of `ln(10)`.
+fn exp_reduced(r: &DecFloat, work: u32) -> Result<DecFloat, CalcError> {
+    let half = DecFloat::from_decimal(BigInt::from(5), -1, work);
+    if r.abs().cmp_val(&half) != Ordering::Greater {
+        return Ok(DecFloat::one(work).add(&exp_minus_one_series(r, work)?, work));
+    }
+    let twice = r.mul(&DecFloat::from_i64(2, work), work);
+    let hint = trunc_toward_zero(&twice)?;
+    let hint_i = hint.to_i64().ok_or(CalcError::Overflow)?;
+    let shift = DecFloat::from_i64(hint_i, work).div(&DecFloat::from_i64(2, work), work)?;
+    let hfrac = r.sub(&shift, work);
+    let mut y = DecFloat::one(work).add(&exp_minus_one_series(&hfrac, work)?, work);
+    if hint_i != 0 {
+        y = y.mul(&DecFloat::sqrt_e(work).powi(hint_i, work)?, work);
+    }
+    Ok(y)
+}
+
+/// Integer toward zero. `floor` of a negative value goes the other way.
+fn trunc_toward_zero(x: &DecFloat) -> Result<BigInt, CalcError> {
+    if x.is_negative() {
+        x.abs().floor_to_bigint().map(|n| -n)
+    } else {
+        x.floor_to_bigint()
+    }
 }
 
 /// `ln((1+y)/(1-y))` = 2 (y + y^3/3 + y^5/5 + ...).
@@ -1081,6 +1297,84 @@ mod tests {
     }
 
     #[test]
+    fn cached_constants_match_the_series() {
+        for prec in 12..=40 {
+            let pi = pi_unrounded(const_work(prec)).round_to(prec);
+            assert_eq!(
+                DecFloat::pi(prec).format_decimal(prec),
+                pi.format_decimal(prec),
+                "pi {prec}"
+            );
+            let ln2 = ln2_unrounded(const_work(prec)).round_to(prec);
+            assert_eq!(
+                DecFloat::ln2(prec).format_decimal(prec),
+                ln2.format_decimal(prec),
+                "ln2 {prec}"
+            );
+            let work = const_work(prec);
+            let ln10 = ln2_unrounded(work)
+                .mul(&DecFloat::from_i64(3, work), work)
+                .add(
+                    &ln_from_artanh(&recip_int(9, work), work).expect("ln(5/4)"),
+                    work,
+                )
+                .round_to(prec);
+            assert_eq!(
+                DecFloat::ln10(prec).format_decimal(prec),
+                ln10.format_decimal(prec),
+                "ln10 {prec}"
+            );
+            let e = DecFloat::one(prec.saturating_add(4))
+                .exp(prec)
+                .expect("exp(1)");
+            assert_eq!(
+                DecFloat::e(prec).format_decimal(prec),
+                e.format_decimal(prec),
+                "e {prec}"
+            );
+        }
+
+        assert_eq!(DecFloat::pi(12).format_decimal(12), "3.14159265359");
+        assert_eq!(DecFloat::pi(20).format_decimal(20), "3.1415926535897932385");
+        assert_eq!(DecFloat::e(12).format_decimal(12), "2.71828182846");
+        assert_eq!(DecFloat::e(20).format_decimal(20), "2.7182818284590452354");
+        assert_eq!(
+            DecFloat::from_i64(2, 12).ln(12).unwrap().format_decimal(12),
+            "0.69314718056"
+        );
+        assert_eq!(
+            DecFloat::from_i64(2, 20).ln(20).unwrap().format_decimal(20),
+            "0.69314718055994530942"
+        );
+        assert_eq!(
+            DecFloat::from_i64(3, 12).ln(12).unwrap().format_decimal(12),
+            "1.09861228867"
+        );
+        assert_eq!(
+            DecFloat::from_i64(3, 20).ln(20).unwrap().format_decimal(20),
+            "1.0986122886681096914"
+        );
+        assert_eq!(DecFloat::ln10(12).format_decimal(12), "2.30258509299");
+        assert_eq!(
+            DecFloat::ln10(20).format_decimal(20),
+            "2.302585092994045684"
+        );
+
+        let wide = DecFloat::pi(50);
+        assert_eq!(DecFloat::pi(50).format_decimal(50), wide.format_decimal(50));
+        assert_eq!(
+            DecFloat::pi(20).format_decimal(20),
+            wide.round_to(20).format_decimal(20)
+        );
+        let again = DecFloat::e(50);
+        assert_eq!(DecFloat::e(50).format_decimal(50), again.format_decimal(50));
+        assert_eq!(
+            DecFloat::e(20).format_decimal(20),
+            again.round_to(20).format_decimal(20)
+        );
+    }
+
+    #[test]
     fn exp_ln_roundtrip_and_trig() {
         let one = DecFloat::one(16);
         assert_eq!(one.exp(16).unwrap().ln(16).unwrap().to_string(), "1.");
@@ -1117,6 +1411,27 @@ mod tests {
             &DecFloat::from_i64(2, 16).sqrt(16).unwrap(),
             "1.41421356237309",
         );
+        assert_starts(
+            &DecFloat::from_i64(2, 20).nth_root(3, 20).unwrap(),
+            "1.25992104989487",
+        );
+        assert_eq!(
+            DecFloat::from_i64(2, 20)
+                .nth_root(2, 20)
+                .unwrap()
+                .format_decimal(20),
+            DecFloat::from_i64(2, 20)
+                .sqrt(20)
+                .unwrap()
+                .format_decimal(20)
+        );
+        assert_eq!(
+            DecFloat::from_i64(81, 12)
+                .nth_root(4, 12)
+                .unwrap()
+                .to_string(),
+            "3."
+        );
         assert_eq!(
             DecFloat::from_i64(2, 12).powi(10, 12).unwrap().to_string(),
             "1024."
@@ -1125,6 +1440,20 @@ mod tests {
             DecFloat::from_i64(2, 12).powi(-3, 12).unwrap().to_string(),
             "0.125"
         );
+    }
+
+    #[test]
+    fn nth_root_handles_high_degrees_and_small_inputs() {
+        // These used to leave Newton with a guess around 0.1 and return a
+        // wildly wrong value. Keep degrees above 6, both sides of 1, and
+        // values far from that guess.
+        assert_starts(&p("0.5", 12).nth_root(8, 12).unwrap(), "0.917004043205");
+        assert_starts(&p("0.5", 12).nth_root(10, 12).unwrap(), "0.933032991537");
+        assert_starts(&p("1.1", 12).nth_root(7, 12).unwrap(), "1.0137088563");
+        assert_starts(&p("1.5", 12).nth_root(10, 12).unwrap(), "1.04137974399");
+        assert_starts(&p("1e-9", 12).nth_root(100, 12).unwrap(), "0.812830516164");
+        assert_starts(&p("0.5", 12).nth_root(4096, 12).unwrap(), "0.999830788932");
+        assert_starts(&p("2", 12).nth_root(4096, 12).unwrap(), "1.0001692397");
     }
 
     #[test]

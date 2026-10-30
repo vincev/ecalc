@@ -29,3 +29,35 @@ impl fmt::Display for CalcError {
 }
 
 impl std::error::Error for CalcError {}
+
+/// Why `eval` rejected a script. The display text matches the on-screen message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvalError {
+    Calc(CalcError),
+    UnknownKey,
+    EmptyStack,
+    Quit,
+    Help,
+    /// An open list was left without a choice. The text is the message.
+    NeedChoice(&'static str),
+    /// A prompt such as radix or word size was left unfinished.
+    Prompt(&'static str),
+    /// A list note, or another message that is not a [`CalcError`].
+    Note(String),
+}
+
+impl fmt::Display for EvalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Calc(err) => write!(f, "{err}"),
+            Self::UnknownKey => write!(f, "unknown key"),
+            Self::EmptyStack => write!(f, "empty stack"),
+            Self::Quit => write!(f, "q quits the screen"),
+            Self::Help => write!(f, "help is for the screen"),
+            Self::NeedChoice(msg) | Self::Prompt(msg) => write!(f, "{msg}"),
+            Self::Note(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for EvalError {}

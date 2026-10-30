@@ -17,4 +17,4 @@ pub mod value;
 
 pub use app::{App, eval};
 pub use engine::Engine;
-pub use error::CalcError;
+pub use error::{CalcError, EvalError};

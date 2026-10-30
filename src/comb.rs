@@ -12,7 +12,8 @@ use num_integer::Integer;
 use num_rational::BigRational;
 use num_traits::{One, Signed, ToPrimitive, Zero};
 use std::cmp::Ordering;
-use std::sync::LazyLock;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
 const MAX_FACTORIAL: u32 = 100_000;
 /// Trial division proves the answer up through this bound, matching Calc.
@@ -62,6 +63,9 @@ pub fn mod_inverse(a: &Value, m: &Value, _mode: &Mode) -> Result<Value, CalcErro
 }
 
 pub fn factorial(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
+    if let Some(result) = half_factorial(v, mode.prec) {
+        return result.map(|f| Value::real(Real::Float(f)));
+    }
     match v {
         Value::Complex(_, _) => Err(CalcError::Domain("factorial needs a real number")),
         Value::Real(Real::Int(n)) => Ok(Value::from_int(factorial_int(n)?)),
@@ -334,6 +338,66 @@ fn factorial_int(n: &BigInt) -> Result<BigInt, CalcError> {
     Ok(acc)
 }
 
+/// `k + 1/2` when `v` is an exact half-integer. `None` for anything else,
+/// including a half-integer past the factorial limit, which stays on Spouge.
+fn half_index(v: &Value) -> Option<BigInt> {
+    let odd = match v {
+        Value::Real(Real::Rat(r)) if r.denom() == &BigInt::from(2) => r.numer().clone(),
+        Value::Real(Real::Float(f)) => {
+            let prec = f.prec().max(4);
+            let twice = f.mul(&DecFloat::from_i64(2, prec), prec);
+            let n = twice.to_integer_exact()?;
+            if !n.is_odd() {
+                return None;
+            }
+            n
+        }
+        _ => return None,
+    };
+    let k: BigInt = (odd - 1) / BigInt::from(2);
+    if k.abs() > BigInt::from(MAX_FACTORIAL) {
+        None
+    } else {
+        Some(k)
+    }
+}
+
+fn half_factorial(v: &Value, prec: u32) -> Option<Result<DecFloat, CalcError>> {
+    let k = half_index(v)?;
+    Some(half_factorial_k(&k, prec))
+}
+
+/// `(k + 1/2)! = (2k + 1)!! / 2^(k + 1) * sqrt(pi)` for `k >= 0`.
+/// A negative `k` steps down by `z! = (z + 1)! / (z + 1)`.
+fn half_factorial_k(k: &BigInt, prec: u32) -> Result<DecFloat, CalcError> {
+    let work = prec.saturating_add(8).max(16);
+    let sqrt_pi = DecFloat::pi(work).sqrt(work)?;
+    let mut acc = sqrt_pi.div(&DecFloat::from_i64(2, work), work)?;
+    if !k.is_negative() {
+        let steps = k.to_u32().ok_or(CalcError::Overflow)?;
+        for i in 1..=steps {
+            let odd = 2 * u64::from(i) + 1;
+            let factor =
+                DecFloat::from_i64(i64::try_from(odd).map_err(|_| CalcError::Overflow)?, work);
+            acc = acc
+                .mul(&factor, work)
+                .div(&DecFloat::from_i64(2, work), work)?;
+        }
+        return Ok(acc.polished(prec));
+    }
+    let steps = (-k).to_u32().ok_or(CalcError::Overflow)?;
+    for step in 0..steps {
+        let j = -i64::from(step);
+        let numer = DecFloat::from_i64(2 * j + 1, work);
+        let divisor = numer.div(&DecFloat::from_i64(2, work), work)?;
+        if divisor.is_zero() {
+            return Err(CalcError::Domain("factorial of a negative integer"));
+        }
+        acc = acc.div(&divisor, work)?;
+    }
+    Ok(acc.polished(prec))
+}
+
 /// Generalized factorial `gamma(x + 1)` for a non-integer.
 fn factorial_float(x: &DecFloat, prec: u32) -> Result<DecFloat, CalcError> {
     if x.order().abs() > 1_000_000 {
@@ -370,10 +434,22 @@ fn factorial_float(x: &DecFloat, prec: u32) -> Result<DecFloat, CalcError> {
     Ok(upper.polished(prec))
 }
 
-/// Spouge's approximation of `z!` for `z > 0`.
-fn spouge_factorial(z: &DecFloat, work: u32, a: u32) -> Result<DecFloat, CalcError> {
-    let two_pi = DecFloat::pi(work).mul(&DecFloat::from_i64(2, work), work);
-    let mut sum = two_pi.sqrt(work)?;
+/// Signed Spouge coefficients `c_k` for `k = 1..a`. They depend on `a` and
+/// the working precision, not on the argument.
+fn spouge_coefficients(work: u32, a: u32) -> Result<Arc<Vec<DecFloat>>, CalcError> {
+    type Coeffs = Arc<Vec<DecFloat>>;
+    type Cache = HashMap<(u32, u32), Coeffs>;
+    static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+    let key = (work, a);
+    if let Some(hit) = CACHE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .get(&key)
+        .cloned()
+    {
+        return Ok(hit);
+    }
+    let mut coeffs = Vec::with_capacity(a as usize);
     let mut fact = BigInt::one();
     for k in 1..a {
         if k > 1 {
@@ -383,16 +459,29 @@ fn spouge_factorial(z: &DecFloat, work: u32, a: u32) -> Result<DecFloat, CalcErr
         let power = int_pow(ak, k);
         let root = DecFloat::from_i64(ak as i64, work).sqrt(work)?;
         let scaled = DecFloat::from_i64(ak as i64, work).exp(work)?;
-        let magnitude = DecFloat::from_bigint(&power, work)
+        let mut magnitude = DecFloat::from_bigint(&power, work)
             .div(&root, work)?
             .div(&DecFloat::from_bigint(&fact, work), work)?
             .mul(&scaled, work);
-        let ck = if k % 2 == 1 {
-            magnitude
-        } else {
-            magnitude.neg()
-        };
-        let denom = z.add(&DecFloat::from_i64(k as i64, work), work);
+        if k % 2 == 0 {
+            magnitude = magnitude.neg();
+        }
+        coeffs.push(magnitude);
+    }
+    let coeffs = Arc::new(coeffs);
+    CACHE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(key, Arc::clone(&coeffs));
+    Ok(coeffs)
+}
+
+/// Spouge's approximation of `z!` for `z > 0`.
+fn spouge_factorial(z: &DecFloat, work: u32, a: u32) -> Result<DecFloat, CalcError> {
+    let two_pi = DecFloat::pi(work).mul(&DecFloat::from_i64(2, work), work);
+    let mut sum = two_pi.sqrt(work)?;
+    for (k, ck) in spouge_coefficients(work, a)?.iter().enumerate() {
+        let denom = z.add(&DecFloat::from_i64(k as i64 + 1, work), work);
         sum = sum.add(&ck.div(&denom, work)?, work);
     }
     let a_f = DecFloat::from_i64(a as i64, work);
@@ -446,12 +535,7 @@ fn as_rational(v: &Value, msg: &'static str) -> Result<BigRational, CalcError> {
 }
 
 fn as_integer(v: &Value, msg: &'static str) -> Result<BigInt, CalcError> {
-    match v {
-        Value::Real(Real::Int(n)) => Ok(n.clone()),
-        Value::Real(Real::Rat(r)) if r.denom().is_one() => Ok(r.numer().clone()),
-        Value::Real(Real::Float(f)) => f.to_integer_exact().ok_or(CalcError::Domain(msg)),
-        _ => Err(CalcError::Domain(msg)),
-    }
+    crate::value::exact_int(v).ok_or(CalcError::Domain(msg))
 }
 
 fn to_float(r: &Real, prec: u32) -> Result<DecFloat, CalcError> {
@@ -616,6 +700,32 @@ mod tests {
             factorial(&neg, &mode()).unwrap().to_string(),
             "1.77245385091"
         );
+    }
+
+    #[test]
+    fn half_integer_factorials_agree_with_spouge() {
+        let mut wide = mode();
+        wide.prec = 20;
+        let samples = [
+            BigRational::new(BigInt::from(3), BigInt::from(2)),
+            BigRational::new(BigInt::from(5), BigInt::from(2)),
+            BigRational::new(BigInt::from(-3), BigInt::from(2)),
+        ];
+        for ratio in samples {
+            let Value::Real(Real::Float(got)) =
+                factorial(&Value::from_rational(ratio.clone()), &wide).unwrap()
+            else {
+                panic!("half factorial");
+            };
+            let x = to_float(&Real::Rat(ratio), 40).unwrap();
+            let spouge = factorial_float(&x, 40).unwrap().round_to(20);
+            assert_eq!(got.format_decimal(16), spouge.format_decimal(16));
+        }
+
+        let third = DecFloat::from_decimal(BigInt::from(3), -1, 30);
+        let first = factorial_float(&third, 30).unwrap();
+        let second = factorial_float(&third, 30).unwrap();
+        assert_eq!(first.format_decimal(30), second.format_decimal(30));
     }
 
     #[test]

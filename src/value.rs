@@ -32,8 +32,8 @@ pub struct Mode {
     pub twos_complement: bool,
     /// Separate displayed integer digits with commas. The fractional part stays plain.
     pub group_digits: bool,
-    /// Binary word width. The sign selects the range for a later bitwise
-    /// operation; display uses the absolute value. `0` means no fixed width.
+    /// Binary word width. The sign is stored, and display uses the absolute
+    /// value. There are no bitwise operations yet. `0` means no fixed width.
     pub word_size: i64,
 }
 
@@ -205,12 +205,20 @@ fn real_from_rational(r: BigRational) -> Real {
     }
 }
 
-fn exact_int(r: &Real) -> Option<BigInt> {
-    match r {
+/// An integer, a fraction with denominator 1, or a float with no fractional digits.
+pub(crate) fn exact_int(value: &Value) -> Option<BigInt> {
+    match value {
+        Value::Real(real) => exact_real(real),
+        Value::Complex(_, _) => None,
+    }
+}
+
+fn exact_real(real: &Real) -> Option<BigInt> {
+    match real {
         Real::Int(n) => Some(n.clone()),
         Real::Rat(q) if q.denom().is_one() => Some(q.numer().clone()),
         Real::Float(f) => f.to_integer_exact(),
-        _ => None,
+        Real::Rat(_) => None,
     }
 }
 
@@ -291,14 +299,78 @@ pub fn div(a: &Value, b: &Value, mode: &Mode) -> Result<Value, CalcError> {
         let im = div_real(&ai, &br, mode)?;
         return Ok(finish_complex(re, im, mode.prec));
     }
-    // Multiply by the conjugate and divide by the norm.
-    let norm = add_real(&mul_real(&br, &br, mode)?, &mul_real(&bi, &bi, mode)?, mode)?;
-    let conj = Value::complex(br, bi.neg());
-    let num = mul(a, &conj, mode)?;
-    div(&num, &Value::Real(norm), mode)
+    // One division of each component. Building the conjugate and multiplying
+    // first would round those products, and could drop a tiny imaginary part,
+    // before the division.
+    let (ar, ai) = a.parts();
+    if let (Some(ar), Some(ai), Some(br), Some(bi)) = (
+        ar.to_rational(),
+        ai.to_rational(),
+        br.to_rational(),
+        bi.to_rational(),
+    ) {
+        let norm = (&br * &br) + (&bi * &bi);
+        let re_num = (&ar * &br) + (&ai * &bi);
+        let im_num = (&ai * &br) - (&ar * &bi);
+        let re = quotient_real(re_num, norm.clone(), mode)?;
+        let im = quotient_real(im_num, norm, mode)?;
+        return Ok(finish_complex(re, im, mode.prec));
+    }
+    div_complex_float(&ar, &ai, &br, &bi, mode)
 }
 
-pub fn fdiv(a: &Value, b: &Value, mode: &Mode) -> Result<Value, CalcError> {
+/// Divide an exact quotient once. An integer stays an integer. Fraction mode
+/// keeps a rational. Otherwise the numerator and denominator are divided at
+/// `prec + 4` and the quotient is rounded to the caller's precision.
+fn quotient_real(numer: BigRational, denom: BigRational, mode: &Mode) -> Result<Real, CalcError> {
+    if denom.is_zero() {
+        return Err(CalcError::DivideByZero);
+    }
+    let q = real_from_rational(numer / denom);
+    match q {
+        Real::Rat(r) if !mode.fraction => {
+            let work = mode.prec.saturating_add(4);
+            let n = DecFloat::from_bigint(r.numer(), work);
+            let d = DecFloat::from_bigint(r.denom(), work);
+            Ok(Real::Float(n.div(&d, mode.prec)?))
+        }
+        other => Ok(other),
+    }
+}
+
+fn div_complex_float(
+    ar: &Real,
+    ai: &Real,
+    br: &Real,
+    bi: &Real,
+    mode: &Mode,
+) -> Result<Value, CalcError> {
+    let work = mode.prec.saturating_add(4);
+    let ar = ar.to_float(work)?;
+    let ai = ai.to_float(work)?;
+    let br = br.to_float(work)?;
+    let bi = bi.to_float(work)?;
+    let norm = br.mul(&br, work).add(&bi.mul(&bi, work), work);
+    if norm.is_zero() {
+        return Err(CalcError::DivideByZero);
+    }
+    let re = ar
+        .mul(&br, work)
+        .add(&ai.mul(&bi, work), work)
+        .div(&norm, work)?;
+    let im = ai
+        .mul(&br, work)
+        .sub(&ar.mul(&bi, work), work)
+        .div(&norm, work)?;
+    Ok(finish_complex(
+        Real::Float(re.round_to(mode.prec)),
+        Real::Float(im.round_to(mode.prec)),
+        mode.prec,
+    ))
+}
+
+/// Fraction division (`:`). Exact reals stay rational.
+pub fn div_fraction(a: &Value, b: &Value, mode: &Mode) -> Result<Value, CalcError> {
     if b.is_zero() {
         return Err(CalcError::DivideByZero);
     }
@@ -501,10 +573,7 @@ pub fn pow(base: &Value, exp: &Value, mode: &Mode) -> Result<Value, CalcError> {
 }
 
 fn real_exponent_int(exp: &Value) -> Option<BigInt> {
-    match exp {
-        Value::Real(r) => exact_int(r),
-        Value::Complex(_, _) => None,
-    }
+    exact_int(exp)
 }
 
 fn pow_int(base: &Value, exp: &BigInt, mode: &Mode) -> Result<Value, CalcError> {
@@ -602,7 +671,7 @@ pub fn nth_root(base: &Value, n: &BigInt, mode: &Mode) -> Result<Value, CalcErro
             // A decimal that is an exact integer still gets an exact root:
             // `125.0 I^ 3` is `5`, not `4.99999999998`. A decimal with a
             // fraction stays a float so `0.25 Q` is `0.5`, not `1:2`.
-            if let Some(integer) = exact_int(r)
+            if let Some(integer) = exact_real(r)
                 && let Some(root) = rational_nth_root(&BigRational::from(integer), degree)
             {
                 return Ok(Value::from_rational(root));
@@ -613,6 +682,15 @@ pub fn nth_root(base: &Value, n: &BigInt, mode: &Mode) -> Result<Value, CalcErro
             return Ok(Value::from_rational(root));
         }
         let f = r.to_float(mode.prec)?;
+        // Newton for a modest degree. A huge degree stays on exp/ln: a
+        // billionth root is one of those, and `powi` of that degree is not
+        // worth it.
+        if (2..=4_096).contains(&degree) {
+            return Ok(polish(
+                Value::Real(Real::Float(f.nth_root(degree, mode.prec)?)),
+                mode.prec,
+            ));
+        }
         let ln = f.ln(mode.prec)?;
         let scaled = ln.div(&DecFloat::from_bigint(n, mode.prec), mode.prec)?;
         return Ok(polish(
@@ -655,26 +733,8 @@ fn int_nth_root(a: &BigInt, n: u32) -> Option<(bool, BigInt)> {
     if a.bits() <= u64::from(n) {
         return Some((false, BigInt::one()));
     }
-    let digs = float::digit_count(a);
-    let guess_digits = digs.div_ceil(n);
-    let mut guess = BigInt::from(10).pow(guess_digits.max(1));
-    for _ in 0..10_000 {
-        let p = if n == 1 {
-            BigInt::one()
-        } else {
-            guess.pow(n - 1)
-        };
-        if p.is_zero() {
-            break;
-        }
-        let next = (&guess * (n - 1) + (a / &p)) / BigInt::from(n);
-        if next >= guess {
-            let exact = guess.pow(n) == *a;
-            return Some((exact, guess));
-        }
-        guess = next;
-    }
-    None
+    let root = a.nth_root(n);
+    Some((root.pow(n) == *a, root))
 }
 
 fn pow_exp_ln(base: &Value, exp: &Value, mode: &Mode) -> Result<Value, CalcError> {
@@ -831,7 +891,7 @@ pub fn isqrt(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     if r.is_negative() {
         return Err(CalcError::Domain("isqrt of a negative number"));
     }
-    if let Some(n) = exact_int(r) {
+    if let Some(n) = exact_real(r) {
         let (_, root) = int_nth_root(&n, 2).ok_or(CalcError::Overflow)?;
         return Ok(Value::from_int(root));
     }
@@ -910,7 +970,7 @@ pub fn expm1(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         && f.order() < 0
     {
         return Ok(polish(
-            Value::Real(Real::Float(exp_minus_one_series(&f, mode.prec)?)),
+            Value::Real(Real::Float(f.exp_minus_one(mode.prec)?)),
             mode.prec,
         ));
     }
@@ -931,7 +991,7 @@ pub fn lnp1(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 }
 
 pub fn log10(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
-    if let Some(k) = power_of_ten(v) {
+    if let Some(k) = exact_integer_log(v, &BigInt::from(10)) {
         return Ok(Value::from_int(k));
     }
     let mut wide = mode.clone();
@@ -947,13 +1007,11 @@ pub fn exp10(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 }
 
 pub fn log(x: &Value, base: &Value, mode: &Mode) -> Result<Value, CalcError> {
-    if let (Some(xv), Some(bv)) = (positive_int(x), positive_int(base))
+    if let Some(bv) = positive_int(base)
         && bv > BigInt::one()
+        && let Some(k) = exact_integer_log(x, &bv)
     {
-        let k = ilog_int(&xv, &bv)?;
-        if bv.pow(u32::try_from(&k).unwrap_or(0)) == xv {
-            return Ok(Value::from_int(k));
-        }
+        return Ok(Value::from_int(k));
     }
     let mut wide = mode.clone();
     wide.prec = mode.prec.saturating_add(8);
@@ -975,20 +1033,43 @@ pub fn ilog(x: &Value, base: &Value, mode: &Mode) -> Result<Value, CalcError> {
 }
 
 fn positive_int(v: &Value) -> Option<BigInt> {
-    match v {
-        Value::Real(r) => exact_int(r).filter(|n| n.is_positive()),
-        Value::Complex(_, _) => None,
-    }
+    exact_int(v).filter(|n| n.is_positive())
 }
 
-fn power_of_ten(v: &Value) -> Option<BigInt> {
-    let n = positive_int(v)?;
-    let s = n.to_str_radix(10);
-    if s.starts_with('1') && s.chars().skip(1).all(|c| c == '0') {
-        Some(BigInt::from(s.len() as i64 - 1))
-    } else {
-        None
+/// Integer `p - q` when `x` is `base^p / base^q`.
+///
+/// Both the numerator and the denominator have to be integer powers. A
+/// fractional power such as `log4(8) = 3/2` is left to the float path.
+fn exact_integer_log(x: &Value, base: &BigInt) -> Option<BigInt> {
+    // A decimal power of ten can have an exponent past the point where
+    // `to_rational` will materialize the power. Read it from the normalized
+    // mantissa and exponent instead.
+    if base == &BigInt::from(10)
+        && let Value::Real(Real::Float(f)) = x
+        && f.is_positive()
+    {
+        let (mantissa, exponent) = f.signed_decimal();
+        if mantissa.abs() == BigInt::one() {
+            return Some(BigInt::from(exponent));
+        }
     }
+    let ratio = match x {
+        Value::Real(r) if r.is_positive() => r.to_rational()?,
+        _ => return None,
+    };
+    let p = integer_power(ratio.numer(), base)?;
+    let q = integer_power(ratio.denom(), base)?;
+    Some(p - q)
+}
+
+/// `k` such that `base^k == n`, when that `k` is an integer.
+fn integer_power(n: &BigInt, base: &BigInt) -> Option<BigInt> {
+    if n.is_one() {
+        return Some(BigInt::zero());
+    }
+    let k = ilog_int(n, base).ok()?;
+    let exp = u32::try_from(&k).ok()?;
+    if base.pow(exp) == *n { Some(k) } else { None }
 }
 
 /// Largest `k` with `base^k <= x`.
@@ -1030,7 +1111,7 @@ fn ilog_int(x: &BigInt, base: &BigInt) -> Result<BigInt, CalcError> {
 
 pub fn sin(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     if mode.angle == AngleMode::Degrees {
-        if let Some(n) = real_exact_int(v)
+        if let Some(n) = exact_int(v)
             && degree_mod(&n).is_multiple_of(&BigInt::from(90))
         {
             return Ok(quadrant_sin(&n));
@@ -1043,7 +1124,7 @@ pub fn sin(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 
 pub fn cos(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     if mode.angle == AngleMode::Degrees {
-        if let Some(n) = real_exact_int(v)
+        if let Some(n) = exact_int(v)
             && degree_mod(&n).is_multiple_of(&BigInt::from(90))
         {
             return Ok(quadrant_cos(&n));
@@ -1056,7 +1137,7 @@ pub fn cos(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 
 pub fn tan(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     if mode.angle == AngleMode::Degrees
-        && let Some(n) = real_exact_int(v)
+        && let Some(n) = exact_int(v)
         && degree_mod(&n).is_multiple_of(&BigInt::from(45))
     {
         return tan_exact_degrees(&n);
@@ -1124,13 +1205,6 @@ fn tan_exact_degrees(deg: &BigInt) -> Result<Value, CalcError> {
     }
 }
 
-fn real_exact_int(v: &Value) -> Option<BigInt> {
-    match v {
-        Value::Real(r) => exact_int(r),
-        Value::Complex(_, _) => None,
-    }
-}
-
 fn real_is_zero(v: &Value) -> bool {
     matches!(v, Value::Real(r) if r.is_zero())
 }
@@ -1185,7 +1259,7 @@ fn to_radians(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
             )),
         };
     }
-    if let Some(n) = real_exact_int(v) {
+    if let Some(n) = exact_int(v) {
         let mut m = n.mod_floor(&BigInt::from(360));
         if m > BigInt::from(180) {
             m -= 360;
@@ -1280,7 +1354,7 @@ fn high_float(r: &Real, mode: &Mode) -> Result<DecFloat, CalcError> {
 }
 
 pub fn asin(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
-    if let Some(n) = real_exact_int(v) {
+    if let Some(n) = exact_int(v) {
         if n.is_zero() {
             return Ok(Value::from_int(0));
         }
@@ -1313,7 +1387,7 @@ pub fn asin(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 }
 
 pub fn acos(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
-    if let Some(n) = real_exact_int(v) {
+    if let Some(n) = exact_int(v) {
         if n.is_one() {
             return Ok(Value::from_int(0));
         }
@@ -1332,7 +1406,7 @@ pub fn acos(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 }
 
 pub fn atan(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
-    if let Some(n) = real_exact_int(v) {
+    if let Some(n) = exact_int(v) {
         if n.is_zero() {
             return Ok(Value::from_int(0));
         }
@@ -1548,21 +1622,6 @@ fn cosh_float(y: &DecFloat, prec: u32) -> Result<DecFloat, CalcError> {
         }
     }
     Ok(sum.polished(prec))
-}
-
-fn exp_minus_one_series(x: &DecFloat, prec: u32) -> Result<DecFloat, CalcError> {
-    let mut term = x.round_to(prec + 4);
-    let mut sum = term.clone();
-    for k in 2..(prec as i64 + 30) {
-        term = term
-            .mul(x, prec + 4)
-            .div(&DecFloat::from_i64(k, prec + 4), prec + 4)?;
-        sum = sum.add(&term, prec + 4);
-        if term.order() < sum.order() - prec as i64 - 2 {
-            break;
-        }
-    }
-    Ok(sum)
 }
 
 pub fn pi(mode: &Mode) -> Value {
@@ -2006,5 +2065,81 @@ mod tests {
         );
         assert!(ilog(&Value::from_int(0), &Value::from_int(2), &mode()).is_err());
         assert!(ilog(&Value::from_int(8), &Value::from_int(1), &mode()).is_err());
+    }
+
+    #[test]
+    fn rational_logs_are_exact_integers() {
+        let eighth = Value::from_rational(BigRational::new(BigInt::one(), BigInt::from(8)));
+        let thousandth = Value::from_rational(BigRational::new(BigInt::one(), BigInt::from(1000)));
+        assert_eq!(
+            log(&eighth, &Value::from_int(2), &mode())
+                .unwrap()
+                .to_string(),
+            "-3"
+        );
+        assert_eq!(log10(&thousandth, &mode()).unwrap().to_string(), "-3");
+        assert_eq!(
+            log10(&Value::from_int(1000), &mode()).unwrap().to_string(),
+            "3"
+        );
+        // Decimal powers beyond the rational materialization limit still
+        // have an exact integer log.
+        let tiny = Value::real(Real::Float(DecFloat::from_decimal(
+            BigInt::one(),
+            -100_001,
+            12,
+        )));
+        let huge = Value::real(Real::Float(DecFloat::from_decimal(
+            BigInt::one(),
+            100_001,
+            12,
+        )));
+        assert_eq!(log10(&tiny, &mode()).unwrap().to_string(), "-100001");
+        assert_eq!(log10(&huge, &mode()).unwrap().to_string(), "100001");
+        assert_eq!(
+            log(&tiny, &Value::from_int(10), &mode())
+                .unwrap()
+                .to_string(),
+            "-100001"
+        );
+        // 4^(3/2) = 8, and that exponent is not an integer.
+        let log4_8 = log(&Value::from_int(8), &Value::from_int(4), &mode()).unwrap();
+        assert!(matches!(log4_8, Value::Real(Real::Float(_))), "{log4_8}");
+        // A decimal reciprocal is the same rational.
+        let eighth_f = Value::real(Real::Float(DecFloat::from_decimal(
+            BigInt::from(125),
+            -3,
+            12,
+        )));
+        assert_eq!(
+            log(&eighth_f, &Value::from_int(2), &mode())
+                .unwrap()
+                .to_string(),
+            "-3"
+        );
+    }
+
+    #[test]
+    fn complex_division_rounds_once() {
+        let i = Value::complex(Real::Int(BigInt::zero()), Real::Int(BigInt::one()));
+        assert_eq!(div(&i, &i, &mode()).unwrap().to_string(), "1");
+        let one = Value::from_int(1);
+        assert_eq!(div(&one, &i, &mode()).unwrap().to_string(), "(0, -1)");
+
+        let a = Value::complex(Real::Int(BigInt::one()), Real::Int(BigInt::from(2)));
+        let b = Value::complex(Real::Int(BigInt::from(3)), Real::Int(BigInt::from(4)));
+        assert_eq!(div(&a, &b, &mode()).unwrap().to_string(), "(0.44, 0.08)");
+
+        let mut frac = mode();
+        frac.fraction = true;
+        assert_eq!(div(&a, &b, &frac).unwrap().to_string(), "(11:25, 2:25)");
+
+        // 5/13 and -1/13. The last digit of 1/13 rounds up.
+        let c = Value::complex(Real::Int(BigInt::one()), Real::Int(BigInt::one()));
+        let d = Value::complex(Real::Int(BigInt::from(2)), Real::Int(BigInt::from(3)));
+        assert_eq!(
+            div(&c, &d, &mode()).unwrap().to_string(),
+            "(0.384615384615, -0.0769230769231)"
+        );
     }
 }
