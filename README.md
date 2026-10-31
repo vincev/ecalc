@@ -60,7 +60,8 @@ prints the message on stderr and exits 1.
 - Powers, roots, floor, integer division, and remainder. `12 \ 12:7` is `7`.
 - Sine, cosine, and tangent, with inverses and hyperbolic forms. Angles
   start in degrees.
-- Logarithms, exponentials, factorial, combinations, and permutations.
+- Logarithms, exponentials, factorial, combinations, permutations, and
+  Stirling numbers of the first and second kind.
 - Gcd, lcm, the extended gcd, a modular inverse, and a prime test.
 - Stored variables, and the HP 35s physics constants, plus Earth, the Moon,
   the Sun, and the astronomical unit.

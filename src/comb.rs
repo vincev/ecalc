@@ -16,6 +16,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
 
 const MAX_FACTORIAL: u32 = 100_000;
+/// Largest `n` in a Stirling number. The table grows with `n * m`.
+const MAX_STIRLING_N: u32 = 2_000;
 /// Trial division proves the answer up through this bound, matching Calc.
 const TRIAL_LIMIT: u64 = 8_000_000;
 /// Thirteen witnesses prove primality below this integer.
@@ -121,6 +123,82 @@ pub fn perm(n: &Value, k: &Value, mode: &Mode) -> Result<Value, CalcError> {
     Ok(Value::real(Real::Float(
         num.div(&den, mode.prec)?.polished(mode.prec),
     )))
+}
+
+/// Stirling number of the first kind, signed. `n` is second on the stack
+/// and `m` is on top. A negative or non-integer argument is an error.
+pub fn stirling_first(n: &Value, m: &Value, _mode: &Mode) -> Result<Value, CalcError> {
+    stirling(n, m, true)
+}
+
+/// Stirling number of the second kind. `n` is second on the stack and `m`
+/// is on top. A negative or non-integer argument is an error.
+pub fn stirling_second(n: &Value, m: &Value, _mode: &Mode) -> Result<Value, CalcError> {
+    stirling(n, m, false)
+}
+
+fn stirling(n: &Value, m: &Value, first: bool) -> Result<Value, CalcError> {
+    let n = stirling_index(n)?;
+    let m = stirling_index(m)?;
+    if m > n {
+        return Ok(Value::from_int(0));
+    }
+    if m == n {
+        return Ok(Value::from_int(1));
+    }
+    if m.is_zero() {
+        return Ok(Value::from_int(0));
+    }
+    if m.is_one() {
+        // s(n, 1) = (-1)^(n-1) (n-1)!, and S(n, 1) = 1.
+        if !first {
+            return Ok(Value::from_int(1));
+        }
+        let n = n.to_u32().ok_or(CalcError::Overflow)?;
+        let fact = factorial_int(&BigInt::from(n - 1))?;
+        let signed = if (n - 1) % 2 == 0 { fact } else { -fact };
+        return Ok(Value::from_int(signed));
+    }
+    Ok(Value::from_int(stirling_int(&n, &m, first)?))
+}
+
+fn stirling_index(v: &Value) -> Result<BigInt, CalcError> {
+    let n = as_integer(v, "stirling number needs nonnegative integers")?;
+    if n.is_negative() {
+        return Err(CalcError::Domain(
+            "stirling number needs nonnegative integers",
+        ));
+    }
+    Ok(n)
+}
+
+/// The recurrence `S(n, m) = S(n-1, m-1) + c * S(n-1, m)` with `c = 1-n`
+/// for the first kind and `c = m` for the second. Only the last row is
+/// kept, and columns past `m` are dropped.
+fn stirling_int(n: &BigInt, m: &BigInt, first: bool) -> Result<BigInt, CalcError> {
+    let n = n.to_u32().ok_or(CalcError::Overflow)?;
+    let m = m.to_u32().ok_or(CalcError::Overflow)?;
+    if n > MAX_STIRLING_N {
+        return Err(CalcError::Overflow);
+    }
+    let width = m as usize + 1;
+    let mut prev = vec![BigInt::zero(); width];
+    prev[0] = BigInt::one();
+    for row in 1..=n {
+        let mut cur = vec![BigInt::zero(); width];
+        let top = (row as usize).min(m as usize);
+        for (col, cell) in cur.iter_mut().enumerate().take(top + 1).skip(1) {
+            let above = &prev[col];
+            let step = if first {
+                BigInt::from(1i64 - i64::from(row)) * above
+            } else {
+                BigInt::from(col) * above
+            };
+            *cell = &prev[col - 1] + step;
+        }
+        prev = cur;
+    }
+    Ok(prev[m as usize].clone())
 }
 
 pub fn prime_message(v: &Value) -> Result<&'static str, CalcError> {
@@ -674,6 +752,61 @@ mod tests {
             perm(&half, &Value::from_int(2), &mode).unwrap().to_string(),
             "24.75"
         );
+    }
+
+    #[test]
+    fn stirling_numbers_match_known_values() {
+        let mode = mode();
+        let s1 = |n: i64, m: i64| {
+            stirling_first(&Value::from_int(n), &Value::from_int(m), &mode)
+                .unwrap()
+                .to_string()
+        };
+        let s2 = |n: i64, m: i64| {
+            stirling_second(&Value::from_int(n), &Value::from_int(m), &mode)
+                .unwrap()
+                .to_string()
+        };
+
+        // Signed first kind: s(0,0)=1, s(n,0)=0, s(n,n)=1, s(4,2)=11.
+        assert_eq!(s1(0, 0), "1");
+        assert_eq!(s1(5, 0), "0");
+        assert_eq!(s1(5, 5), "1");
+        assert_eq!(s1(3, 1), "2");
+        assert_eq!(s1(4, 1), "-6");
+        assert_eq!(s1(5, 1), "24");
+        assert_eq!(s1(4, 2), "11");
+        assert_eq!(s1(5, 3), "35");
+        assert_eq!(s1(2, 3), "0");
+
+        // Second kind: S(0,0)=1, S(n,0)=0, S(n,n)=1, S(4,2)=7.
+        assert_eq!(s2(0, 0), "1");
+        assert_eq!(s2(5, 0), "0");
+        assert_eq!(s2(5, 5), "1");
+        assert_eq!(s2(3, 1), "1");
+        assert_eq!(s2(3, 2), "3");
+        assert_eq!(s2(4, 2), "7");
+        assert_eq!(s2(5, 3), "25");
+        assert_eq!(s2(10, 5), "42525");
+        assert_eq!(s2(3, 5), "0");
+        // Small `m` shortcuts stay exact past the table cap.
+        assert_eq!(s1(3000, 0), "0");
+        assert_eq!(s2(3000, 1), "1");
+        assert_eq!(s2(3000, 3000), "1");
+        assert!(stirling_second(&Value::from_int(2001), &Value::from_int(2), &mode).is_err());
+
+        // An exact integer float is accepted, as in Calc.
+        let n = Value::real(Real::Float(DecFloat::from_i64(4, 12)));
+        let m = Value::real(Real::Float(DecFloat::from_i64(2, 12)));
+        assert_eq!(stirling_second(&n, &m, &mode).unwrap().to_string(), "7");
+
+        for bad in [
+            Value::from_int(-1),
+            Value::from_rational(BigRational::new(3.into(), 2.into())),
+        ] {
+            assert!(stirling_first(&bad, &Value::from_int(2), &mode).is_err());
+            assert!(stirling_second(&Value::from_int(2), &bad, &mode).is_err());
+        }
     }
 
     #[test]

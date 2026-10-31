@@ -390,6 +390,26 @@ const BINDINGS: &[Binding] = &[
         catalog: true,
     },
     Binding {
+        keys: "k s",
+        name: "stirling1",
+        summary: "Stirling number, first kind",
+        body: "k s is the signed Stirling number of the first kind s(n, m), with m on top. 4 2 k s is 11. n and m are nonnegative integers, and m > n is 0.",
+        help: Some((2, 18)),
+        bar: None,
+        mode: None,
+        catalog: true,
+    },
+    Binding {
+        keys: "Hk s",
+        name: "stirling2",
+        summary: "Stirling number, second kind",
+        body: "H k s is the Stirling number of the second kind S(n, m), with m on top. 4 2 H k s is 7. n and m are nonnegative integers, and m > n is 0.",
+        help: Some((3, 18)),
+        bar: None,
+        mode: None,
+        catalog: true,
+    },
+    Binding {
         keys: "P",
         name: "pi",
         summary: "push pi",
@@ -1024,6 +1044,13 @@ mod tests {
         let hits = search("isqrt");
         assert_eq!(hits[0].keys, "f Q");
         assert_eq!(hits[0].name, "isqrt");
+    }
+
+    #[test]
+    fn stirling_bindings_are_searchable() {
+        let hits = search("stirling");
+        assert_eq!(hits[0].name, "stirling1");
+        assert!(hits.iter().any(|entry| entry.name == "stirling2"));
     }
 
     #[test]

@@ -310,6 +310,16 @@ impl Engine {
         self.binop(comb::perm);
     }
 
+    /// `k s`. Stirling number of the first kind. `m` is on top.
+    pub fn stirling_first(&mut self) {
+        self.binop(comb::stirling_first);
+    }
+
+    /// `H k s`. Stirling number of the second kind. `m` is on top.
+    pub fn stirling_second(&mut self) {
+        self.binop(comb::stirling_second);
+    }
+
     /// `y` is on top and `x` is under it. Push `a`, `b`, and `g` so `g` is on top and `a*x + b*y = g`.
     pub fn egcd(&mut self) {
         let n = self.stack.len();

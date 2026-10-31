@@ -75,6 +75,8 @@ k i       modular inverse: m on top, result b with 0 <= b < m and a*b ≡ 1 (mod
 k p       prime test; the number stays on the stack
 k c       choose, M on top: N! / (M! (N-M)!)
 H k c     permutations: N! / (N-M)!
+k s       Stirling number of the first kind, signed: s(N, M), M on top
+H k s     Stirling number of the second kind: S(N, M), M on top
 !         factorial (exact for integers, gamma otherwise)
 J G       conjugate, argument
 P         pi             H P  e
@@ -118,6 +120,7 @@ Tutorial shapes live in `src/app.rs`. Parser cases are in `src/parse.rs`. The sc
 - `12 \ 12:7` = `7`, `_12:1 _12:7 \` = `7`, `3:2 4:3 \` = `1`, `_3:2 4:3 \` = `-2`, `1e20 \ 3` = `33333333333300000000`, `1e20 % 3` = `100000000.`
 - `36#q` = `26`, `36#n` = `23`, `36#u` = `30` (and `q` does not quit there)
 - `45.3 F` = `45`, `-45.3 F` = `-46`
+- `4 2 k s` = `11`, `4 2 H k s` = `7`, and `10 5 H k s` = `42525`
 - `K` then `0` = `299792458` (speed of light)
 - `ec -e '2 20 ^ d g'` = `1,048,576`
 - last `K` page, `8` = `5.9722e24` (Earth mass), `A` = `7.346e22` (Moon mass), and `F` = `149597870700` (AU)
@@ -146,6 +149,7 @@ Entry and stack details that are easy to get wrong:
 - `ec -e` feeds words through the same keys. Whitespace, including newlines, is a separator, and a finished number is pushed at the end of each word. `2 20 ^ d g` prints `1,048,576`. Both `d g` and `dg` group. A space on the screen still pushes or duplicates. An unclosed `(…` stays open across a space, so `(3, 4)` is one value. `12 p` sets the precision and pops 12. A prompt finishes when its answer is complete (`d r 16`, `b w 64`, `s s name`). The command prints the top value. An error goes to stderr and the process exits 1. `q` and `?` stay on the screen.
 - Stack index 0 is the oldest value. The top of the stack is the last element, drawn at the bottom, with a bold `.` on the last row. The screen does not print level numbers. Values and the `.` start on the same column as the character after `❯ `. A value wider than that row is split across lines: every line but the last ends with `\`, and each later line is indented one column. When that split value is taller than the rows above `.`, the leading lines stay and still end in `\`. Older values that do not fit are left off the top.
 - `F` is floor toward minus infinity and returns an exact integer. An integer is unchanged. A fraction or a decimal float is exact (`-4:3` is `-2`). A complex number is an error. `f` is still the function prefix.
+- `k s` is the signed Stirling number of the first kind `s(n, m)`, and `H k s` is the second kind `S(n, m)`, with `m` on top. Both arguments are nonnegative integers, and an exact integer float is accepted. `m > n` is `0`, and a negative or fractional argument is an error. The recurrence table is capped: `n` above 2000 is `overflow`, though `m` of `0`, `1`, or `n` is answered directly.
 - `k i` is the modular inverse of `a` modulo `m`, with `m` on top. The result is the integer `b` with `0 <= b < m` and `a*b ≡ 1 (mod m)`. `3 7 k i` is `5`. Both values are integers, and an exact integer float is accepted. A non-positive modulus says `modulus must be positive`. If the gcd is not 1 the stack stays and the message is `no modular inverse`. Emacs Calc gets the same `b` as the reciprocal of a modulo form.
 - `K` opens the constants, sixteen to a page, eight down each column. `0`–`9` and `a`–`f` insert that slot and close. Tab and Shift-Tab turn the page and wrap around. The last page has the remaining physics constants, then Earth mass (`Me`), Earth equatorial radius (`Re`, `6378137` m), Moon mass (`Mm`, `7.346e22` kg), Moon equatorial radius (`Rm`, `1738100` m), the mean Earth-Moon distance (`dm`, `384400000` m), Sun mass (`Ms`), Sun radius (`Rs`, `695700` km written in metres), and the astronomical unit (`AU`, `149597870700` m). Every slot is filled. A missing slot would say "no constant" and stay open. Esc closes. `q` does not quit while it is open. The physics numbers are the HP 35s CODATA 1998 values. The planetary numbers are the NASA Earth, Sun, and Moon fact sheets, in kilograms and metres. An integer literal stays an integer (`299792458`, `101325`, `6378137`, `149597870700`, `1738100`). The unit is only a label in the menu and the message (`c  m/s`, `Me  kg`). `e` is not listed; `H P` pushes it. `K` is still a digit while a radix literal above 20 is being typed.
 - `atan2` of a value on an axis is an exact right angle (`0`, `±90`, `180` in degrees), including `atan2(0, 0) = 0` and `atan2(0, negative) = 180`.

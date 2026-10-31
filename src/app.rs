@@ -732,6 +732,13 @@ impl App {
                     self.run(Engine::choose);
                 }
             }
+            (Prefix::K, 's') => {
+                if self.hyperbolic {
+                    self.run(Engine::stirling_second);
+                } else {
+                    self.run(Engine::stirling_first);
+                }
+            }
             (Prefix::S, 's') => {
                 self.pending = Pending::Var {
                     op: VarOp::Store { pop: false },
@@ -1855,6 +1862,10 @@ mod tests {
         assert_eq!(eval("90 S").as_deref(), Ok("1"));
         assert_eq!(eval("125 3 I ^").as_deref(), Ok("5"));
         assert_eq!(eval("5 2 H k c").as_deref(), Ok("20"));
+        assert_eq!(eval("4 2 k s").as_deref(), Ok("11"));
+        assert_eq!(eval("4 2 H k s").as_deref(), Ok("7"));
+        assert_eq!(eval("10 5 H k s").as_deref(), Ok("42525"));
+        assert_eq!(eval("2 3 k s").as_deref(), Ok("0"));
         assert_eq!(eval("(3, 4) A").as_deref(), Ok("5"));
         assert_eq!(eval("(3,4) A").as_deref(), Ok("5"));
         assert_eq!(eval("36#q").as_deref(), Ok("26"));
@@ -2044,6 +2055,11 @@ mod tests {
         assert_eq!(
             binding_keys("Hk c"),
             vec![Key::Char('H'), Key::Char('k'), Key::Char('c')]
+        );
+        assert_eq!(binding_keys("k s"), vec![Key::Char('k'), Key::Char('s')]);
+        assert_eq!(
+            binding_keys("Hk s"),
+            vec![Key::Char('H'), Key::Char('k'), Key::Char('s')]
         );
     }
 

@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "ecalc"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "clap",
  "crossterm",
