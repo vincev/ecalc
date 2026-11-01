@@ -375,7 +375,7 @@ const BINDINGS: &[Binding] = &[
         keys: "k f",
         name: "factor",
         summary: "prime factors",
-        body: "k f replaces an integer with its prime factors, smallest first. 2023 k f leaves 7, then 17, then 17, and * * multiplies them back to 2023. A negative number leads with -1. 0 and 1 stay as they are. Trial division uses Calc's prime table through 5003. A cofactor that cannot be proven prime stays in one piece, and the message is may not be fully factored.",
+        body: "k f replaces an integer with its prime factors, smallest first. 2023 k f leaves 7, then 17, then 17, and * * multiplies them back to 2023. A negative number leads with -1. 0 and 1 stay as they are. Trial division uses Calc's prime table through 5003, then Pollard rho splits a composite cofactor up to 1024 bits. A cofactor that cannot be proven prime or split stays in one piece, and the message is may not be fully factored.",
         help: Some(42),
         bar: None,
         mode: None,

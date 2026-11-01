@@ -1620,13 +1620,20 @@ mod tests {
 
         let mut app = App::new();
         app.keys("25220483\nkf");
-        assert_eq!(app.engine().stack_lines(), ["25220483"]);
-        assert_eq!(app.engine().message(), "may not be fully factored");
-        assert!(!app.engine().is_error());
+        assert_eq!(app.engine().stack_lines(), ["5021", "5023"]);
+        assert_eq!(app.engine().message(), "");
 
         let mut app = App::new();
         app.keys("25120063\nkf");
         assert_eq!(app.engine().stack_lines(), ["5003", "5021"]);
+        assert_eq!(app.engine().message(), "");
+
+        let mut app = App::new();
+        app.keys("43920492304\nkf");
+        assert_eq!(
+            app.engine().stack_lines(),
+            ["2", "2", "2", "2", "13", "5903", "35771"]
+        );
         assert_eq!(app.engine().message(), "");
     }
 

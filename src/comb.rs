@@ -22,6 +22,15 @@ const MAX_STIRLING_N: u32 = 2_000;
 const TRIAL_LIMIT: u64 = 8_000_000;
 /// Thirteen witnesses prove primality below this integer.
 const PROVEN_BOUND: &str = "3317044064679887385961981";
+/// Largest cofactor Pollard rho will try to split. Beyond this, a cofactor
+/// keeps Calc's behavior and stays in one piece.
+const MAX_POLLARD_BITS: u64 = 1024;
+/// Total modular squarings per cofactor before Pollard rho gives up.
+const POLLARD_BUDGET: u64 = 1_000_000;
+/// Brent's block size for batching gcd calls.
+const POLLARD_BLOCK: u64 = 128;
+/// Polynomial constants tried after one cycles without finding a factor.
+const POLLARD_ATTEMPTS: u32 = 16;
 /// Emacs Calc's `math-primes-table`: every prime through 5003.
 const FACTOR_PRIMES: &[u32] = &[
     2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
@@ -258,9 +267,9 @@ pub fn prime_message(v: &Value) -> Result<&'static str, CalcError> {
 
 /// Prime factors of an integer, smallest first, with repeats.
 ///
-/// The bool is false when the last factor may still be composite. Trial
-/// division uses [`FACTOR_PRIMES`] and follows Calc's `calcFunc-prfac`: it
-/// stops as soon as no prime up to the current one can divide the remainder.
+/// Trial division uses [`FACTOR_PRIMES`] and follows Calc's `calcFunc-prfac`.
+/// A cofactor that survives the table is split with Pollard rho. The bool is
+/// false when a cofactor may still be composite.
 pub fn prime_factors(v: &Value) -> Result<(Vec<BigInt>, bool), CalcError> {
     let n = as_integer(v, "prime factors need an integer")?;
     Ok(factor_integer(n))
@@ -283,7 +292,7 @@ fn factor_integer(n: BigInt) -> (Vec<BigInt>, bool) {
 
 /// `n` is an integer of 2 or more. Trial division follows Calc's prime
 /// table. Once the current prime reaches the quotient, the remainder is
-/// prime.
+/// prime. Anything left after the table goes to Pollard rho.
 fn factor_natural(mut n: BigInt) -> (Vec<BigInt>, bool) {
     let mut factors = Vec::new();
     for &p in FACTOR_PRIMES {
@@ -305,10 +314,116 @@ fn factor_natural(mut n: BigInt) -> (Vec<BigInt>, bool) {
         }
     }
     if n.is_one() {
-        (factors, true)
-    } else {
+        return (factors, true);
+    }
+    let complete = factor_remaining(n, &mut factors);
+    factors.sort();
+    (factors, complete)
+}
+
+/// Split a cofactor that survived the trial-division table. A proven prime
+/// is finished; a composite is split with Pollard rho and both pieces are
+/// factored the same way.
+fn factor_remaining(n: BigInt, factors: &mut Vec<BigInt>) -> bool {
+    if n.bits() > MAX_POLLARD_BITS {
         factors.push(n);
-        (factors, false)
+        return false;
+    }
+    match classify(&n) {
+        PrimeKind::Prime => {
+            factors.push(n);
+            true
+        }
+        PrimeKind::ProbablyPrime => {
+            factors.push(n);
+            false
+        }
+        PrimeKind::NotPrime => {
+            let Some(divisor) = pollard_rho(&n) else {
+                factors.push(n);
+                return false;
+            };
+            let quotient = &n / &divisor;
+            let left = factor_remaining(divisor, factors);
+            let right = factor_remaining(quotient, factors);
+            left && right
+        }
+    }
+}
+
+/// Brent's variant of Pollard rho. Returns a nontrivial divisor, or `None`
+/// when the budget runs out or every polynomial cycles.
+fn pollard_rho(n: &BigInt) -> Option<BigInt> {
+    let mut budget = POLLARD_BUDGET;
+    for attempt in 1..=POLLARD_ATTEMPTS {
+        let c = BigInt::from(attempt);
+        if let Some(divisor) = pollard_brent(n, &c, &mut budget) {
+            return Some(divisor);
+        }
+        if budget == 0 {
+            break;
+        }
+    }
+    None
+}
+
+fn pollard_brent(n: &BigInt, c: &BigInt, budget: &mut u64) -> Option<BigInt> {
+    let one = BigInt::one();
+    let mut y = BigInt::from(2);
+    let mut x = y.clone();
+    let mut ys = y.clone();
+    let mut q = one.clone();
+    let mut g = one.clone();
+    let mut r = 1u64;
+    while g.is_one() {
+        x = y.clone();
+        for _ in 0..r {
+            if !spend(budget) {
+                return None;
+            }
+            y = rho_step(&y, c, n);
+        }
+        let mut k = 0u64;
+        while k < r && g.is_one() {
+            ys = y.clone();
+            let block = POLLARD_BLOCK.min(r - k);
+            for _ in 0..block {
+                if !spend(budget) {
+                    return None;
+                }
+                y = rho_step(&y, c, n);
+                q = (q * (&x - &y).abs()) % n;
+            }
+            g = q.gcd(n);
+            k += block;
+        }
+        r *= 2;
+    }
+    if g == *n {
+        loop {
+            if !spend(budget) {
+                return None;
+            }
+            ys = rho_step(&ys, c, n);
+            g = (&x - &ys).abs().gcd(n);
+            if !g.is_one() {
+                break;
+            }
+        }
+    }
+    if g.is_one() || g == *n { None } else { Some(g) }
+}
+
+fn rho_step(value: &BigInt, c: &BigInt, n: &BigInt) -> BigInt {
+    (value * value + c) % n
+}
+
+fn spend(budget: &mut u64) -> bool {
+    if *budget == 0 {
+        false
+    } else {
+        *budget -= 1;
+        true
     }
 }
 
@@ -1008,10 +1123,17 @@ mod tests {
         check(4999 * 5003, &[4999, 5003], true);
         // Prime just above 5003 squared. Calc proves it from 5003 itself.
         check(25_030_013, &[25_030_013], true);
+        // The table stops at 5003, so 5903 needs Pollard rho.
+        check(43_920_492_304, &[2, 2, 2, 2, 13, 5903, 35771], true);
+        check(5021 * 5023, &[5021, 5023], true);
+        check(5903 * 5903, &[5903, 5903], true);
+        check(10007 * 10009, &[10007, 10009], true);
+        // A prime past the table is still proved by Miller-Rabin.
+        check(1_000_000_007, &[1_000_000_007], true);
 
-        let leftover = BigInt::from(5021) * BigInt::from(5023);
-        let (factors, done) = prime_factors(&Value::from_int(leftover.clone())).unwrap();
-        assert_eq!(factors, vec![leftover]);
+        let mersenne: BigInt = (BigInt::one() << 127u32) - 1;
+        let (factors, done) = prime_factors(&Value::from_int(mersenne.clone())).unwrap();
+        assert_eq!(factors, vec![mersenne]);
         assert!(!done);
 
         let float = Value::real(Real::Float(DecFloat::from_decimal(
