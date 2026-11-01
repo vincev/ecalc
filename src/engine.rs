@@ -356,6 +356,28 @@ impl Engine {
         }
     }
 
+    /// `k f`. Replace the top integer with its prime factors, smallest first.
+    /// `2023` becomes `7`, `17`, `17`, with `17` on top.
+    pub fn prime_factors(&mut self) {
+        let Some(top) = self.top() else {
+            self.fail(CalcError::StackUnderflow);
+            return;
+        };
+        match comb::prime_factors(top) {
+            Ok((factors, complete)) => {
+                self.checkpoint();
+                self.stack.pop();
+                self.stack.extend(factors.into_iter().map(Value::from_int));
+                if complete {
+                    self.succeed();
+                } else {
+                    self.show("may not be fully factored");
+                }
+            }
+            Err(err) => self.fail(err),
+        }
+    }
+
     pub fn power(&mut self) {
         self.binop(value::pow);
     }

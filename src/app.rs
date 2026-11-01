@@ -37,7 +37,7 @@ enum Prefix {
     D,
     /// `b` binary prefix. Only `b w` (word size) is used.
     B,
-    /// `k` combinatorics prefix: gcd, lcm, extended gcd, modular inverse, prime test.
+    /// `k` combinatorics prefix: gcd, lcm, extended gcd, modular inverse, prime test, prime factors.
     K,
     /// `s` store and recall. `s s`, `s t`, `s r`, `s u`, `s l`, or a digit for `q0`–`q9`.
     S,
@@ -77,22 +77,14 @@ pub(crate) use consts::COLUMN as CONST_COLUMN;
 /// The one dialog above the prompt. Opening one closes the others.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Overlay {
-    Help,
+    /// Shortcut list. Tab moves a page.
+    Help { page: usize },
     /// `? ?` command pages. Typing filters them. `q` is a letter here.
-    Docs {
-        query: String,
-        cursor: usize,
-    },
+    Docs { query: String, cursor: usize },
     /// `s l` dialog. Letters and digits recall; Tab moves a page.
-    Variables {
-        page: usize,
-        note: String,
-    },
+    Variables { page: usize, note: String },
     /// `K` dialog. `0`–`F` inserts a constant; Tab moves a page.
-    Constants {
-        page: usize,
-        note: String,
-    },
+    Constants { page: usize, note: String },
 }
 
 pub struct App {
@@ -101,6 +93,10 @@ pub struct App {
     prefix: Prefix,
     pending: Pending,
     overlay: Option<Overlay>,
+    /// Shortcut-list columns and rows that fit the current window. A page is
+    /// rows times columns.
+    help_cols: usize,
+    help_rows: usize,
     /// One-shot inverse prefix. `L` flips it, then uses the exp/ln family.
     inverse: bool,
     /// One-shot hyperbolic prefix.
@@ -122,6 +118,8 @@ impl App {
             prefix: Prefix::None,
             pending: Pending::None,
             overlay: None,
+            help_cols: 3,
+            help_rows: crate::docs::HELP_ROWS,
             inverse: false,
             hyperbolic: false,
             quit: false,
@@ -141,7 +139,37 @@ impl App {
     }
 
     pub fn help_open(&self) -> bool {
-        matches!(self.overlay, Some(Overlay::Help))
+        matches!(self.overlay, Some(Overlay::Help { .. }))
+    }
+
+    /// Columns and rows the shortcut list can draw. The screen sets these from
+    /// its size before each draw.
+    pub(crate) fn set_help_layout(&mut self, cols: usize, rows: usize) {
+        self.help_cols = cols.clamp(1, 3);
+        self.help_rows = rows.clamp(1, crate::docs::HELP_ROWS);
+    }
+
+    pub fn help_page(&self) -> usize {
+        let Some(Overlay::Help { page }) = &self.overlay else {
+            return 0;
+        };
+        let pages = self.help_pages();
+        (*page).min(pages.saturating_sub(1))
+    }
+
+    pub fn help_pages(&self) -> usize {
+        crate::docs::help_entries()
+            .len()
+            .div_ceil(self.help_page_size())
+            .max(1)
+    }
+
+    pub(crate) fn help_grid(&self) -> Vec<Vec<(&'static str, &'static str)>> {
+        crate::docs::help_columns(self.help_page(), self.help_cols, self.help_rows)
+    }
+
+    fn help_page_size(&self) -> usize {
+        self.help_rows.max(1) * self.help_cols.max(1)
     }
 
     pub fn docs_open(&self) -> bool {
@@ -348,11 +376,12 @@ impl App {
             return;
         }
         match self.overlay {
-            Some(Overlay::Help) => {
-                if matches!(key, Key::Char('?')) {
-                    self.open_docs();
-                } else {
-                    self.overlay = None;
+            Some(Overlay::Help { .. }) => {
+                match key {
+                    Key::Char('?') => self.open_docs(),
+                    Key::Tab => self.turn_help_page(true),
+                    Key::ShiftTab => self.turn_help_page(false),
+                    _ => self.overlay = None,
                 }
                 return;
             }
@@ -416,7 +445,7 @@ impl App {
 
     fn press_docs(&mut self, key: Key) {
         match key {
-            Key::Char('?') => self.overlay = Some(Overlay::Help),
+            Key::Char('?') => self.overlay = Some(Overlay::Help { page: 0 }),
             Key::Backspace => self.edit_docs_query(|query| {
                 query.pop();
             }),
@@ -498,6 +527,22 @@ impl App {
             Key::Char(c) => self.pick_constant(c),
             _ => {}
         }
+    }
+
+    fn turn_help_page(&mut self, forward: bool) {
+        let pages = self.help_pages();
+        if pages <= 1 {
+            return;
+        }
+        let Some(Overlay::Help { page }) = &mut self.overlay else {
+            return;
+        };
+        let current = (*page).min(pages - 1);
+        *page = if forward {
+            (current + 1) % pages
+        } else {
+            (current + pages - 1) % pages
+        };
     }
 
     fn turn_const_page(&mut self, forward: bool) {
@@ -725,6 +770,7 @@ impl App {
             (Prefix::K, 'E') => self.run(Engine::egcd),
             (Prefix::K, 'i') => self.run(Engine::mod_inverse),
             (Prefix::K, 'p') => self.run(Engine::prime_test),
+            (Prefix::K, 'f') => self.run(Engine::prime_factors),
             (Prefix::K, 'c') => {
                 if self.hyperbolic {
                     self.run(Engine::perm);
@@ -922,7 +968,7 @@ impl App {
                 self.hyperbolic = !self.hyperbolic;
                 self.engine.clear_message();
             }
-            '?' => self.overlay = Some(Overlay::Help),
+            '?' => self.overlay = Some(Overlay::Help { page: 0 }),
             _ => self.run(Engine::unknown_key),
         }
     }
@@ -1449,6 +1495,15 @@ mod tests {
     }
 
     #[test]
+    fn q_quits_from_the_shortcut_list() {
+        let mut app = App::new();
+        app.keys("?");
+        assert!(app.help_open());
+        app.press(Key::Char('q'));
+        assert!(app.should_quit());
+    }
+
+    #[test]
     fn gcd_lcm_factorial_and_primes() {
         assert_eq!(top("12\n18\nkg"), "6");
         assert_eq!(top("_4\n6\nkl"), "12");
@@ -1482,10 +1537,6 @@ mod tests {
         assert!(app.engine().is_error());
         assert_eq!(app.top_string().as_deref(), Some("-1"));
 
-        let mut app = App::new();
-        app.keys("kf");
-        assert_eq!(app.engine().message(), "unknown key");
-
         assert_eq!(top("3\n7\nki"), "5");
         assert_eq!(top("5\n24\nki"), "5");
         assert_eq!(top("_3\n7\nki"), "2");
@@ -1517,6 +1568,66 @@ mod tests {
         assert_eq!(top("10\n3\nkc"), "120");
         assert_eq!(top("5\n2\nHkc"), "20");
         assert_eq!(top("_3\n2\nkc"), "6");
+    }
+
+    #[test]
+    fn prime_factors_push_smallest_first() {
+        let mut app = App::new();
+        app.keys("2023\nkf");
+        assert_eq!(app.engine().stack_lines(), ["7", "17", "17"]);
+        assert_eq!(app.engine().message(), "");
+        app.keys("**");
+        assert_eq!(app.top_string().as_deref(), Some("2023"));
+
+        let mut app = App::new();
+        app.keys("5\n2023\nkf");
+        assert_eq!(app.engine().stack_lines(), ["5", "7", "17", "17"]);
+        app.keys("u");
+        assert_eq!(app.engine().stack_lines(), ["5", "2023"]);
+
+        let mut app = App::new();
+        app.keys("_2023\nkf");
+        assert_eq!(app.engine().stack_lines(), ["-1", "7", "17", "17"]);
+        app.keys("***");
+        assert_eq!(app.top_string().as_deref(), Some("-2023"));
+
+        assert_eq!(top("0\nkf"), "0");
+        assert_eq!(top("1\nkf"), "1");
+        assert_eq!(top("_1\nkf"), "-1");
+        assert_eq!(top("2023.\nkf**"), "2023");
+        assert_eq!(eval("2023 k f").as_deref(), Ok("17"));
+        assert_eq!(eval("2023 k f * *").as_deref(), Ok("2023"));
+
+        let mut app = App::new();
+        app.keys("3:2\nkf");
+        assert_eq!(app.engine().message(), "prime factors need an integer");
+        assert!(app.engine().is_error());
+        assert_eq!(app.engine().stack_lines(), ["3:2"]);
+
+        let mut app = App::new();
+        app.keys("(1, 2)\nkf");
+        assert_eq!(app.engine().message(), "prime factors need an integer");
+        assert_eq!(app.engine().stack_lines(), ["(1, 2)"]);
+
+        let mut app = App::new();
+        app.keys("kf");
+        assert_eq!(app.engine().message(), "too few arguments");
+
+        let mut app = App::new();
+        app.keys("25030013\nkf");
+        assert_eq!(app.engine().stack_lines(), ["25030013"]);
+        assert_eq!(app.engine().message(), "");
+
+        let mut app = App::new();
+        app.keys("25220483\nkf");
+        assert_eq!(app.engine().stack_lines(), ["25220483"]);
+        assert_eq!(app.engine().message(), "may not be fully factored");
+        assert!(!app.engine().is_error());
+
+        let mut app = App::new();
+        app.keys("25120063\nkf");
+        assert_eq!(app.engine().stack_lines(), ["5003", "5021"]);
+        assert_eq!(app.engine().message(), "");
     }
 
     #[test]

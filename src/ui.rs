@@ -341,6 +341,9 @@ pub fn run() -> io::Result<()> {
     let mut app = App::new();
     ratatui::run(|terminal| {
         loop {
+            let size = terminal.size()?;
+            let (cols, rows) = help_size(size.width, size.height);
+            app.set_help_layout(cols, rows);
             terminal.draw(|frame| draw(frame, &app, palette))?;
             if wait_for_redraw(&mut app)? {
                 break;
@@ -377,6 +380,28 @@ fn draw(frame: &mut Frame, app: &App, palette: Palette) {
         .set_style(area, Style::default().fg(palette.fg).bg(palette.bg));
 
     // Prompt, then a blank row, the shortcuts, and a blank row at the screen edge.
+    let chunks = screen_chunks(area);
+
+    draw_stack(frame.buffer_mut(), chunks[0], app, palette);
+    draw_prompt(frame.buffer_mut(), chunks[1], app, palette);
+    draw_shortcuts(frame.buffer_mut(), chunks[3], app, palette);
+    match app.overlay() {
+        Some(Overlay::Help { .. }) => draw_help(
+            frame.buffer_mut(),
+            area,
+            above_prompt(area, chunks[1]),
+            app,
+            palette,
+        ),
+        Some(Overlay::Docs { .. }) => draw_docs(frame.buffer_mut(), area, app, palette),
+        Some(Overlay::Variables { .. }) => draw_variables(frame.buffer_mut(), area, app, palette),
+        Some(Overlay::Constants { .. }) => draw_constants(frame.buffer_mut(), area, app, palette),
+        None => {}
+    }
+}
+
+/// The five vertical bands: stack, prompt, gap, shortcuts, and bottom gap.
+fn screen_chunks(area: Rect) -> [Rect; 5] {
     let chunks = Layout::vertical([
         Constraint::Min(1),
         Constraint::Length(3),
@@ -385,22 +410,7 @@ fn draw(frame: &mut Frame, app: &App, palette: Palette) {
         Constraint::Length(1),
     ])
     .split(inset_sides(area));
-
-    draw_stack(frame.buffer_mut(), chunks[0], app, palette);
-    draw_prompt(frame.buffer_mut(), chunks[1], app, palette);
-    draw_shortcuts(frame.buffer_mut(), chunks[3], app, palette);
-    match app.overlay() {
-        Some(Overlay::Help) => draw_help(
-            frame.buffer_mut(),
-            area,
-            above_prompt(area, chunks[1]),
-            palette,
-        ),
-        Some(Overlay::Docs { .. }) => draw_docs(frame.buffer_mut(), area, app, palette),
-        Some(Overlay::Variables { .. }) => draw_variables(frame.buffer_mut(), area, app, palette),
-        Some(Overlay::Constants { .. }) => draw_constants(frame.buffer_mut(), area, app, palette),
-        None => {}
-    }
+    [chunks[0], chunks[1], chunks[2], chunks[3], chunks[4]]
 }
 
 /// The input's width, from the top of the window down to the prompt border.
@@ -657,13 +667,13 @@ const HELP_H_PAD: u16 = 2;
 /// Blank row plus the close hints, above the bottom border.
 const HELP_FOOTER: u16 = 2;
 /// How many shortcut columns to aim for. Narrow terminals use fewer.
-const HELP_COLS: usize = 4;
+const HELP_COLS: usize = 3;
 /// Blank columns between shortcut columns.
 const HELP_GAP: usize = 2;
 /// Narrowest column that still fits `S-Tab` plus the longest label.
 const HELP_COL_MIN: usize = 15;
-/// Shortcut box. Four columns of [`HELP_COL_MIN`] fit, including the frame.
-const HELP_DIALOG_W: u16 = 72;
+/// Shortcut box. Three columns of [`HELP_COL_MIN`] fit, including the frame.
+const HELP_DIALOG_W: u16 = 55;
 /// Command, variable, and constant boxes.
 const DIALOG_W: u16 = 68;
 
@@ -770,17 +780,6 @@ impl Dialog {
         }
     }
 
-    fn note(&self, buf: &mut Buffer, text: &str, style: Style) {
-        paint_str(
-            buf,
-            self.inner_x,
-            self.rect.y + 1,
-            self.inner_x + self.text_w,
-            text,
-            style,
-        );
-    }
-
     /// Note on the left, `page/pages` on the right when there is another page.
     fn note_page(
         &self,
@@ -824,14 +823,18 @@ impl Dialog {
 
     fn footer(&self, buf: &mut Buffer, hints: &[(&str, &str)]) {
         let y = self.rect.y + self.rect.height - 2;
-        draw_centered_hints(buf, self.inner_x, y, self.text_w, hints, self.palette);
+        // The hints use the full width inside the frame, including the side pad.
+        let x = self.rect.x + 1;
+        let width = self.rect.width.saturating_sub(2);
+        draw_centered_hints(buf, x, y, width, hints, self.palette);
     }
 }
 
-/// Shortcuts box above the input. The same number of rows sits above the frame
-/// as between the frame and the prompt, and the frame is centered on the
-/// input's width. A terminal too short for that band uses the whole window.
-fn draw_help(buf: &mut Buffer, window: Rect, above: Rect, palette: Palette) {
+/// Shortcuts box above the input. The frame is centered on the input's width,
+/// with the same number of rows above the frame as between the frame and the
+/// prompt. An odd leftover row sits between the frame and the prompt. A
+/// terminal too short for that band uses the whole window.
+fn draw_help(buf: &mut Buffer, window: Rect, above: Rect, app: &App, palette: Palette) {
     let chrome = 2 + HELP_V_PAD + HELP_FOOTER;
     let area = if above.width >= 10 && above.height >= chrome {
         above
@@ -843,17 +846,27 @@ fn draw_help(buf: &mut Buffer, window: Rect, above: Rect, palette: Palette) {
     if inner_w < 8 {
         return;
     }
-    let (cols, col_w) = help_layout(inner_w);
-    let columns = help_columns(cols);
+    let columns = app.help_grid();
     let grid_rows = columns.iter().map(|column| column.len()).max().unwrap_or(0) as u16;
     let Some(dialog) = Dialog::open(buf, area, grid_rows, width, palette) else {
         return;
     };
+    let col_w = if columns.is_empty() {
+        1
+    } else {
+        let gaps = columns.len().saturating_sub(1) * HELP_GAP;
+        (dialog.text_w as usize)
+            .saturating_sub(gaps)
+            .saturating_div(columns.len())
+            .max(1)
+    };
     dialog.title(buf, "Shortcuts");
-    dialog.note(
+    dialog.note_page(
         buf,
         "? for a description",
         Style::default().fg(palette.gray).bg(palette.bg),
+        app.help_page(),
+        app.help_pages(),
     );
     if dialog.content_h > 0 {
         let content = Rect {
@@ -864,10 +877,27 @@ fn draw_help(buf: &mut Buffer, window: Rect, above: Rect, palette: Palette) {
         };
         draw_help_grid(buf, content, &columns, col_w, dialog.content_h, palette);
     }
-    dialog.footer(buf, HELP_HINTS);
+    let hints = help_footer(app);
+    dialog.footer(buf, &hints);
 }
 
-const HELP_HINTS: &[(&str, &str)] = &[("?", "docs"), ("esc", "close"), ("q", "quit")];
+/// Hints inside the shortcut box. `q` stays on the window bar.
+fn help_footer(app: &App) -> Vec<(&'static str, &'static str)> {
+    let mut hints = Vec::new();
+    if app.help_pages() > 1 {
+        hints.push((crate::docs::keys_named("swap"), "next"));
+        hints.push((crate::docs::keys_named("roll"), "prev"));
+    }
+    hints.push(("?", "docs"));
+    hints.push(("esc", "close"));
+    hints
+}
+
+fn help_bar(app: &App) -> Vec<(&'static str, &'static str)> {
+    let mut hints = help_footer(app);
+    hints.push(("q", "quit"));
+    hints
+}
 
 fn docs_hints() -> Vec<(&'static str, &'static str)> {
     vec![
@@ -1210,30 +1240,38 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-/// `(columns, column width)` for the shortcut grid. Prefers four columns.
+/// Columns and rows the shortcut box can show in a window of this size.
+fn help_size(width: u16, height: u16) -> (usize, usize) {
+    let window = Rect::new(0, 0, width, height);
+    let chunks = screen_chunks(window);
+    let above = above_prompt(window, chunks[1]);
+    let chrome = 2 + HELP_V_PAD + HELP_FOOTER;
+    let area = if above.width >= 10 && above.height >= chrome {
+        above
+    } else {
+        window
+    };
+    let rows = usize::from(area.height.saturating_sub(chrome)).clamp(1, crate::docs::HELP_ROWS);
+    (help_column_count_for_width(area.width), rows)
+}
+
+/// Shortcut columns that fit an area that is already inset from the edges.
+fn help_column_count_for_width(area_width: u16) -> usize {
+    let dialog_w = HELP_DIALOG_W.min(area_width);
+    let inner = dialog_w.saturating_sub(2 + HELP_H_PAD * 2);
+    help_layout(inner).0
+}
+
+/// `(columns, column width)` for the shortcut grid. Prefers three columns.
 fn help_layout(width: u16) -> (usize, usize) {
     let width = width as usize;
-    let groups = crate::docs::help_groups();
-    let mut cols = HELP_COLS.min(groups.len()).max(1);
+    let mut cols = HELP_COLS.max(1);
     while cols > 1 && cols * HELP_COL_MIN + (cols - 1) * HELP_GAP > width {
         cols -= 1;
     }
-    let col_w = (width - (cols - 1) * HELP_GAP) / cols;
+    let gaps = cols.saturating_sub(1) * HELP_GAP;
+    let col_w = width.saturating_sub(gaps) / cols;
     (cols, col_w.max(1))
-}
-
-/// One topic per column. A narrow terminal stacks later topics under earlier ones.
-fn help_columns(cols: usize) -> Vec<Vec<(&'static str, &'static str)>> {
-    let groups = crate::docs::help_groups();
-    let cols = cols.max(1);
-    if cols >= groups.len() {
-        return groups;
-    }
-    let mut columns = vec![Vec::new(); cols];
-    for (index, group) in groups.iter().enumerate() {
-        columns[index % cols].extend_from_slice(group);
-    }
-    columns
 }
 
 fn draw_help_grid(
@@ -1546,11 +1584,12 @@ fn draw_shortcuts(buf: &mut Buffer, area: Rect, app: &App, palette: Palette) {
 
     let var_hints = var_footer_hints(app);
     let const_hints = const_footer_hints(app);
+    let help_hints = help_bar(app);
     let docs = docs_hints();
     let bar = crate::docs::shortcuts();
     let hints: &[(&str, &str)] = match app.overlay() {
         Some(Overlay::Docs { .. }) => &docs,
-        Some(Overlay::Help) => HELP_HINTS,
+        Some(Overlay::Help { .. }) => &help_hints,
         Some(Overlay::Variables { .. }) => &var_hints,
         Some(Overlay::Constants { .. }) => &const_hints,
         None => &bar,
@@ -1637,7 +1676,9 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    fn render(app: &App, width: u16, height: u16) -> Buffer {
+    fn render(app: &mut App, width: u16, height: u16) -> Buffer {
+        let (cols, rows) = help_size(width, height);
+        app.set_help_layout(cols, rows);
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, app, GROK_NIGHT)).unwrap();
@@ -1665,7 +1706,7 @@ mod tests {
             .any(|c| c != ' ')
     }
 
-    fn screen(app: &App, width: u16, height: u16) -> String {
+    fn screen(app: &mut App, width: u16, height: u16) -> String {
         lines(&render(app, width, height))
             .join(" ")
             .split_whitespace()
@@ -1689,7 +1730,7 @@ mod tests {
     fn level_one_sits_above_the_dot() {
         let mut app = App::new();
         app.keys("1\n2\n3\n");
-        let buffer = render(&app, 40, 12);
+        let buffer = render(&mut app, 40, 12);
         let rows = lines(&buffer);
         let shown: Vec<&str> = rows.iter().map(|row| row.trim()).collect();
         let dot = shown
@@ -1761,7 +1802,7 @@ mod tests {
         let full = app.engine().stack_lines().pop().expect("factorial");
         assert!(full.len() > 40, "100! should be wider than the test screen");
 
-        let buffer = render(&app, 40, 24);
+        let buffer = render(&mut app, 40, 24);
         let rows = lines(&buffer);
         let prompt = rows.iter().find(|row| row.contains('❯')).expect("prompt");
         let typed_at = col(prompt, '❯') + 2;
@@ -1804,7 +1845,7 @@ mod tests {
         }
         assert_eq!(joined, full);
 
-        let clipped = lines(&render(&app, 40, 12));
+        let clipped = lines(&render(&mut app, 40, 12));
         let clip_dot = clipped
             .iter()
             .position(|row| row.trim() == ".")
@@ -1834,7 +1875,7 @@ mod tests {
     fn prompt_and_shortcuts_use_groknight_colors() {
         let mut app = App::new();
         app.keys("12");
-        let buffer = render(&app, 60, 12);
+        let buffer = render(&mut app, 60, 12);
         let rows = lines(&buffer);
         let prompt = rows
             .iter()
@@ -1869,6 +1910,7 @@ mod tests {
         assert!(rows[bar - 1].trim().is_empty(), "blank row above shortcuts");
         assert_eq!(bar + 1, rows.len() - 1, "one blank row under the shortcuts");
         assert!(rows[bar + 1].trim().is_empty());
+        assert!(rows[bar].contains("u:undo"));
         let key = &buffer[(SIDE_PAD, bar as u16)];
         assert_eq!(key.symbol(), "r");
         assert_eq!(key.fg, FG_SECONDARY);
@@ -1886,7 +1928,7 @@ mod tests {
     fn error_and_help_are_visible() {
         let mut app = App::new();
         app.keys("+");
-        let rows = lines(&render(&app, 40, 12));
+        let rows = lines(&render(&mut app, 40, 12));
         assert!(rows.iter().any(|row| row.contains("too few arguments")));
         let info = rows
             .iter()
@@ -1902,7 +1944,8 @@ mod tests {
         );
         assert_eq!(info_chars[corner - 3], 's');
 
-        let idle = lines(&render(&App::new(), 40, 12));
+        let mut idle_app = App::new();
+        let idle = lines(&render(&mut idle_app, 40, 12));
         let idle_y = idle
             .iter()
             .position(|row| row.contains('╰'))
@@ -1913,9 +1956,9 @@ mod tests {
         assert_eq!(idle_chars[idle_corner], '╯');
 
         app.keys("?");
-        let buffer = render(&app, 80, 40);
+        let buffer = render(&mut app, 80, 40);
         let rows = lines(&buffer);
-        assert!(rows.iter().any(|row| row.contains("undo")));
+        assert!(rows.iter().any(|row| row.contains("conj")));
         assert!(rows.iter().any(|row| row.contains("fraction")));
         assert!(rows.iter().any(|row| row.contains("Shortcuts")));
         assert!(rows.iter().any(|row| row.contains("esc close")));
@@ -1931,29 +1974,44 @@ mod tests {
     }
 
     #[test]
-    fn help_columns_match_in_length() {
-        let columns = help_columns(4);
-        let shortest = columns.iter().map(|column| column.len()).min().unwrap();
-        let longest = columns.iter().map(|column| column.len()).max().unwrap();
-        assert!(
-            longest - shortest <= 1,
-            "help columns should differ by at most one row"
-        );
-        let on_last = columns
-            .iter()
-            .filter(|column| column.len() == longest)
-            .count();
-        assert!(
-            on_last >= 2,
-            "the last shortcut row should hold at least two keys"
-        );
+    fn help_layout_follows_the_window() {
+        assert_eq!(help_size(90, 40), (3, 15));
+        assert_eq!(help_size(80, 40), (3, 15));
+        assert_eq!(help_size(55, 40), (2, 15));
+        assert_eq!(help_size(40, 40), (1, 15));
+        assert_eq!(help_size(80, 24), (3, 13));
+        assert_eq!(help_size(40, 24), (1, 13));
+    }
+
+    #[test]
+    fn shortcut_list_fits_an_80x24_terminal() {
+        let mut app = App::new();
+        app.keys("?");
+        let _ = screen(&mut app, 80, 24);
+        let pages = app.help_pages();
+        assert!(pages > 1);
+
+        let mut text = String::new();
+        for page in 0..pages {
+            text.push_str(&screen(&mut app, 80, 24));
+            text.push(' ');
+            if page + 1 < pages {
+                app.press(Key::Tab);
+            }
+        }
+        for (keys, name) in crate::docs::help_entries() {
+            assert!(
+                text.contains(&format!("{keys} {name}")),
+                "{keys} ({name}) is missing on 80x24"
+            );
+        }
     }
 
     #[test]
     fn help_is_centered_above_the_input() {
         let mut app = App::new();
         app.keys("?");
-        let buffer = render(&app, 80, 40);
+        let buffer = render(&mut app, 80, 40);
         let rows = lines(&buffer);
         let top = rows
             .iter()
@@ -1969,17 +2027,29 @@ mod tests {
             .expect("input");
         let above = top;
         let below = prompt - bottom - 1;
-        assert_eq!(above, below, "equal rows above the box and above the input");
+        assert!(
+            below.abs_diff(above) <= 1,
+            "rows above the box and above the input differ by more than one"
+        );
+        assert!(
+            below >= above,
+            "an odd leftover row sits between the box and the input"
+        );
         assert!(prompt > bottom, "the box stays above the input");
 
         let help_left = col(&rows[top], '┌');
         let help_right = col(&rows[top], '┐');
         let input_left = col(&rows[prompt], '╭');
         let input_right = col(&rows[prompt], '╮');
-        assert_eq!(
-            help_left - input_left,
-            input_right - help_right,
+        let left_gap = help_left - input_left;
+        let right_gap = input_right - help_right;
+        assert!(
+            right_gap.abs_diff(left_gap) <= 1,
             "the box is centered on the input"
+        );
+        assert!(
+            right_gap >= left_gap,
+            "an odd leftover column sits on the right"
         );
     }
 
@@ -1987,9 +2057,9 @@ mod tests {
     fn help_shows_the_shift_tab_label() {
         let mut app = App::new();
         app.keys("?");
-        let text = screen(&app, 90, 40);
+        let text = screen(&mut app, 90, 40);
         assert!(text.contains("S-Tab"));
-        assert!(text.contains("fractions"));
+        assert!(text.contains("undo"));
         assert!(!text.contains("TAB"));
     }
 
@@ -1997,14 +2067,14 @@ mod tests {
     fn command_reference_searches() {
         let mut app = App::new();
         app.keys("??");
-        let text = screen(&app, 80, 30);
+        let text = screen(&mut app, 80, 30);
         assert!(text.contains("Commands"));
         assert!(text.contains("type to search"));
         assert!(text.contains("duplicates the top"));
         assert!(!app.should_quit());
 
         app.press(Key::Down);
-        let text = screen(&app, 80, 30);
+        let text = screen(&mut app, 80, 30);
         assert!(text.contains("erases the last typed character"));
         app.press(Key::Up);
         assert_eq!(app.docs_cursor(), 0);
@@ -2012,7 +2082,7 @@ mod tests {
         app.keys("isqrt");
         assert!(!app.should_quit());
         assert_eq!(app.docs_query(), "isqrt");
-        let text = screen(&app, 80, 30);
+        let text = screen(&mut app, 80, 30);
         assert!(text.contains("integer square root"));
         assert!(text.contains("10 f Q is 3"));
         assert!(text.contains("1/1"));
@@ -2020,7 +2090,7 @@ mod tests {
         assert!(!text.contains("Shortcuts"));
 
         app.keys("\u{7f}\u{7f}\u{7f}\u{7f}\u{7f}zzz");
-        let text = screen(&app, 80, 30);
+        let text = screen(&mut app, 80, 30);
         assert!(text.contains("no match"));
 
         app.press(Key::Esc);
@@ -2030,25 +2100,60 @@ mod tests {
         app.keys("???");
         assert!(app.help_open());
         assert!(!app.docs_open());
-        let text = screen(&app, 80, 30);
+        let text = screen(&mut app, 80, 30);
         assert!(text.contains("Shortcuts"));
         assert!(text.contains("? for a description"));
     }
 
     #[test]
-    fn help_uses_four_columns_when_wide() {
+    fn shortcut_list_pages_in_three_columns() {
         let mut app = App::new();
         app.keys("?");
-        let rows = lines(&render(&app, 90, 24));
+        let rows = lines(&render(&mut app, 90, 40));
+        assert!(rows.iter().any(|row| row.contains("1/2")));
         assert!(
-            rows.iter().any(|row| {
-                row.contains("push")
-                    && row.contains("add")
-                    && row.contains("sin")
-                    && row.contains("prec")
-            }),
-            "the four topic columns share a row"
+            rows.iter()
+                .any(|row| { row.contains("ret") && row.contains("sqrt") && row.contains("mod") }),
+            "three columns share the first row"
         );
+        let stirling1 = rows
+            .iter()
+            .position(|row| row.contains("stirling1"))
+            .unwrap();
+        let stirling2 = rows
+            .iter()
+            .position(|row| row.contains("stirling2"))
+            .unwrap();
+        assert_eq!(stirling2, stirling1 + 1, "Stirling numbers stay together");
+        let stirling = rows.iter().find(|row| row.contains("stirling2")).unwrap();
+        let label_end = stirling.find("stirling2").unwrap() + "stirling2".len();
+        let border = stirling.rfind('│').unwrap();
+        assert_eq!(&stirling[label_end..border], "  ");
+        assert!(rows.iter().any(|row| row.contains("tab next")));
+        let footer = rows.iter().find(|row| row.contains("esc close")).unwrap();
+        assert!(!footer.contains("quit"));
+        assert!(rows.iter().any(|row| row.contains("q:quit")));
+        assert!(app.help_open());
+
+        app.press(Key::Tab);
+        assert!(app.help_open());
+        let rows = lines(&render(&mut app, 90, 40));
+        assert!(rows.iter().any(|row| row.contains("2/2")));
+        assert!(rows.iter().any(|row| row.contains("antilog")));
+        assert!(rows.iter().any(|row| row.contains("fractions")));
+
+        app.press(Key::ShiftTab);
+        let text = screen(&mut app, 90, 40);
+        assert!(text.contains("1/2"));
+        assert!(text.contains("undo"));
+
+        app.press(Key::ShiftTab);
+        let text = screen(&mut app, 90, 40);
+        assert!(text.contains("2/2"));
+
+        app.press(Key::Char('x'));
+        assert!(!app.help_open());
+        assert!(!app.should_quit());
     }
 
     #[test]
@@ -2058,7 +2163,7 @@ mod tests {
             app.keys(&format!("1\nss{name}\n"));
         }
         app.keys("11\nssk\nsl");
-        let rows = lines(&render(&app, 64, 20));
+        let rows = lines(&render(&mut app, 64, 20));
         assert!(
             rows.iter()
                 .any(|row| row.contains("a:") && row.contains("f:")),
@@ -2072,7 +2177,7 @@ mod tests {
         assert!(rows.iter().all(|row| !row.contains("ret:push")));
 
         app.press(Key::Tab);
-        let rows = lines(&render(&app, 64, 20));
+        let rows = lines(&render(&mut app, 64, 20));
         assert!(rows.iter().any(|row| row.contains("k:")));
         assert!(rows.iter().any(|row| row.contains("2/2")));
         assert!(rows.iter().any(|row| row.contains("tab:next")));
@@ -2081,7 +2186,7 @@ mod tests {
 
         let mut app = App::new();
         app.keys("2\n100^ssa\nsl");
-        let rows = lines(&render(&app, 64, 20));
+        let rows = lines(&render(&mut app, 64, 20));
         assert!(
             rows.iter()
                 .any(|row| row.contains("a:") && row.contains("..")),
@@ -2090,7 +2195,7 @@ mod tests {
 
         let mut app = App::new();
         app.keys("sl");
-        let rows = lines(&render(&app, 64, 20));
+        let rows = lines(&render(&mut app, 64, 20));
         assert!(rows.iter().any(|row| row.contains("nothing stored")));
         assert!(rows.iter().all(|row| !row.contains("tab:next")));
     }
@@ -2099,7 +2204,7 @@ mod tests {
     fn constants_list_is_two_columns() {
         let mut app = App::new();
         app.keys("K");
-        let rows = lines(&render(&app, 64, 24));
+        let rows = lines(&render(&mut app, 64, 24));
         assert!(rows.iter().any(|row| row.contains("Constants")));
         assert!(rows.iter().any(|row| row.contains("1/3")));
         assert!(rows.iter().any(|row| row.contains("0-F inserts")));
@@ -2115,7 +2220,7 @@ mod tests {
 
         app.press(Key::Tab);
         app.press(Key::Tab);
-        let rows = lines(&render(&app, 64, 24));
+        let rows = lines(&render(&mut app, 64, 24));
         assert!(rows.iter().any(|row| row.contains("3/3")));
         assert!(rows.iter().any(|row| row.contains("tab:next")));
         assert!(rows.iter().any(|row| row.contains("S-Tab:prev")));

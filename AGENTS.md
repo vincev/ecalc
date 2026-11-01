@@ -73,6 +73,7 @@ k g k l   gcd, lcm of the top two (integers or fractions)
 k E       extended gcd: y on top, x under it; pushes a, b, g with g on top and a*x + b*y = g
 k i       modular inverse: m on top, result b with 0 <= b < m and a*b ≡ 1 (mod m)
 k p       prime test; the number stays on the stack
+k f       prime factors, smallest first. `2023 k f` leaves `7`, `17`, `17`. `* *` rebuilds `2023`
 k c       choose, M on top: N! / (M! (N-M)!)
 H k c     permutations: N! / (N-M)!
 k s       Stirling number of the first kind, signed: s(N, M), M on top
@@ -99,6 +100,7 @@ s 0-9     store into q0–q9; t 0-9 pops into one; r 0-9 recalls one
 u         undo           C-r redo
           undo restores the stack and the variables
 q ? Esc   quit, shortcut list, cancel entry or prefixes
+?         shortcut pages. Tab and S-Tab turn the page and wrap. q quits
 ? ?       command pages. Type to search. Esc closes. ? returns to the list.
 ```
 
@@ -121,6 +123,7 @@ Tutorial shapes live in `src/app.rs`. Parser cases are in `src/parse.rs`. The sc
 - `36#q` = `26`, `36#n` = `23`, `36#u` = `30` (and `q` does not quit there)
 - `45.3 F` = `45`, `-45.3 F` = `-46`
 - `4 2 k s` = `11`, `4 2 H k s` = `7`, and `10 5 H k s` = `42525`
+- `2023 k f` leaves `7`, `17`, `17`, and `* *` is `2023`
 - `K` then `0` = `299792458` (speed of light)
 - `ec -e '2 20 ^ d g'` = `1,048,576`
 - last `K` page, `8` = `5.9722e24` (Earth mass), `A` = `7.346e22` (Moon mass), and `F` = `149597870700` (AU)
@@ -135,14 +138,14 @@ Algebraic entry (`'`), formulas, vectors, matrices, units, dates, HMS, the trail
 
 Working RPN calculator. `cargo test` is green (float, value, parser, keys, and a headless screen test). `cargo build` produces the ratatui UI. That UI was checked with `TestBackend`, not by typing in a live terminal.
 
-The screen keeps the terminal's own background. A dark terminal uses the GrokNight foregrounds; a light one uses dark text. On Unix, startup asks for the background with OSC 11 and treats no answer as dark. Windows keeps the dark foregrounds. The headless screen test still paints the GrokNight canvas (`#141414`). The live screen has a rounded `❯` prompt with the mode on its bottom border, and a shortcut bar (`ret:push`, bold key, muted label). Content sits two columns in from each edge. Under the prompt is a blank row, then the shortcuts, then a blank row. The typed text sits one column inside the prompt border. `?` opens a Shortcuts box centered on the input's width, in the space above the prompt: the same number of rows sits above the frame as between the frame and the input. Gray `┌┐` frame, bold title on the top edge, `[x]` at the top right, and `esc close` centered inside the bottom. Bindings sit in four columns (fewer when the terminal is narrow), bold key and muted label. `?` again opens Commands, in the same frame. The top row is a search field. Several matches show a short list and the selected page under a rule. One match shows only that page. Up and Down, or Tab and Shift-Tab, move and wrap. Backspace edits the search. Esc closes. `?` returns to the shortcut list. `q` is a search letter there.
+The screen keeps the terminal's own background. A dark terminal uses the GrokNight foregrounds; a light one uses dark text. On Unix, startup asks for the background with OSC 11 and treats no answer as dark. Windows keeps the dark foregrounds. The headless screen test still paints the GrokNight canvas (`#141414`). The live screen has a rounded `❯` prompt with the mode on its bottom border, and a shortcut bar (`ret:push`, bold key, muted label). Content sits two columns in from each edge. Under the prompt is a blank row, then the shortcuts, then a blank row. The typed text sits one column inside the prompt border. `?` opens a Shortcuts box centered on the input's width, in the space above the prompt: the same number of rows sits above the frame as between the frame and the input, and an odd leftover row sits between the frame and the input. Gray `┌┐` frame, bold title on the top edge, `[x]` at the top right, and `1/2` on the note row when another page exists. Bindings fill down up to three columns of up to 15 rows (a narrow or short terminal uses fewer), bold key and muted label. Tab and Shift-Tab turn the page and wrap. The footer shows `tab next`, `S-Tab prev`, `? docs`, and `esc close`. `q quit` stays on the window bar. `?` again opens Commands, in the same frame. The top row is a search field. Several matches show a short list and the selected page under a rule. One match shows only that page. Up and Down, or Tab and Shift-Tab, move and wrap. Backspace edits the search. Esc closes. `?` returns to the shortcut list. `q` is a search letter there.
 
 Entry and stack details that are easy to get wrong:
 
 - Keep `num-bigint` at 0.4.8 (`num-rational` 0.4 needs that major).
 - `DecFloat::from_decimal(mantissa, exponent, prec)` builds a typed decimal. The stored precision is the number of significant digits typed, capped at the current precision.
 - A typed exponent, decimal or radix, outside ±1000000 is overflow. `1e1000000` and `1e-1000000` still parse. An exponent that does not fit in a 64-bit integer is a bad exponent.
-- `q` quits when nothing is being typed. While radix or word size is being typed, `q` cancels that prompt and leaves the stack. A variable name can contain `q`. `q` does not quit while `K`, `s l`, or the command reference is open. `p` is not a prompt: it pops an integer and sets the precision.
+- `q` quits when nothing is being typed. While radix or word size is being typed, `q` cancels that prompt and leaves the stack. A variable name can contain `q`. `q` does not quit while `K`, `s l`, or the command reference is open. The shortcut list pages with Tab and Shift-Tab, and `q` still quits there. `p` is not a prompt: it pops an integer and sets the precision.
 - Do not polish add, sub, mul, or div. `(1/3)*3` can display as `0.999…`, and `sqrt(2)^2` as `1.999…`.
 - `L` flips inverse in `app.rs`, then uses the exp/ln family. `E` does not flip. `push` and a successful duplicate do not clear `I` or `H`.
 - `n` while typing toggles a leading `_`. `+` and `-` while typing are exponent signs, or digits inside an unclosed `(…)`. Otherwise they add and subtract. Space inside an unparsed `(…` inserts a space. `:` while typing is a fraction; on an empty entry it is fraction division.
@@ -151,6 +154,7 @@ Entry and stack details that are easy to get wrong:
 - `F` is floor toward minus infinity and returns an exact integer. An integer is unchanged. A fraction or a decimal float is exact (`-4:3` is `-2`). A complex number is an error. `f` is still the function prefix.
 - `k s` is the signed Stirling number of the first kind `s(n, m)`, and `H k s` is the second kind `S(n, m)`, with `m` on top. Both arguments are nonnegative integers, and an exact integer float is accepted. `m > n` is `0`, and a negative or fractional argument is an error. The recurrence table is capped: `n` above 2000 is `overflow`, though `m` of `0`, `1`, or `n` is answered directly.
 - `k i` is the modular inverse of `a` modulo `m`, with `m` on top. The result is the integer `b` with `0 <= b < m` and `a*b ≡ 1 (mod m)`. `3 7 k i` is `5`. Both values are integers, and an exact integer float is accepted. A non-positive modulus says `modulus must be positive`. If the gcd is not 1 the stack stays and the message is `no modular inverse`. Emacs Calc gets the same `b` as the reciprocal of a modulo form.
+- `k f` replaces the top integer with its prime factors, smallest first, so the largest is on top. `2023 k f` leaves `7`, then `17`, then `17`, and `* *` is `2023`. A negative number leads with `-1`. `0` and `1` stay as they are. An exact integer float is accepted. Trial division uses Calc's prime table through `5003`. A cofactor that cannot be proven prime stays in one piece, the stack still changes, and the message is `may not be fully factored`.
 - `K` opens the constants, sixteen to a page, eight down each column. `0`–`9` and `a`–`f` insert that slot and close. Tab and Shift-Tab turn the page and wrap around. The last page has the remaining physics constants, then Earth mass (`Me`), Earth equatorial radius (`Re`, `6378137` m), Moon mass (`Mm`, `7.346e22` kg), Moon equatorial radius (`Rm`, `1738100` m), the mean Earth-Moon distance (`dm`, `384400000` m), Sun mass (`Ms`), Sun radius (`Rs`, `695700` km written in metres), and the astronomical unit (`AU`, `149597870700` m). Every slot is filled. A missing slot would say "no constant" and stay open. Esc closes. `q` does not quit while it is open. The physics numbers are the HP 35s CODATA 1998 values. The planetary numbers are the NASA Earth, Sun, and Moon fact sheets, in kilograms and metres. An integer literal stays an integer (`299792458`, `101325`, `6378137`, `149597870700`, `1738100`). The unit is only a label in the menu and the message (`c  m/s`, `Me  kg`). `e` is not listed; `H P` pushes it. `K` is still a digit while a radix literal above 20 is being typed.
 - `atan2` of a value on an axis is an exact right angle (`0`, `±90`, `180` in degrees), including `atan2(0, 0) = 0` and `atan2(0, negative) = 180`.
 - Undo stores the stack and the variables, cap 100. Mode changes are not undoable. A new stack change clears redo. `s s` stores without popping, `s t` pops into the variable, `s r` recalls, and `s u` unstores. A digit selects `q0`–`q9` (`s 3`, `t 3`, `r 3`). A name is finished with RET. `s l` lists them, five per column. Tab and Shift-Tab page and wrap around. A letter recalls that one-letter name, and a digit recalls `q0`–`q9`. Longer names are visible there and still recalled with `s r`.

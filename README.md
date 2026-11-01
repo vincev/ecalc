@@ -62,7 +62,7 @@ prints the message on stderr and exits 1.
   start in degrees.
 - Logarithms, exponentials, factorial, combinations, permutations, and
   Stirling numbers of the first and second kind.
-- Gcd, lcm, the extended gcd, a modular inverse, and a prime test.
+- Gcd, lcm, the extended gcd, a modular inverse, a prime test, and prime factors.
 - Stored variables, and the HP 35s physics constants, plus Earth, the Moon,
   the Sun, and the astronomical unit.
 - Display and entry in any radix from 2 to 36.
