@@ -775,6 +775,7 @@ impl App {
             (Prefix::K, 'i') => self.run(Engine::mod_inverse),
             (Prefix::K, 'p') => self.run(Engine::prime_test),
             (Prefix::K, 'f') => self.run(Engine::prime_factors),
+            (Prefix::K, 't') => self.run(Engine::totient),
             (Prefix::K, 'c') => {
                 if self.hyperbolic {
                     self.run(Engine::perm);
@@ -1606,6 +1607,24 @@ mod tests {
         assert_eq!(top("10\n3\nkc"), "120");
         assert_eq!(top("5\n2\nHkc"), "20");
         assert_eq!(top("_3\n2\nkc"), "6");
+    }
+
+    #[test]
+    fn totient_follows_calc() {
+        assert_eq!(eval("12 k t").as_deref(), Ok("4"));
+        assert_eq!(eval("2023. k t").as_deref(), Ok("1632"));
+        assert_eq!(eval("1000000007 k t").as_deref(), Ok("1000000006"));
+        assert_eq!(eval("0 k t").as_deref(), Ok("0"));
+        let mut app = App::new();
+        app.keys("_12\nkt");
+        assert_eq!(
+            app.engine().message(),
+            "totient needs a nonnegative integer"
+        );
+        assert_eq!(app.engine().stack_lines(), ["-12"]);
+        let mut app = App::new();
+        app.keys("3M7\nkt");
+        assert_eq!(app.engine().message(), "not for modulo forms");
     }
 
     #[test]

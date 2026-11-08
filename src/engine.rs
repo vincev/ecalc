@@ -360,6 +360,11 @@ impl Engine {
         }
     }
 
+    /// `k t`. Euler's totient of the top integer.
+    pub fn totient(&mut self) {
+        self.unary(|v, _| comb::totient(v));
+    }
+
     /// `k f`. Replace the top integer with its prime factors, smallest first.
     /// `2023` becomes `7`, `17`, `17`, with `17` on top.
     pub fn prime_factors(&mut self) {

@@ -277,6 +277,34 @@ pub fn prime_factors(v: &Value) -> Result<(Vec<BigInt>, bool), CalcError> {
     Ok(factor_integer(n))
 }
 
+/// Euler's totient: how many of `1..=n` are coprime to `n`. Follows Calc's
+/// `calcFunc-totient`: `0` and `1` are themselves, and a negative number is
+/// an error. The answer needs every prime factor, so a cofactor that may
+/// still be composite is an error instead of a wrong count.
+pub fn totient(v: &Value) -> Result<Value, CalcError> {
+    const NEEDS: CalcError = CalcError::Domain("totient needs a nonnegative integer");
+    let n = crate::value::exact_int(v).ok_or(NEEDS)?;
+    if n.is_negative() {
+        return Err(NEEDS);
+    }
+    if n < BigInt::from(2) {
+        return Ok(Value::from_int(n));
+    }
+    let (factors, complete) = factor_natural(n.clone());
+    if !complete {
+        return Err(CalcError::Domain("number too big to factor"));
+    }
+    let mut phi = n;
+    let mut last: Option<&BigInt> = None;
+    for p in &factors {
+        if last != Some(p) {
+            phi = phi / p * (p - 1u32);
+            last = Some(p);
+        }
+    }
+    Ok(Value::from_int(phi))
+}
+
 fn factor_integer(n: BigInt) -> (Vec<BigInt>, bool) {
     if n.is_negative() {
         if n == BigInt::from(-1) {
@@ -1097,6 +1125,37 @@ mod tests {
             prime_message(&Value::from_int(mersenne)).unwrap(),
             "probably prime"
         );
+    }
+
+    #[test]
+    fn totient_counts_coprimes() {
+        let phi = |n: i64| totient(&Value::from_int(BigInt::from(n))).map(|v| v.to_string());
+        let cases = [
+            (0, "0"),
+            (1, "1"),
+            (2, "1"),
+            (9, "6"),
+            (12, "4"),
+            (36, "12"),
+            (2023, "1632"),
+            (1000000007, "1000000006"),
+        ];
+        for (n, want) in cases {
+            assert_eq!(phi(n).as_deref(), Ok(want), "phi({n})");
+        }
+        let mersenne = (BigInt::one() << 61u32) - 1u32;
+        assert_eq!(
+            totient(&Value::from_int(mersenne.clone()))
+                .unwrap()
+                .to_string(),
+            (mersenne - 1u32).to_string()
+        );
+        assert!(phi(-12).is_err());
+        let half = Value::Real(Real::Rat(BigRational::new(
+            BigInt::from(3),
+            BigInt::from(2),
+        )));
+        assert!(totient(&half).is_err());
     }
 
     #[test]

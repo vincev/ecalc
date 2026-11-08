@@ -1959,7 +1959,7 @@ mod tests {
         let buffer = render(&mut app, 80, 40);
         let rows = lines(&buffer);
         assert!(rows.iter().any(|row| row.contains("conj")));
-        assert!(rows.iter().any(|row| row.contains("fraction")));
+        assert!(rows.iter().any(|row| row.contains("totient")));
         assert!(rows.iter().any(|row| row.contains("Shortcuts")));
         assert!(rows.iter().any(|row| row.contains("esc close")));
         let frame_y = rows
