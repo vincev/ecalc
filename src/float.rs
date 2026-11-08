@@ -1036,10 +1036,12 @@ fn snap_noise(value: DecFloat, prec: u32) -> DecFloat {
     }
 }
 
-/// Turn a value that is only a rounding speck away from an integer into that
-/// integer. `ln(exp(1))` is the case this is aimed at: the correctly rounded
-/// exponential sits a fraction of an ulp below `e`, and the log comes back as
-/// a string of nines.
+/// Turn a value that is only a guard-digit speck away from an integer into
+/// that integer: Newton's `sqrt(4)` or `81^(1/4)` can stop a few units past
+/// the last digit. The test reads the unrounded value. Judging the rounded
+/// one would also snap a true result one unit below a power of ten, so
+/// `sqrt(0.999999999998)` would come back as `1.` instead of
+/// `0.999999999999`, which Emacs Calc and PARI/GP both give.
 fn snap_close_integer(value: DecFloat, prec: u32) -> DecFloat {
     let rounded = value.round_to(prec);
     if rounded.is_zero() {
@@ -1053,16 +1055,15 @@ fn snap_close_integer(value: DecFloat, prec: u32) -> DecFloat {
     if nearest.is_zero() {
         return rounded;
     }
-    let as_float = DecFloat::from_bigint(&nearest, prec.saturating_add(4));
-    let diff = rounded.sub(&as_float, prec.saturating_add(4));
+    let wide = value.prec().max(prec.saturating_add(4));
+    let diff = value.sub(&DecFloat::from_bigint(&nearest, wide), wide);
     if diff.is_zero() {
         return DecFloat::from_bigint(&nearest, prec);
     }
+    // Within 5 * 10^(scale - prec - 3): three digits past the last one shown.
     let scale = digit_count(&nearest) as i64 - 1;
-    // Half an ulp at this magnitude is 5 * 10^(scale - prec).
-    let half_ulp =
-        DecFloat::from_unnormalized(BigInt::from(5), scale - prec as i64, prec.saturating_add(4));
-    if diff.abs().cmp_val(&half_ulp) == Ordering::Less {
+    let speck = DecFloat::from_unnormalized(BigInt::from(5), scale - prec as i64 - 3, wide);
+    if diff.abs().cmp_val(&speck) == Ordering::Less {
         DecFloat::from_bigint(&nearest, prec)
     } else {
         rounded
@@ -1407,8 +1408,14 @@ mod tests {
 
     #[test]
     fn exp_ln_roundtrip_and_trig() {
+        // At 16 digits e rounds down to 2.718281828459045, and the log of
+        // that is 0.99999999999999991, which PARI/GP rounds the same way.
         let one = DecFloat::one(16);
-        assert_eq!(one.exp(16).unwrap().ln(16).unwrap().to_string(), "1.");
+        assert_eq!(
+            one.exp(16).unwrap().ln(16).unwrap().format_decimal(16),
+            "0.9999999999999999"
+        );
+        assert_eq!(one.exp(12).unwrap().ln(12).unwrap().to_string(), "1.");
         assert_eq!(DecFloat::zero(12).exp(12).unwrap().to_string(), "1.");
         assert_eq!(DecFloat::one(12).ln(12).unwrap().to_string(), "0.");
 
@@ -1532,6 +1539,34 @@ mod tests {
                 .unwrap()
                 .to_string(),
             "-46"
+        );
+    }
+
+    #[test]
+    fn results_below_a_power_of_ten_are_not_snapped_up() {
+        // Emacs Calc and PARI/GP both give these. The old snap judged the
+        // rounded value and turned each into the power of ten above it.
+        assert_eq!(
+            p("0.999999999998", 12).sqrt(12).unwrap().to_string(),
+            "0.999999999999"
+        );
+        assert_eq!(
+            p("99.9999999998", 12).sqrt(12).unwrap().to_string(),
+            "9.99999999999"
+        );
+        assert_eq!(
+            p("-1e-12", 12).exp(12).unwrap().to_string(),
+            "0.999999999999"
+        );
+        assert_eq!(
+            p("1.5e-6", 12).cos(12).unwrap().to_string(),
+            "0.999999999999"
+        );
+        // A guard-digit speck past an exact integer still snaps.
+        assert_eq!(p("81", 12).nth_root(4, 12).unwrap().to_string(), "3.");
+        assert_eq!(
+            p("2", 12).ln(12).unwrap().exp(12).unwrap().to_string(),
+            "2."
         );
     }
 

@@ -2105,10 +2105,12 @@ mod tests {
             let back = ln(&exp_value(&x, &precise).unwrap(), &precise).unwrap();
             // exp(0) is the integer 1, and ln of that is the integer 0.
             // The other results are exact floats, so they keep the point.
-            let expect = if n == 0 {
-                "0".to_string()
-            } else {
-                format!("{n}.")
+            // At 16 digits e rounds down, so ln of it is just below 1, as
+            // PARI/GP agrees.
+            let expect = match n {
+                0 => "0".to_string(),
+                1 => "0.9999999999999999".to_string(),
+                _ => format!("{n}."),
             };
             assert_eq!(back.to_string(), expect, "ln(exp({n}))");
         }
