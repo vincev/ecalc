@@ -121,7 +121,9 @@ pub fn factorial(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         return result.map(|f| Value::real(Real::Float(f)));
     }
     match v {
-        Value::Complex(_, _) => Err(CalcError::Domain("factorial needs a real number")),
+        Value::Complex(_, _) | Value::Mod(_, _) => {
+            Err(CalcError::Domain("factorial needs a real number"))
+        }
         Value::Real(Real::Int(n)) => Ok(Value::from_int(factorial_int(n)?)),
         Value::Real(Real::Rat(r)) if r.denom().is_one() => {
             Ok(Value::from_int(factorial_int(r.numer())?))
@@ -611,7 +613,7 @@ fn strict_integer(v: &Value) -> Option<BigInt> {
 fn as_real_float(v: &Value, prec: u32, msg: &'static str) -> Result<DecFloat, CalcError> {
     match v {
         Value::Real(r) => to_float(r, prec),
-        Value::Complex(_, _) => Err(CalcError::Domain(msg)),
+        Value::Complex(_, _) | Value::Mod(_, _) => Err(CalcError::Domain(msg)),
     }
 }
 
@@ -822,7 +824,7 @@ fn as_rational(v: &Value, msg: &'static str) -> Result<BigRational, CalcError> {
         Value::Real(Real::Float(f)) => Ok(BigRational::from(
             f.to_integer_exact().ok_or(CalcError::Domain(msg))?,
         )),
-        Value::Complex(_, _) => Err(CalcError::Domain(msg)),
+        Value::Complex(_, _) | Value::Mod(_, _) => Err(CalcError::Domain(msg)),
     }
 }
 

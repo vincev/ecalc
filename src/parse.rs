@@ -9,6 +9,9 @@
 //!
 //! A number with no `#` is always decimal. `16#FF` is hex in any radix, and
 //! `#FF` uses the current one. `radix##digits` is a two's-complement word.
+//!
+//! `a mod m` is a modulo form. `M` while typing inserts ` mod `. Both sides
+//! are integers and the modulus is positive.
 
 use crate::error::CalcError;
 use crate::float::DecFloat;
@@ -21,11 +24,16 @@ use num_traits::{Num, One, Zero};
 
 /// Largest absolute exponent accepted on entry. The same cap as a radix power.
 const MAX_EXPONENT: i64 = 1_000_000;
+/// What `M` inserts while typing, and what separates a modulo form.
+const MOD_SEPARATOR: &str = " mod ";
 
 pub fn parse_value(input: &str, mode: &Mode) -> Result<Value, CalcError> {
     let s = input.trim();
     if s.is_empty() {
         return Err(bad("empty"));
+    }
+    if let Some((residue, modulus)) = s.split_once(MOD_SEPARATOR) {
+        return parse_mod(residue, modulus, mode);
     }
     if let Some((negative, rest)) = sign_before_complex(s) {
         let v = parse_complex(rest, mode)?;
@@ -35,6 +43,14 @@ pub fn parse_value(input: &str, mode: &Mode) -> Result<Value, CalcError> {
         return parse_complex(s, mode);
     }
     Ok(Value::real(parse_real(s, mode)?))
+}
+
+/// `a mod m`. Each side is any integer literal, so `16#FF mod 16#100` works.
+fn parse_mod(residue: &str, modulus: &str, mode: &Mode) -> Result<Value, CalcError> {
+    let integer = |text: &str| -> Result<BigInt, CalcError> {
+        value::mod_integer(&Value::real(parse_real(text, mode)?))
+    };
+    Value::make_mod(integer(residue)?, integer(modulus)?)
 }
 
 fn sign_before_complex(s: &str) -> Option<(bool, &str)> {
@@ -258,7 +274,7 @@ fn parse_radix_fraction(
     }
     Ok(match Value::from_rational(BigRational::new(numer, denom)) {
         Value::Real(real) => real,
-        Value::Complex(_, _) => unreachable!("a rational is real"),
+        Value::Complex(_, _) | Value::Mod(_, _) => unreachable!("a rational is real"),
     })
 }
 
@@ -358,7 +374,7 @@ fn parse_fraction(body: &str, negative: bool) -> Result<Real, CalcError> {
     let ratio = BigRational::new(numer, denom);
     Ok(match Value::from_rational(ratio) {
         Value::Real(real) => real,
-        Value::Complex(_, _) => unreachable!("a rational is real"),
+        Value::Complex(_, _) | Value::Mod(_, _) => unreachable!("a rational is real"),
     })
 }
 
@@ -475,8 +491,41 @@ impl Entry {
         self.text.clear();
     }
 
+    /// ` mod ` goes as one piece, back to the residue.
     pub fn pop(&mut self) {
-        self.text.pop();
+        if self.awaits_modulus() {
+            self.text.truncate(self.text.len() - MOD_SEPARATOR.len());
+        } else {
+            self.text.pop();
+        }
+    }
+
+    /// `M` after an integer starts the modulus. The caller tries it after
+    /// [`Self::push`], so `M` stays a digit of a radix literal above 22.
+    pub fn start_mod(&mut self, mode: &Mode) -> bool {
+        let integer = !self.text.contains(MOD_SEPARATOR)
+            && !self.text.contains('(')
+            && parse_value(&self.text, mode).is_ok_and(|v| {
+                // A whole number too large to expand still starts a form, so
+                // RET reports the overflow.
+                matches!(value::mod_integer(&v), Ok(_) | Err(CalcError::Overflow))
+            });
+        if integer {
+            self.text.push_str(MOD_SEPARATOR);
+        }
+        integer
+    }
+
+    /// ` mod ` was just typed and the modulus is still empty.
+    pub fn awaits_modulus(&self) -> bool {
+        self.text.ends_with(MOD_SEPARATOR)
+    }
+
+    /// Calc's second `M`: fill in the previous modulus.
+    pub fn fill_modulus(&mut self, modulus: &str) {
+        if self.awaits_modulus() {
+            self.text.push_str(modulus);
+        }
     }
 
     /// `q` is a digit of a radix literal above 20, so it must not quit.
@@ -504,6 +553,10 @@ impl Entry {
         if self.text.is_empty() {
             return false;
         }
+        // The modulus is still to come. The space is not kept.
+        if self.awaits_modulus() {
+            return true;
+        }
         let open = self.text.contains('(');
         let parsed = parse_value(&self.text, mode).is_ok();
         if open && !parsed {
@@ -518,9 +571,10 @@ impl Entry {
         parse_value(&self.text, mode)
     }
 
-    /// More `(` than `)`. The next script word can finish the value.
+    /// More `(` than `)`, or a modulus still to type. The next script word
+    /// can finish the value.
     pub fn is_incomplete(&self) -> bool {
-        unclosed_paren(&self.text)
+        unclosed_paren(&self.text) || self.awaits_modulus()
     }
 
     /// `n` while typing toggles a leading `_` and does not commit.
@@ -552,6 +606,10 @@ fn is_entry_start(c: char) -> bool {
 /// `+` and `-` stay in the entry only as an exponent sign, or inside `(…)`.
 /// After `#`, letters that are digits of that radix stay in the entry too.
 fn is_entry_continuation(c: char, entry: &str, current_radix: u32) -> bool {
+    // A modulus is an integer, never part of a complex value.
+    if matches!(c, '(' | ')' | ',') && entry.contains(MOD_SEPARATOR) {
+        return false;
+    }
     if matches!(c, ')' | ',') && unclosed_paren(entry) {
         return true;
     }
@@ -572,8 +630,12 @@ fn ends_exponent(token: &str) -> bool {
     token.ends_with('e') || token.ends_with('E') || token.ends_with('^')
 }
 
-/// The number currently being typed, after the last `(`, or `,` of a complex.
+/// The number currently being typed: after the last `(`, the `,` of a
+/// complex, or the ` mod ` of a modulo form.
 fn current_token(entry: &str) -> &str {
+    if let Some((_, modulus)) = entry.split_once(MOD_SEPARATOR) {
+        return modulus.trim();
+    }
     let mut depth = 0i32;
     let mut start = 0usize;
     for (i, c) in entry.char_indices() {
@@ -765,6 +827,31 @@ mod tests {
         assert_eq!(p("_(3, 4)"), "(-3, -4)");
         assert_eq!(p("(1:2, 3:4)"), "(1:2, 3:4)");
         assert_eq!(p("(1.5, _2)"), "(1.5, -2)");
+    }
+
+    #[test]
+    fn modulo_forms() {
+        assert_eq!(p("3 mod 7"), "3 mod 7");
+        assert_eq!(p("10 mod 7"), "3 mod 7");
+        assert_eq!(p("_3 mod 7"), "4 mod 7");
+        assert_eq!(p("3. mod 7"), "3 mod 7");
+        assert_eq!(p("16#FF mod 16#100"), "255 mod 256");
+        let mode = Mode::default();
+        for entry in ["3 mod 0", "3 mod _7"] {
+            assert_eq!(
+                parse_value(entry, &mode).unwrap_err().to_string(),
+                "modulus must be positive",
+                "{entry}"
+            );
+        }
+        for entry in ["3.5 mod 7", "3 mod 7.5", "1:2 mod 7"] {
+            assert_eq!(
+                parse_value(entry, &mode).unwrap_err().to_string(),
+                "modulo forms need integers",
+                "{entry}"
+            );
+        }
+        assert!(parse_value("3 mod ", &mode).is_err());
     }
 
     #[test]

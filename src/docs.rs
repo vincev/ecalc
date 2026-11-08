@@ -312,6 +312,16 @@ const BINDINGS: &[Binding] = &[
         catalog: true,
     },
     Binding {
+        keys: "M",
+        name: "modform",
+        summary: "modulo form",
+        body: "While typing an integer, M starts its modulus, so 3M1000 enters 3 mod 1000. A second M fills in the previous modulus. Both sides are integers, the modulus is positive, and the value is kept in 0 <= a < m. + - * / ^, n, &, and I Q work with an integer or a form of the same modulus. / multiplies by the modular inverse. ^ uses fast powering, so 3M1000 567 ^ is 587 mod 1000, and a negative power inverts first. Other operations say not for modulo forms.",
+        help: None,
+        bar: None,
+        mode: None,
+        catalog: true,
+    },
+    Binding {
         keys: "!",
         name: "fact",
         summary: "factorial",
@@ -1126,6 +1136,12 @@ mod tests {
         let hits = search("stirling");
         assert_eq!(hits[0].name, "stirling1");
         assert!(hits.iter().any(|entry| entry.name == "stirling2"));
+    }
+
+    #[test]
+    fn modulo_forms_are_searchable() {
+        assert_eq!(search("modform")[0].keys, "M");
+        assert!(search("modulo").iter().any(|entry| entry.keys == "M"));
     }
 
     #[test]

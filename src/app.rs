@@ -12,6 +12,7 @@ use crate::engine::{Engine, Status};
 use crate::error::{CalcError, EvalError};
 use crate::parse::Entry;
 use crate::radix;
+use crate::value::Value;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
@@ -101,6 +102,8 @@ pub struct App {
     inverse: bool,
     /// One-shot hyperbolic prefix.
     hyperbolic: bool,
+    /// Modulus of the last modulo form typed. `M M` fills it in, as in Calc.
+    last_modulus: Option<String>,
     quit: bool,
 }
 
@@ -122,6 +125,7 @@ impl App {
             help_rows: crate::docs::HELP_ROWS,
             inverse: false,
             hyperbolic: false,
+            last_modulus: None,
             quit: false,
         }
     }
@@ -834,6 +838,9 @@ impl App {
         if self.entry.push(c, self.engine.mode().radix) {
             return;
         }
+        if c == 'M' && self.press_mod() {
+            return;
+        }
         if c == 'u' {
             self.run(Engine::undo);
             return;
@@ -849,6 +856,34 @@ impl App {
         if self.commit_entry() {
             self.dispatch(c);
         }
+    }
+
+    /// `M` while typing an integer starts its modulus. A second `M` fills in
+    /// the previous modulus. Anything else falls through to the command keys.
+    fn press_mod(&mut self) -> bool {
+        if self.entry.awaits_modulus() {
+            match self.last_modulus.clone() {
+                Some(modulus) => self.entry.fill_modulus(&modulus),
+                None => self.run(|engine| {
+                    engine.fail(CalcError::Domain("no previous modulus"));
+                }),
+            }
+            return true;
+        }
+        if self.entry.start_mod(self.engine.mode()) {
+            return true;
+        }
+        if self.entry.is_empty() {
+            self.run(|engine| engine.fail(CalcError::Domain("type an integer before M")));
+            return true;
+        }
+        // `3.5 M` keeps the entry and says why, instead of committing 3.5
+        // and reporting an unknown key. A finished form falls through.
+        if !self.entry.as_str().contains(" mod ") {
+            self.run(|engine| engine.fail(CalcError::Domain("modulo forms need integers")));
+            return true;
+        }
+        false
     }
 
     fn press_space(&mut self) {
@@ -884,6 +919,9 @@ impl App {
         }
         match self.entry.parse(self.engine.mode()) {
             Ok(value) => {
+                if let Value::Mod(_, modulus) = &value {
+                    self.last_modulus = Some(modulus.to_string());
+                }
                 self.engine.push(value);
                 self.entry.clear();
                 true
@@ -1967,6 +2005,108 @@ mod tests {
         assert_eq!(app.engine().message(), "word size 32");
         app.keys("16##FD\n");
         assert_eq!(app.top_string().as_deref(), Some("253"));
+    }
+
+    #[test]
+    fn modulo_forms_follow_calc() {
+        // Calc: `3 M 1000 RET 567 ^` is `587 mod 1000`. PARI/GP agrees.
+        assert_eq!(top("3M1000\n567^"), "587 mod 1000");
+        assert_eq!(top("_3M7\n"), "4 mod 7");
+        assert_eq!(top("3M7\n4+"), "0 mod 7");
+        assert_eq!(top("3M7\n4-"), "6 mod 7");
+        assert_eq!(top("3M7\n4M7\n*"), "5 mod 7");
+        assert_eq!(top("1\n2\n3M7\n*"), "6 mod 7");
+        // Division multiplies by the modular inverse.
+        assert_eq!(top("3M7\n2/"), "5 mod 7");
+        assert_eq!(top("3M7\n&"), "5 mod 7");
+        assert_eq!(top("3M7\nn"), "4 mod 7");
+        assert_eq!(top("3M7\nIQ"), "2 mod 7");
+        // A negative power inverts first. A form as the exponent uses its
+        // residue, as Calc does.
+        assert_eq!(top("2M7\n1n^"), "4 mod 7");
+        assert_eq!(top("2M7\n3M7\n^"), "1 mod 7");
+        assert_eq!(top("2\n3M7\n^"), "1 mod 7");
+        assert_eq!(top("0M7\n0^"), "1 mod 7");
+        assert_eq!(top("3M1\n"), "0 mod 1");
+        // The exponent can be far too large to expand.
+        assert_eq!(
+            top("123456789M1000000007\n10\n30^^"),
+            "493444103 mod 1000000007"
+        );
+        // Either side can be a radix literal, and display follows the radix.
+        assert_eq!(top("16#FFM16#100\n"), "255 mod 256");
+        assert_eq!(top("3M7\nd6"), "16#3 mod 16#7");
+        // `M` is a digit of a radix literal above 22.
+        assert_eq!(top("36#mM7\n"), "29311");
+    }
+
+    #[test]
+    fn modulo_form_entry_and_errors() {
+        let mut app = App::new();
+        app.keys("3M");
+        assert_eq!(app.entry.as_str(), "3 mod ");
+        // DEL removes ` mod ` in one piece, and a space waits for the modulus.
+        app.keys("\u{7f}");
+        assert_eq!(app.entry.as_str(), "3");
+        app.keys("M 7");
+        assert_eq!(app.entry.as_str(), "3 mod 7");
+        app.keys("\n");
+        // A second `M` fills in the previous modulus.
+        app.keys("5MM\n+");
+        assert_eq!(app.top_string().as_deref(), Some("1 mod 7"));
+
+        // A modulus is never part of a complex value.
+        let mut app = App::new();
+        app.keys("3M(");
+        assert_eq!(app.entry.as_str(), "3 mod ");
+
+        let mut app = App::new();
+        app.keys("3MM");
+        assert_eq!(app.engine().message(), "no previous modulus");
+        assert_eq!(app.entry.as_str(), "3 mod ");
+
+        let mut app = App::new();
+        app.keys("M");
+        assert_eq!(app.engine().message(), "type an integer before M");
+
+        let mut app = App::new();
+        app.keys("1e100001M7");
+        assert_eq!(app.entry.as_str(), "1e100001 mod 7");
+        app.keys("\n");
+        assert_eq!(app.engine().message(), "overflow");
+
+        let mut app = App::new();
+        app.keys("3.5M");
+        assert_eq!(app.engine().message(), "modulo forms need integers");
+        assert_eq!(app.entry.as_str(), "3.5");
+
+        for (keys, message) in [
+            ("3M0\n", "modulus must be positive"),
+            ("3M7\n4M8\n+", "modulo forms need the same modulus"),
+            ("3M6\n2/", "no modular inverse"),
+            ("3M7\n0/", "division by zero"),
+            ("3M7\n1.5+", "modulo forms need integers"),
+            ("3M7\n0.5^", "modulo forms need integers"),
+            ("3M7\n1e100001^", "overflow"),
+            ("1e100001M7\n", "overflow"),
+            ("3M7\nQ", "not for modulo forms"),
+            ("3M7\nS", "not for modulo forms"),
+            ("3M7\n2%", "not for modulo forms"),
+            ("3M7\ncf", "not for modulo forms"),
+            ("3M7\nkp", "prime test needs an integer"),
+        ] {
+            let mut app = App::new();
+            app.keys(keys);
+            assert_eq!(app.engine().message(), message, "{keys}");
+        }
+
+        // A rejected form stays on the stack.
+        let mut app = App::new();
+        app.keys("3M7\nS");
+        assert_eq!(app.top_string().as_deref(), Some("3 mod 7"));
+
+        assert_eq!(eval("3M1000 567 ^").as_deref(), Ok("587 mod 1000"));
+        assert_eq!(eval("3M 1000 567 ^").as_deref(), Ok("587 mod 1000"));
     }
 
     #[test]

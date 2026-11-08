@@ -35,7 +35,7 @@ digit for digit.
 ## Layout
 
 - `src/float.rs` — decimal floats (`BigInt` mantissa, base-10 exponent). Precision is significant digits, default 12. `+ - * /`, sqrt, exp, ln, sin/cos/tan, inverse trig.
-- `src/value.rs` — `Int` / `Rat` / `Float` / rectangular complex. Promotion, powers, roots, trig in degrees or radians.
+- `src/value.rs` — `Int` / `Rat` / `Float` / rectangular complex / integer modulo forms. Promotion, powers, roots, trig in degrees or radians.
 - `src/consts.rs` — physics constants (HP 35s / CODATA 1998), plus Earth, the Sun, the Moon, and the astronomical unit. `K` lists them.
 - `src/parse.rs` — entry syntax.
 - `src/engine.rs` — stack, undo, modes, operations.
@@ -49,6 +49,7 @@ digit for digit.
 - Floats are decimal, so `0.1 + 0.2` is `0.3`. A whole-number float keeps a trailing point (`6378137.`), including after `c f`. Notation follows the precision, as in Calc's normal format: a float is written in full while its order runs from -2 through one less than the precision, and in scientific form outside that. At precision 12, `4.2e10` is `42000000000.`, `1e11` is `100000000000.`, `1e12` and `1e20` stay scientific, `0.01` stays fixed, and `0.001` is `1e-3`. An exact integer result, such as `sin(90)`, has no point.
 - An integer base greater than 1 takes an exact integer log when the value is a positive rational whose numerator and denominator are both integer powers of that base, including a reciprocal and a decimal that is that rational. `1:8 2 B` and `0.125 2 B` are `-3`. `1:1000 H L` is `-3`. A result that is not an integer, such as `8 4 B` (`log4(8) = 3/2`), stays a float.
 - A negative square root, and non-real powers, become rectangular complex `(re, im)`. A zero imaginary part collapses back to a real.
+- A modulo form `a mod m` holds integers, with `m > 0` and `0 <= a < m`, as in Calc. Only integer moduli are supported; Calc's real moduli (`10.5 mod 360`) are not.
 - Angle mode defaults to degrees. It applies to real trig and to both parts of complex trig, same idea as Calc. A degree angle is reduced modulo 360 before conversion, including a non-integer (`12345678901.5` is `181.5` degrees) and an integer float whose exponent is past 100000. `P` pushes pi. `H P` pushes e.
 - Inverse (`I`) and hyperbolic (`H`) are one-shot prefixes.
 
@@ -90,6 +91,7 @@ d g       group integer digits (3, or 4 in binary and hex)
 b w       word size, default 32, may be negative
 O d …     two's complement before d 2, d 8, d 6, d 0, or d r
 #digits   current radix; 16#FF is hex in any mode
+M         while typing an integer, start its modulus: 3M1000 is 3 mod 1000
 c f c F   to float, to fraction
 s s       store the top, leaving it on the stack
 s t       pop the top into a variable
@@ -127,6 +129,7 @@ Tutorial shapes live in `src/app.rs`. Parser cases are in `src/parse.rs`. The sc
 - `43920492304 k f` leaves `2`, `2`, `2`, `2`, `13`, `5903`, `35771`
 - `K` then `0` = `299792458` (speed of light)
 - `ec -e '2 20 ^ d g'` = `1,048,576`
+- `3M1000 567 ^` = `587 mod 1000`, `3M7 2 /` = `5 mod 7`, `2M7 _1 ^` = `4 mod 7`, and `3M7 4M8 +` is an error
 - last `K` page, `8` = `5.9722e24` (Earth mass), `A` = `7.346e22` (Moon mass), and `F` = `149597870700` (AU)
 
 Transcendentals are checked by known prefixes (pi, e, ln 2), not by matching Emacs Calc digit for digit. Exact values can be checked with the Emacs Calc command above.
@@ -150,6 +153,8 @@ Entry and stack details that are easy to get wrong:
 - Do not polish add, sub, mul, or div. `(1/3)*3` can display as `0.999…`, and `sqrt(2)^2` as `1.999…`.
 - `digit_count` and `strip_trailing_zeros` in `float.rs` run on every rounding. Do not print the mantissa to count or strip digits. That is quadratic and made `exp` at precision 1000 take about 2s instead of 0.3s.
 - An unparsable radix literal names the whole literal: `16#` says `bad entry: 16#`.
+- Modulo forms follow Calc. `M` while typing an integer inserts ` mod ` (`3M1000` is `3 mod 1000`), and a second `M` fills in the previous modulus. `M` is still a digit in a radix literal above 22 (`36#mM7` is one number). DEL removes ` mod ` in one piece, a space waits for the modulus, and in `ec -e` a word ending in `M` continues into the next (`3M 1000`). A bare `M` says `type an integer before M`, and `3.5M` says `modulo forms need integers` and keeps the entry. The value is `Value::Mod(a, m)`, always reduced. `+ - * / ^`, `n`, `&`, and `I Q` take a form with an integer (an exact integer float is accepted; a whole float past the integer bound, such as `1e100001`, is `overflow`) or a form of the same modulus. After ` mod `, `(`, `,` and `)` are not entry keys. Different moduli say `modulo forms need the same modulus`. `/` and `&` multiply by the modular inverse, so `3M6 2 /` says `no modular inverse` and a zero divisor is `division by zero`. `^` uses `BigInt::modpow`, so an exponent such as `10^30` is fine. A negative power inverts first. A form used as the exponent contributes its residue, as in Calc. `0M7 0 ^` is `1 mod 7`, where Calc prints a plain `1`; PARI/GP agrees with `1 mod 7`. Display formats both sides in the current radix (`16#3 mod 16#7`).
+- `Engine::unary` and `Engine::binop` reject a modulo form with `not for modulo forms`. Only the operations above use `unary_mod` and `binop_mod`, so a new operation cannot take a form by accident. Operations that read the stack themselves (`k p`, `k f`, `k E`, `p`) reject it through `exact_int`.
 - `L` flips inverse in `app.rs`, then uses the exp/ln family. `E` does not flip. `push` and a successful duplicate do not clear `I` or `H`.
 - `n` while typing toggles a leading `_`. `+` and `-` while typing are exponent signs, or digits inside an unclosed `(…)`. Otherwise they add and subtract. Space inside an unparsed `(…` inserts a space. `:` while typing is a fraction; on an empty entry it is fraction division.
 - `ec -e` feeds words through the same keys. Whitespace, including newlines, is a separator, and a finished number is pushed at the end of each word. `2 20 ^ d g` prints `1,048,576`. Both `d g` and `dg` group. A space on the screen still pushes or duplicates. An unclosed `(…` stays open across a space, so `(3, 4)` is one value. `12 p` sets the precision and pops 12. A prompt finishes when its answer is complete (`d r 16`, `b w 64`, `s s name`). The command prints the top value. An error goes to stderr and the process exits 1. `q` and `?` stay on the screen.

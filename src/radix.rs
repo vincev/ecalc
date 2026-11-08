@@ -33,6 +33,11 @@ pub(crate) fn format_value(value: &Value, mode: &Mode) -> String {
     match value {
         Value::Real(real) => format_real(real, mode),
         Value::Complex(re, im) => format!("({}, {})", format_real(re, mode), format_real(im, mode)),
+        Value::Mod(a, m) => format!(
+            "{} mod {}",
+            format_real(&Real::Int(a.clone()), mode),
+            format_real(&Real::Int(m.clone()), mode)
+        ),
     }
 }
 

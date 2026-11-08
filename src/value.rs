@@ -3,6 +3,10 @@
 //! Exact inputs stay exact. A float appears when the operation needs one
 //! (division with fraction mode off, roots, trig, logs). A negative square
 //! root, or any other non-real result, becomes `(re, im)`.
+//!
+//! A modulo form `a mod m` holds integers with `m > 0` and `0 <= a < m`.
+//! It takes `+ - * / ^`, negation, and reciprocal, with an integer or a
+//! form of the same modulus. Every other operation rejects it.
 
 use crate::error::CalcError;
 use crate::float::{self, DEFAULT_PRECISION, DecFloat};
@@ -63,7 +67,13 @@ pub enum Real {
 pub enum Value {
     Real(Real),
     Complex(Real, Real),
+    /// `a mod m`, always reduced: `m > 0` and `0 <= a < m`.
+    Mod(BigInt, BigInt),
 }
+
+/// The error for an operation that does not take a modulo form.
+pub(crate) const NOT_FOR_MOD: CalcError = CalcError::Domain("not for modulo forms");
+const MOD_NEEDS_INTEGERS: CalcError = CalcError::Domain("modulo forms need integers");
 
 impl Value {
     pub fn from_int(n: impl Into<BigInt>) -> Self {
@@ -87,17 +97,34 @@ impl Value {
         }
     }
 
+    /// `a mod m`, reduced into `0 <= a < m`. The modulus must be positive.
+    pub fn make_mod(a: BigInt, m: BigInt) -> Result<Self, CalcError> {
+        if !m.is_positive() {
+            return Err(CalcError::Domain("modulus must be positive"));
+        }
+        Ok(Self::Mod(a.mod_floor(&m), m))
+    }
+
+    pub fn is_mod(&self) -> bool {
+        matches!(self, Self::Mod(_, _))
+    }
+
     pub fn is_zero(&self) -> bool {
         match self {
             Self::Real(r) => r.is_zero(),
             Self::Complex(re, im) => re.is_zero() && im.is_zero(),
+            Self::Mod(a, _) => a.is_zero(),
         }
     }
 
+    /// Real and imaginary parts. A modulo form never gets here: the
+    /// operations that take one handle it first, and the engine rejects it
+    /// for every other operation.
     fn parts(&self) -> (Real, Real) {
         match self {
             Self::Real(r) => (r.clone(), Real::Int(BigInt::zero())),
             Self::Complex(re, im) => (re.clone(), im.clone()),
+            Self::Mod(_, _) => unreachable!("modulo forms are handled before parts"),
         }
     }
 
@@ -177,6 +204,7 @@ impl fmt::Display for Value {
         match self {
             Self::Real(r) => write!(f, "{r}"),
             Self::Complex(re, im) => write!(f, "({re}, {im})"),
+            Self::Mod(a, m) => write!(f, "{a} mod {m}"),
         }
     }
 }
@@ -209,8 +237,66 @@ fn real_from_rational(r: BigRational) -> Real {
 pub(crate) fn exact_int(value: &Value) -> Option<BigInt> {
     match value {
         Value::Real(real) => exact_real(real),
-        Value::Complex(_, _) => None,
+        Value::Complex(_, _) | Value::Mod(_, _) => None,
     }
+}
+
+/// Residues and the shared modulus when either operand is a modulo form.
+/// `None` means neither is one. The other operand may be an integer, which
+/// takes on the modulus, or a form with the same modulus.
+fn mod_operands(a: &Value, b: &Value) -> Option<Result<(BigInt, BigInt, BigInt), CalcError>> {
+    let operands = match (a, b) {
+        (Value::Mod(x, m), Value::Mod(y, n)) => {
+            if m == n {
+                Ok((x.clone(), y.clone(), m.clone()))
+            } else {
+                Err(CalcError::Domain("modulo forms need the same modulus"))
+            }
+        }
+        (Value::Mod(x, m), other) => mod_integer(other).map(|y| (x.clone(), y, m.clone())),
+        (other, Value::Mod(y, m)) => mod_integer(other).map(|x| (x, y.clone(), m.clone())),
+        _ => return None,
+    };
+    Some(operands)
+}
+
+/// An integer that can sit beside a modulo form. A whole-number float past
+/// the integer bound, such as `1e100001`, is an integer too large to expand,
+/// so it is an overflow rather than a non-integer.
+pub(crate) fn mod_integer(v: &Value) -> Result<BigInt, CalcError> {
+    if let Some(n) = exact_int(v) {
+        return Ok(n);
+    }
+    match v {
+        Value::Real(Real::Float(f)) if f.signed_decimal().1 >= 0 => Err(CalcError::Overflow),
+        _ => Err(MOD_NEEDS_INTEGERS),
+    }
+}
+
+/// `b` such that `a*b` is 1 modulo `m`. Calc's `math-div-mod`.
+fn mod_inverse_int(a: &BigInt, m: &BigInt) -> Result<BigInt, CalcError> {
+    let a = a.mod_floor(m);
+    if m.is_one() {
+        return Ok(BigInt::zero());
+    }
+    if a.is_zero() {
+        return Err(CalcError::DivideByZero);
+    }
+    let eg = a.extended_gcd(m);
+    if !eg.gcd.is_one() {
+        return Err(CalcError::Domain("no modular inverse"));
+    }
+    Ok(eg.x.mod_floor(m))
+}
+
+/// `b^e mod m` by repeated squaring. A negative `e` inverts `b` first.
+fn mod_pow(b: &BigInt, e: &BigInt, m: &BigInt) -> Result<Value, CalcError> {
+    let base = if e.is_negative() {
+        mod_inverse_int(b, m)?
+    } else {
+        b.mod_floor(m)
+    };
+    Value::make_mod(base.modpow(&e.abs(), m), m.clone())
 }
 
 fn exact_real(real: &Real) -> Option<BigInt> {
@@ -261,10 +347,15 @@ pub fn neg(v: &Value) -> Value {
     match v {
         Value::Real(r) => Value::Real(r.neg()),
         Value::Complex(re, im) => Value::complex(re.neg(), im.neg()),
+        Value::Mod(a, m) => Value::Mod((-a).mod_floor(m), m.clone()),
     }
 }
 
 pub fn add(a: &Value, b: &Value, mode: &Mode) -> Result<Value, CalcError> {
+    if let Some(operands) = mod_operands(a, b) {
+        let (x, y, m) = operands?;
+        return Value::make_mod(x + y, m);
+    }
     let (ar, ai) = a.parts();
     let (br, bi) = b.parts();
     let re = add_real(&ar, &br, mode)?;
@@ -277,6 +368,10 @@ pub fn sub(a: &Value, b: &Value, mode: &Mode) -> Result<Value, CalcError> {
 }
 
 pub fn mul(a: &Value, b: &Value, mode: &Mode) -> Result<Value, CalcError> {
+    if let Some(operands) = mod_operands(a, b) {
+        let (x, y, m) = operands?;
+        return Value::make_mod(x * y, m);
+    }
     let (ar, ai) = a.parts();
     let (br, bi) = b.parts();
     if ai.is_zero() && bi.is_zero() {
@@ -289,6 +384,10 @@ pub fn mul(a: &Value, b: &Value, mode: &Mode) -> Result<Value, CalcError> {
 }
 
 pub fn div(a: &Value, b: &Value, mode: &Mode) -> Result<Value, CalcError> {
+    if let Some(operands) = mod_operands(a, b) {
+        let (x, y, m) = operands?;
+        return Value::make_mod(x * mod_inverse_int(&y, &m)?, m);
+    }
     if b.is_zero() {
         return Err(CalcError::DivideByZero);
     }
@@ -555,6 +654,11 @@ pub fn square(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 }
 
 pub fn pow(base: &Value, exp: &Value, mode: &Mode) -> Result<Value, CalcError> {
+    // Calc's rule: a form raised to a form uses the exponent's residue.
+    if let Some(operands) = mod_operands(base, exp) {
+        let (b, e, m) = operands?;
+        return mod_pow(&b, &e, &m);
+    }
     if let Some(n) = real_exponent_int(exp) {
         return pow_int(base, &n, mode);
     }
@@ -750,6 +854,7 @@ fn pow_exp_ln(base: &Value, exp: &Value, mode: &Mode) -> Result<Value, CalcError
 
 pub fn sqrt(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
+        Value::Mod(_, _) => Err(NOT_FOR_MOD),
         Value::Real(r) if r.is_negative() => {
             let mag = sqrt(&Value::Real(r.abs()), mode)?;
             let Value::Real(im) = mag else {
@@ -785,6 +890,7 @@ pub fn sqrt(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 
 pub fn abs(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
+        Value::Mod(_, _) => Err(NOT_FOR_MOD),
         Value::Real(r) => Ok(Value::Real(r.abs())),
         Value::Complex(re, im) => Ok(Value::Real(hypot_real(re, im, mode)?)),
     }
@@ -792,6 +898,7 @@ pub fn abs(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 
 pub fn abssqr(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
+        Value::Mod(_, _) => Err(NOT_FOR_MOD),
         Value::Real(_) => square(v, mode),
         Value::Complex(re, im) => {
             let a = mul_real(re, re, mode)?;
@@ -803,6 +910,7 @@ pub fn abssqr(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 
 pub fn sign(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
+        Value::Mod(_, _) => Err(NOT_FOR_MOD),
         Value::Real(r) if r.is_zero() => Ok(Value::from_int(0)),
         Value::Real(r) if r.is_negative() => Ok(Value::from_int(-1)),
         Value::Real(_) => Ok(Value::from_int(1)),
@@ -901,6 +1009,7 @@ pub fn isqrt(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 
 pub fn conj(v: &Value) -> Value {
     match v {
+        Value::Mod(_, _) => v.clone(),
         Value::Real(_) => v.clone(),
         Value::Complex(re, im) => Value::complex(re.clone(), im.neg()),
     }
@@ -916,6 +1025,7 @@ pub fn arg(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 
 pub fn ln(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
+        Value::Mod(_, _) => Err(NOT_FOR_MOD),
         Value::Real(r) if r.is_one() => Ok(Value::from_int(0)),
         Value::Real(r) if r.is_zero() => Err(CalcError::Domain("logarithm of zero")),
         Value::Real(r) if r.is_positive() => Ok(polish(
@@ -945,6 +1055,7 @@ pub fn ln(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 
 pub fn exp_value(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
+        Value::Mod(_, _) => Err(NOT_FOR_MOD),
         Value::Real(r) if r.is_zero() => Ok(Value::from_int(1)),
         Value::Real(r) => Ok(polish(
             Value::Real(Real::Float(r.to_float(mode.prec)?.exp(mode.prec)?)),
@@ -979,6 +1090,7 @@ pub fn expm1(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 
 pub fn lnp1(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
+        Value::Mod(_, _) => Err(NOT_FOR_MOD),
         Value::Real(r) => Ok(polish(
             Value::Real(Real::Float(r.to_float(mode.prec)?.ln_1p(mode.prec)?)),
             mode.prec,
@@ -1252,6 +1364,7 @@ fn trig_complex(v: &Value, mode: &Mode, want_sin: bool) -> Result<Value, CalcErr
 fn to_radians(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     if mode.angle == AngleMode::Radians {
         return match v {
+            Value::Mod(_, _) => Err(NOT_FOR_MOD),
             Value::Real(r) => Ok(Value::Real(Real::Float(high_float(r, mode)?))),
             Value::Complex(re, im) => Ok(Value::complex(
                 Real::Float(high_float(re, mode)?),
@@ -1634,6 +1747,7 @@ pub fn e_const(mode: &Mode) -> Value {
 
 pub fn to_float(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
+        Value::Mod(_, _) => Err(NOT_FOR_MOD),
         Value::Real(r) => Ok(Value::Real(Real::Float(r.to_float(mode.prec)?))),
         Value::Complex(re, im) => Ok(Value::complex(
             Real::Float(re.to_float(mode.prec)?),
@@ -1644,6 +1758,7 @@ pub fn to_float(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 
 pub fn to_fraction(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
+        Value::Mod(_, _) => Err(NOT_FOR_MOD),
         Value::Real(r) => Ok(Value::Real(real_to_fraction(r, mode.prec)?)),
         Value::Complex(re, im) => Ok(Value::complex(
             real_to_fraction(re, mode.prec)?,

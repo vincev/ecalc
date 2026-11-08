@@ -4,12 +4,16 @@
 //! A checkpoint is taken only after a computation succeeds. It saves the
 //! stack and the variables. Mode changes are not undoable. `push` and `dup`
 //! only change the stack, so a one-shot prefix can survive them.
+//!
+//! `unary` and `binop` reject a modulo form. The operations Calc defines on
+//! one (`+ - * / ^`, negate, reciprocal, square) use `unary_mod` and
+//! `binop_mod`, so a new operation cannot take one by accident.
 
 use crate::comb;
 use crate::error::CalcError;
 use crate::float::{MAX_PRECISION, MIN_PRECISION};
 use crate::radix::{self, MAX_RADIX, MAX_WORD_SIZE, MIN_RADIX, MIN_WORD_SIZE};
-use crate::value::{self, AngleMode, Mode, Value};
+use crate::value::{self, AngleMode, Mode, NOT_FOR_MOD, Value};
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
@@ -260,19 +264,19 @@ impl Engine {
     }
 
     pub fn add(&mut self) {
-        self.binop(value::add);
+        self.binop_mod(value::add);
     }
 
     pub fn sub(&mut self) {
-        self.binop(value::sub);
+        self.binop_mod(value::sub);
     }
 
     pub fn mul(&mut self) {
-        self.binop(value::mul);
+        self.binop_mod(value::mul);
     }
 
     pub fn div(&mut self) {
-        self.binop(value::div);
+        self.binop_mod(value::div);
     }
 
     pub fn div_fraction(&mut self) {
@@ -379,7 +383,7 @@ impl Engine {
     }
 
     pub fn power(&mut self) {
-        self.binop(value::pow);
+        self.binop_mod(value::pow);
     }
 
     /// Degree on top. An integer degree uses an exact root when there is one.
@@ -404,15 +408,15 @@ impl Engine {
     }
 
     pub fn square(&mut self) {
-        self.unary(value::square);
+        self.unary_mod(value::square);
     }
 
     pub fn negate(&mut self) {
-        self.unary(|v, _| Ok(value::neg(v)));
+        self.unary_mod(|v, _| Ok(value::neg(v)));
     }
 
     pub fn reciprocal(&mut self) {
-        self.unary(value::recip);
+        self.unary_mod(value::recip);
     }
 
     pub fn abs(&mut self) {
@@ -690,6 +694,15 @@ impl Engine {
     }
 
     fn unary(&mut self, op: impl FnOnce(&Value, &Mode) -> Result<Value, CalcError>) {
+        if self.stack.last().is_some_and(Value::is_mod) {
+            self.fail(NOT_FOR_MOD);
+            return;
+        }
+        self.unary_mod(op);
+    }
+
+    /// [`Self::unary`] for an operation that takes a modulo form.
+    fn unary_mod(&mut self, op: impl FnOnce(&Value, &Mode) -> Result<Value, CalcError>) {
         let result = if let Some(top) = self.stack.last() {
             op(top, &self.mode)
         } else {
@@ -708,6 +721,16 @@ impl Engine {
     }
 
     fn binop(&mut self, op: impl FnOnce(&Value, &Value, &Mode) -> Result<Value, CalcError>) {
+        let n = self.stack.len();
+        if n >= 2 && self.stack[n - 2..].iter().any(Value::is_mod) {
+            self.fail(NOT_FOR_MOD);
+            return;
+        }
+        self.binop_mod(op);
+    }
+
+    /// [`Self::binop`] for an operation that takes a modulo form.
+    fn binop_mod(&mut self, op: impl FnOnce(&Value, &Value, &Mode) -> Result<Value, CalcError>) {
         let result = if self.stack.len() >= 2 {
             let n = self.stack.len();
             op(&self.stack[n - 2], &self.stack[n - 1], &self.mode)
