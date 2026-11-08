@@ -824,10 +824,21 @@ fn reduction_prec(order: i64, work: u32, pad: u32) -> Result<u32, CalcError> {
 
 pub(crate) fn digit_count(n: &BigInt) -> u32 {
     if n.is_zero() {
-        1
-    } else {
-        n.abs().to_str_radix(10).len() as u32
+        return 1;
     }
+    // `(bits - 1) * log10(2) + 1` is the digit count or one below it.
+    // Correct the estimate against powers of ten instead of printing the
+    // number: `to_str_radix` is quadratic and this runs on every rounding.
+    let mag = n.magnitude();
+    let bits = n.bits();
+    let mut digits = ((bits - 1) as f64 * std::f64::consts::LOG10_2) as u32 + 1;
+    while digits > 1 && mag < pow10(digits - 1).magnitude() {
+        digits -= 1;
+    }
+    while mag >= pow10(digits).magnitude() {
+        digits += 1;
+    }
+    digits
 }
 
 fn pow10(n: u32) -> BigInt {
@@ -876,11 +887,14 @@ fn strip_trailing_zeros(mantissa: &mut BigInt, exponent: &mut i64) {
         *exponent = 0;
         return;
     }
-    let text = mantissa.abs().to_str_radix(10);
-    let zeros = text.chars().rev().take_while(|c| *c == '0').count();
-    if zeros > 0 {
-        *mantissa /= pow10(zeros as u32);
-        *exponent += zeros as i64;
+    let ten = BigInt::from(10);
+    loop {
+        let (q, r) = mantissa.div_rem(&ten);
+        if !r.is_zero() {
+            break;
+        }
+        *mantissa = q;
+        *exponent += 1;
     }
 }
 
@@ -1231,6 +1245,23 @@ mod tests {
             shown.starts_with(prefix),
             "{shown} does not start with {prefix} ({value:?})"
         );
+    }
+
+    #[test]
+    fn digit_count_matches_the_printed_length() {
+        let mut cases = vec![BigInt::one(), BigInt::from(9), BigInt::from(-10)];
+        for k in 1..400u32 {
+            let p = pow10(k);
+            cases.push(&p - 1);
+            cases.push(p.clone());
+            cases.push(-&p);
+            cases.push(BigInt::one() << k);
+            cases.push((BigInt::one() << k) - 1);
+        }
+        for n in cases {
+            let printed = n.abs().to_str_radix(10).len() as u32;
+            assert_eq!(digit_count(&n), printed, "{n}");
+        }
     }
 
     #[test]

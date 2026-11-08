@@ -128,10 +128,17 @@ fn parse_radix_literal(body: &str, negative: bool, mode: &Mode) -> Result<Real, 
         Some(after) => (true, after),
         None => (false, rest),
     };
-    if twos {
-        return parse_twos(after, radix, negative, mode);
-    }
-    parse_radix_number(after, radix, negative, mode)
+    let parsed = if twos {
+        parse_twos(after, radix, negative, mode)
+    } else {
+        parse_radix_number(after, radix, negative, mode)
+    };
+    // `16#` has no digits to quote. Name the whole literal instead of
+    // leaving the message as `bad entry: `.
+    parsed.map_err(|err| match err {
+        CalcError::InvalidEntry(text) if text.is_empty() => bad(body),
+        other => other,
+    })
 }
 
 fn parse_twos(after: &str, radix: u32, negative: bool, mode: &Mode) -> Result<Real, CalcError> {
@@ -771,7 +778,14 @@ mod tests {
         assert!(parse_value("(1)", &mode).is_err());
         assert!(parse_value("1:", &mode).is_err());
         assert!(parse_value("1:0", &mode).is_err());
-        assert!(parse_value("16#", &mode).is_err());
+        assert_eq!(
+            parse_value("16#", &mode).unwrap_err().to_string(),
+            "bad entry: 16#"
+        );
+        assert_eq!(
+            parse_value("16##", &mode).unwrap_err().to_string(),
+            "bad entry: 16##"
+        );
         assert!(parse_value("16#G", &mode).is_err());
         assert!(parse_value("1#10", &mode).is_err());
     }
