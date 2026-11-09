@@ -14,6 +14,7 @@ use crate::error::CalcError;
 use crate::float::{MAX_PRECISION, MIN_PRECISION};
 use crate::radix::{self, MAX_RADIX, MAX_WORD_SIZE, MIN_RADIX, MIN_WORD_SIZE};
 use crate::value::{self, AngleMode, Mode, NOT_FOR_MOD, Value};
+use num_bigint::BigInt;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
@@ -363,6 +364,44 @@ impl Engine {
     /// `k t`. Euler's totient of the top integer.
     pub fn totient(&mut self) {
         self.unary(|v, _| comb::totient(v));
+    }
+
+    /// `k n`. The next prime above the top.
+    pub fn next_prime(&mut self) {
+        self.prime_search(comb::next_prime);
+    }
+
+    /// `I k n`. The previous prime below the top.
+    pub fn prev_prime(&mut self) {
+        self.prime_search(comb::prev_prime);
+    }
+
+    /// `H k n`. The nth prime.
+    pub fn nth_prime(&mut self) {
+        self.unary(|v, _| comb::nth_prime(v));
+    }
+
+    /// Replace the top with a prime found from it. An unproven prime still
+    /// replaces the top, with the message `probably prime`.
+    fn prime_search(&mut self, op: fn(&Value) -> Result<(BigInt, bool), CalcError>) {
+        let outcome = match self.top() {
+            None => Err(CalcError::StackUnderflow),
+            Some(top) if top.is_mod() => Err(NOT_FOR_MOD),
+            Some(top) => op(top),
+        };
+        match outcome {
+            Ok((prime, proven)) => {
+                self.checkpoint();
+                self.stack.pop();
+                self.stack.push(Value::from_int(prime));
+                if proven {
+                    self.succeed();
+                } else {
+                    self.show("probably prime");
+                }
+            }
+            Err(err) => self.fail(err),
+        }
     }
 
     /// `k f`. Replace the top integer with its prime factors, smallest first.

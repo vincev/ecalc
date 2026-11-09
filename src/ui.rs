@@ -2113,7 +2113,7 @@ mod tests {
         assert!(rows.iter().any(|row| row.contains("1/2")));
         assert!(
             rows.iter()
-                .any(|row| { row.contains("ret") && row.contains("sqrt") && row.contains("mod") }),
+                .any(|row| { row.contains("ret") && row.contains("sqrt") && row.contains("fact") }),
             "three columns share the first row"
         );
         let stirling1 = rows

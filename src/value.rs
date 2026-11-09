@@ -970,7 +970,7 @@ pub fn floor(v: &Value, _mode: &Mode) -> Result<Value, CalcError> {
     Ok(Value::from_int(floor_real(real)?))
 }
 
-fn floor_real(real: &Real) -> Result<BigInt, CalcError> {
+pub(crate) fn floor_real(real: &Real) -> Result<BigInt, CalcError> {
     match real {
         Real::Int(n) => Ok(n.clone()),
         Real::Rat(r) => Ok(floor_rat(r)),

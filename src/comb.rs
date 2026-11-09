@@ -255,6 +255,147 @@ fn stirling_int(n: &BigInt, m: &BigInt, first: bool) -> Result<BigInt, CalcError
     Ok(prev[m as usize].clone())
 }
 
+/// Largest `n` for `H k n`. The sieve runs to about `n ln n`, so `10^8`
+/// sieves to about 2.2 billion.
+const NTH_PRIME_MAX: u64 = 100_000_000;
+
+/// `Some(proven)` for a prime, `None` otherwise.
+fn prime_kind(n: &BigInt) -> Option<bool> {
+    match classify(n) {
+        PrimeKind::Prime => Some(true),
+        PrimeKind::ProbablyPrime => Some(false),
+        PrimeKind::NotPrime => None,
+    }
+}
+
+fn search_start(v: &Value, what: &'static str) -> Result<BigInt, CalcError> {
+    let Value::Real(real) = v else {
+        return Err(CalcError::Domain(what));
+    };
+    let n = crate::value::floor_real(real)?;
+    if n.bits() > 8192 {
+        return Err(CalcError::Domain("number is too large"));
+    }
+    Ok(n)
+}
+
+/// `k n`, Calc's `calcFunc-nextprime`: the smallest prime above the number.
+/// A non-integer is truncated first and anything below 2 gives 2. The bool
+/// is false when the answer is only probably prime.
+pub fn next_prime(v: &Value) -> Result<(BigInt, bool), CalcError> {
+    let mut n = search_start(v, "next prime needs a real number")?;
+    if n < BigInt::from(2) {
+        return Ok((BigInt::from(2), true));
+    }
+    if n.is_even() {
+        n -= 1u32;
+    }
+    loop {
+        n += 2u32;
+        if let Some(proven) = prime_kind(&n) {
+            return Ok((n, proven));
+        }
+    }
+}
+
+/// `I k n`, Calc's `calcFunc-prevprime`: the largest prime below the number.
+/// A non-integer is rounded up first, and anything below 4 gives 2, as in
+/// Calc.
+pub fn prev_prime(v: &Value) -> Result<(BigInt, bool), CalcError> {
+    let mut n = search_start(v, "previous prime needs a real number")?;
+    if crate::value::exact_int(v).is_none() {
+        n += 1u32;
+    }
+    if n < BigInt::from(4) {
+        return Ok((BigInt::from(2), true));
+    }
+    if n.is_even() {
+        n += 1u32;
+    }
+    loop {
+        n -= 2u32;
+        if let Some(proven) = prime_kind(&n) {
+            return Ok((n, proven));
+        }
+    }
+}
+
+/// `H k n`: the nth prime, as PARI/GP's `prime(n)`. `1` is `2`.
+pub fn nth_prime(v: &Value) -> Result<Value, CalcError> {
+    const NEEDS: CalcError = CalcError::Domain("nth prime needs a positive integer");
+    let n = crate::value::exact_int(v).ok_or(NEEDS)?;
+    if n < BigInt::one() {
+        return Err(NEEDS);
+    }
+    let n = n
+        .to_u64()
+        .filter(|&n| n <= NTH_PRIME_MAX)
+        .ok_or(CalcError::Overflow)?;
+    Ok(Value::from_int(nth_prime_u64(n)))
+}
+
+/// Segmented sieve over odd numbers. For `n >= 6` the nth prime is below
+/// `n (ln n + ln ln n)` (Rosser).
+fn nth_prime_u64(n: u64) -> u64 {
+    const FIRST: [u64; 6] = [2, 3, 5, 7, 11, 13];
+    if n <= 6 {
+        return FIRST[n as usize - 1];
+    }
+    let x = n as f64;
+    let limit = (x * (x.ln() + x.ln().ln())) as u64 + 1;
+    let root = limit.isqrt();
+    let mut small = vec![true; root as usize + 1];
+    let mut base = Vec::new();
+    for p in 3..=root {
+        if small[p as usize] {
+            if p % 2 == 1 {
+                base.push(p);
+            }
+            for m in (p * p..=root).step_by(p as usize) {
+                small[m as usize] = false;
+            }
+        }
+    }
+    // Index i stands for 2i + 1. Index 0 is 1, so the scan starts at 1.
+    const SEGMENT: u64 = 1 << 18;
+    let last = (limit - 1) / 2;
+    let mut count = 1; // 2
+    let mut seg = vec![true; SEGMENT as usize];
+    let mut lo = 1;
+    while lo <= last {
+        let hi = (lo + SEGMENT).min(last + 1);
+        let len = (hi - lo) as usize;
+        seg[..len].fill(true);
+        let low_value = 2 * lo + 1;
+        let high_value = 2 * hi + 1;
+        for &p in &base {
+            if p * p >= high_value {
+                break;
+            }
+            let mut start = low_value.div_ceil(p) * p;
+            if start % 2 == 0 {
+                start += p;
+            }
+            start = start.max(p * p);
+            let mut i = ((start - 1) / 2 - lo) as usize;
+            while i < len {
+                seg[i] = false;
+                i += p as usize;
+            }
+        }
+        for (j, &is_prime) in seg[..len].iter().enumerate() {
+            if is_prime {
+                count += 1;
+                if count == n {
+                    return 2 * (lo + j as u64) + 1;
+                }
+            }
+        }
+        lo = hi;
+    }
+    unreachable!("the bound holds the nth prime")
+}
+
 pub fn prime_message(v: &Value) -> Result<&'static str, CalcError> {
     let n = as_integer(v, "prime test needs an integer")?;
     if n.bits() > 8192 {
@@ -1125,6 +1266,68 @@ mod tests {
             prime_message(&Value::from_int(mersenne)).unwrap(),
             "probably prime"
         );
+    }
+
+    #[test]
+    fn nth_prime_matches_pari() {
+        let nth = |n: u64| nth_prime(&Value::from_int(n)).map(|v| v.to_string());
+        let cases = [
+            (1, "2"),
+            (2, "3"),
+            (6, "13"),
+            (7, "17"),
+            (25, "97"),
+            (168, "997"),
+            (1000, "7919"),
+            (78498, "999983"),
+            (1000000, "15485863"),
+        ];
+        for (n, want) in cases {
+            assert_eq!(nth(n).as_deref(), Ok(want), "prime({n})");
+        }
+        // Every prime below 2000 in order, against the prime test.
+        let mut k = 0;
+        for p in 2..2000u64 {
+            if trial_prime(p) {
+                k += 1;
+                assert_eq!(nth_prime_u64(k), p);
+            }
+        }
+        assert!(nth(0).is_err());
+        assert_eq!(nth(NTH_PRIME_MAX + 1), Err(CalcError::Overflow));
+    }
+
+    #[test]
+    fn next_and_previous_prime_follow_calc() {
+        let int = |n: i64| Value::from_int(n);
+        let next = |v: Value| next_prime(&v).unwrap().0.to_string();
+        let prev = |v: Value| prev_prime(&v).unwrap().0.to_string();
+        assert_eq!(next(int(-5)), "2");
+        assert_eq!(next(int(0)), "2");
+        assert_eq!(next(int(2)), "3");
+        assert_eq!(next(int(7)), "11");
+        assert_eq!(
+            next(Value::Real(Real::Rat(BigRational::new(
+                10.into(),
+                3.into()
+            )))),
+            "5"
+        );
+        assert_eq!(prev(int(3)), "2");
+        assert_eq!(prev(int(2)), "2");
+        assert_eq!(prev(int(-7)), "2");
+        assert_eq!(prev(int(11)), "7");
+        assert_eq!(
+            prev(Value::Real(Real::Rat(BigRational::new(
+                21.into(),
+                2.into()
+            )))),
+            "7"
+        );
+        let big = (BigInt::one() << 89u32) - 2u32;
+        let (p, proven) = next_prime(&Value::from_int(big)).unwrap();
+        assert_eq!(p.to_string(), "618970019642690137449562111");
+        assert!(!proven);
     }
 
     #[test]

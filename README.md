@@ -56,16 +56,23 @@ prints the message on stderr and exits 1.
 
 - Exact integers and fractions (`2^100`, `3:4`), decimal floats, and
   rectangular complex numbers `(re, im)`. `0.1 + 0.2` is `0.3`.
+- Integer modulo forms, as in Calc: `M` while typing an integer starts its
+  modulus, so `3M1000 567 ^` is `587 mod 1000`. Arithmetic, powers, and
+  inverses stay reduced.
 - Precision in significant digits, 12 by default.
 - Powers, roots, floor, integer division, and remainder. `12 \ 12:7` is `7`.
 - Sine, cosine, and tangent, with inverses and hyperbolic forms. Angles
   start in degrees.
 - Logarithms, exponentials, factorial, combinations, permutations, and
   Stirling numbers of the first and second kind.
-- Gcd, lcm, the extended gcd, a modular inverse, a prime test, and prime factors.
+- Gcd, lcm, the extended gcd, a modular inverse, a prime test, prime
+  factors, and Euler's totient. The next and previous prime, and the nth
+  prime (`1000000 H k n` is `15485863`).
 - Stored variables, and the HP 35s physics constants, plus Earth, the Moon,
   the Sun, and the astronomical unit.
-- Display and entry in any radix from 2 to 36.
+- Display and entry in any radix from 2 to 36, with two's complement for a
+  chosen word size and grouped digits.
+- Undo and redo of the stack and variables.
 
 `cargo test` checks the arithmetic and the screen without opening a terminal.
 

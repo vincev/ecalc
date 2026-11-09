@@ -32,6 +32,14 @@ Calc divides the float and then floors. A large power prints `Working...`
 lines on stderr. The value is on stdout. Do not match transcendentals
 digit for digit.
 
+The Calc source ships with Emacs, gzipped (`calc-comb.el.gz`,
+`calc-arith.el.gz`, key bindings in `calc-ext.el.gz`). Read it with `zcat`
+or `zgrep`. The path changes with each Emacs upgrade, so look it up:
+
+```sh
+emacs -Q --batch -eval '(princ (locate-library "calc-comb.el"))'
+```
+
 ## Layout
 
 - `src/float.rs` — decimal floats (`BigInt` mantissa, base-10 exponent). Precision is significant digits, default 12. `+ - * /`, sqrt, exp, ln, sin/cos/tan, inverse trig.
@@ -76,6 +84,8 @@ k i       modular inverse: m on top, result b with 0 <= b < m and a*b ≡ 1 (mod
 k p       prime test; the number stays on the stack
 k f       prime factors, smallest first. `2023 k f` leaves `7`, `17`, `17`. `* *` rebuilds `2023`
 k t       Euler's totient: `12 k t` is `4`
+k n I k n next prime above, previous prime below
+H k n     nth prime: `1000000 H k n` is `15485863`
 k c       choose, M on top: N! / (M! (N-M)!)
 H k c     permutations: N! / (N-M)!
 k s       Stirling number of the first kind, signed: s(N, M), M on top
@@ -128,6 +138,7 @@ Tutorial shapes live in `src/app.rs`. Parser cases are in `src/parse.rs`. The sc
 - `4 2 k s` = `11`, `4 2 H k s` = `7`, and `10 5 H k s` = `42525`
 - `2023 k f` leaves `7`, `17`, `17`, and `* *` is `2023`
 - `43920492304 k f` leaves `2`, `2`, `2`, `2`, `13`, `5903`, `35771`
+- `7 k n` = `11`, `11 I k n` = `7`, `1000000 H k n` = `15485863`
 - `12 k t` = `4`, `1000000007 k t` = `1000000006`
 - `K` then `0` = `299792458` (speed of light)
 - `ec -e '2 20 ^ d g'` = `1,048,576`
@@ -167,6 +178,7 @@ Entry and stack details that are easy to get wrong:
 - `k i` is the modular inverse of `a` modulo `m`, with `m` on top. The result is the integer `b` with `0 <= b < m` and `a*b ≡ 1 (mod m)`. `3 7 k i` is `5`. Both values are integers, and an exact integer float is accepted. A non-positive modulus says `modulus must be positive`. If the gcd is not 1 the stack stays and the message is `no modular inverse`. Emacs Calc gets the same `b` as the reciprocal of a modulo form.
 - `k f` replaces the top integer with its prime factors, smallest first, so the largest is on top. `2023 k f` leaves `7`, then `17`, then `17`, and `* *` is `2023`. A negative number leads with `-1`. `0` and `1` stay as they are. An exact integer float is accepted. Trial division uses Calc's prime table through `5003`, then Pollard rho (Brent) splits a composite cofactor up to 1024 bits. `43920492304 k f` leaves `2`, `2`, `2`, `2`, `13`, `5903`, `35771`. A cofactor that cannot be proven prime or split stays in one piece, the stack still changes, and the message is `may not be fully factored`.
 - `k t` is Euler's totient, as Calc's `calcFunc-totient`. `0` and `1` stay, a negative number is an error (PARI/GP would take the absolute value), and an exact integer float is accepted. It uses the `k f` factorization, so it answers past Calc's trial-division limit (`1000000007 k t` is `1000000006`, which Calc leaves unevaluated). If a cofactor cannot be proven prime or split, it says `number too big to factor` and leaves the stack.
+- `k n` and `I k n` follow Calc's `nextprime` and `prevprime`. `k n` truncates a non-integer and gives `2` for anything below 2. `I k n` rounds a non-integer up and gives `2` for anything below 4, so `2 I k n` is `2`, as in Calc. Past the proven bound of the prime test the answer replaces the top with the message `probably prime`. `H k n` is the nth prime, PARI/GP's `prime(n)`, for `1 <= n <= 10^8` (above is `overflow`). It sieves odd numbers in segments up to the Rosser bound `n (ln n + ln ln n)`; `10^8` takes a few seconds in a release build.
 - `K` opens the constants, sixteen to a page, eight down each column. `0`–`9` and `a`–`f` insert that slot and close. Tab and Shift-Tab turn the page and wrap around. The last page has the remaining physics constants, then Earth mass (`Me`), Earth equatorial radius (`Re`, `6378137` m), Moon mass (`Mm`, `7.346e22` kg), Moon equatorial radius (`Rm`, `1738100` m), the mean Earth-Moon distance (`dm`, `384400000` m), Sun mass (`Ms`), Sun radius (`Rs`, `695700` km written in metres), and the astronomical unit (`AU`, `149597870700` m). Every slot is filled. A missing slot would say "no constant" and stay open. Esc closes. `q` does not quit while it is open. The physics numbers are the HP 35s CODATA 1998 values. The planetary numbers are the NASA Earth, Sun, and Moon fact sheets, in kilograms and metres. An integer literal stays an integer (`299792458`, `101325`, `6378137`, `149597870700`, `1738100`). The unit is only a label in the menu and the message (`c  m/s`, `Me  kg`). `e` is not listed; `H P` pushes it. `K` is still a digit while a radix literal above 20 is being typed.
 - `atan2` of a value on an axis is an exact right angle (`0`, `±90`, `180` in degrees), including `atan2(0, 0) = 0` and `atan2(0, negative) = 180`.
 - Undo stores the stack and the variables, cap 100. Mode changes are not undoable. A new stack change clears redo. `s s` stores without popping, `s t` pops into the variable, `s r` recalls, and `s u` unstores. A digit selects `q0`–`q9` (`s 3`, `t 3`, `r 3`). A name is finished with RET. `s l` lists them, five per column. Tab and Shift-Tab page and wrap around. A letter recalls that one-letter name, and a digit recalls `q0`–`q9`. Longer names are visible there and still recalled with `s r`.

@@ -776,6 +776,15 @@ impl App {
             (Prefix::K, 'p') => self.run(Engine::prime_test),
             (Prefix::K, 'f') => self.run(Engine::prime_factors),
             (Prefix::K, 't') => self.run(Engine::totient),
+            (Prefix::K, 'n') => {
+                if self.hyperbolic {
+                    self.run(Engine::nth_prime);
+                } else if self.inverse {
+                    self.run(Engine::prev_prime);
+                } else {
+                    self.run(Engine::next_prime);
+                }
+            }
             (Prefix::K, 'c') => {
                 if self.hyperbolic {
                     self.run(Engine::perm);
@@ -1607,6 +1616,33 @@ mod tests {
         assert_eq!(top("10\n3\nkc"), "120");
         assert_eq!(top("5\n2\nHkc"), "20");
         assert_eq!(top("_3\n2\nkc"), "6");
+    }
+
+    #[test]
+    fn prime_walking_keys() {
+        assert_eq!(eval("7 k n").as_deref(), Ok("11"));
+        assert_eq!(eval("11 I k n").as_deref(), Ok("7"));
+        assert_eq!(eval("1000000 H k n").as_deref(), Ok("15485863"));
+        assert_eq!(eval("10.5 I k n").as_deref(), Ok("7"));
+        let mut app = App::new();
+        app.keys("2\n89\n^\n2\n-\nkn");
+        assert_eq!(
+            app.top_string().as_deref(),
+            Some("618970019642690137449562111")
+        );
+        assert_eq!(app.engine().message(), "probably prime");
+        app.keys("u");
+        assert_eq!(
+            app.top_string().as_deref(),
+            Some("618970019642690137449562110")
+        );
+        let mut app = App::new();
+        app.keys("0\nHkn");
+        assert_eq!(app.engine().message(), "nth prime needs a positive integer");
+        assert_eq!(app.engine().stack_lines(), ["0"]);
+        let mut app = App::new();
+        app.keys("3M7\nkn");
+        assert_eq!(app.engine().message(), "not for modulo forms");
     }
 
     #[test]
