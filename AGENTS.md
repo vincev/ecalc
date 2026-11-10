@@ -40,6 +40,28 @@ or `zgrep`. The path changes with each Emacs upgrade, so look it up:
 emacs -Q --batch -eval '(princ (locate-library "calc-comb.el"))'
 ```
 
+## PARI/GP
+
+PARI/GP is the reference for the digits of a float result. Emacs Calc is
+the reference for what a key does and for exact results. At 12 digits Calc
+is itself off in the last digits of a large power (`1.0000001^2000000`,
+`2.^10000000`) and of an inverse hyperbolic, so do not copy a float from
+Calc into a test. Ask PARI at 30 digits and round to 12.
+
+```sh
+command gp -q <<'EOF'
+default(realprecision, 30);
+print(1.000001^1000000);
+print(acos(0.999999999999) * 180 / Pi);
+EOF
+```
+
+That prints `2.71828046931937688381979970845`, then
+`8.10284684541462986323391069816 E-5`. PARI works in radians. Run it as
+`command gp`, which skips aliases: some shells alias `gp` to `git push`.
+Where the two disagree on meaning, the key follows Calc: `_8 3 I ^` is
+`-2` (Calc's `nroot`), where PARI's `sqrtn(-8, 3)` is complex.
+
 ## Layout
 
 - `src/float.rs` — decimal floats (`BigInt` mantissa, base-10 exponent). Precision is significant digits, default 12. `+ - * /`, sqrt, exp, ln, sin/cos/tan, inverse trig.
@@ -56,7 +78,7 @@ emacs -Q --batch -eval '(princ (locate-library "calc-comb.el"))'
 - Default fraction mode is off, matching Calc. `/` of integers that divide evenly stays an integer; otherwise it is a float at the current precision. `m f` turns fraction mode on. `:` outside entry is fraction division.
 - Floats are decimal, so `0.1 + 0.2` is `0.3`. A whole-number float keeps a trailing point (`6378137.`), including after `c f`. Notation follows the precision, as in Calc's normal format: a float is written in full while its order runs from -2 through one less than the precision, and in scientific form outside that. At precision 12, `4.2e10` is `42000000000.`, `1e11` is `100000000000.`, `1e12` and `1e20` stay scientific, `0.01` stays fixed, and `0.001` is `1e-3`. An exact integer result, such as `sin(90)`, has no point.
 - An integer base greater than 1 takes an exact integer log when the value is a positive rational whose numerator and denominator are both integer powers of that base, including a reciprocal and a decimal that is that rational. `1:8 2 B` and `0.125 2 B` are `-3`. `1:1000 H L` is `-3`. A result that is not an integer, such as `8 4 B` (`log4(8) = 3/2`), stays a float.
-- A negative square root, and non-real powers, become rectangular complex `(re, im)`. A zero imaginary part collapses back to a real.
+- A negative square root, and non-real powers, become rectangular complex `(re, im)`. A zero imaginary part collapses back to a real. A fractional power of a negative number is the principal value, as in Calc and PARI/GP: `_8 1:3 ^` is `(1., 1.73205080757)`. The real odd root is `I ^`: `_8 3 I ^` is `-2`.
 - A modulo form `a mod m` holds integers, with `m > 0` and `0 <= a < m`, as in Calc. Only integer moduli are supported; Calc's real moduli (`10.5 mod 360`) are not.
 - Angle mode defaults to degrees. It applies to real trig and to both parts of complex trig, same idea as Calc. A degree angle is reduced modulo 360 before conversion, including a non-integer (`12345678901.5` is `181.5` degrees) and an integer float whose exponent is past 100000. `P` pushes pi. `H P` pushes e.
 - Inverse (`I`) and hyperbolic (`H`) are one-shot prefixes.
@@ -143,9 +165,10 @@ Tutorial shapes live in `src/app.rs`. Parser cases are in `src/parse.rs`. The sc
 - `K` then `0` = `299792458` (speed of light)
 - `ec -e '2 20 ^ d g'` = `1,048,576`
 - `3M1000 567 ^` = `587 mod 1000`, `3M7 2 /` = `5 mod 7`, `2M7 _1 ^` = `4 mod 7`, and `3M7 4M8 +` is an error
+- `1.000001 1000000 ^` = `2.71828046932`, `2. 10000000 ^` = `9.04981730636e3010299`, `(1000000, 1) Q` = `(1000., 5e-4)`, `_1000 H I S` = `-7.60090270954`, `0.999999999999 I C` = `8.10284684541e-5`, `1.0000000001 I S` = `(90., -8.10284684535e-4)`, `1e-3000 E` = `1.`, `m r 1 I S` = `1.57079632679`, `m r 2 I C` = `(0, 1.31695789692)`, `3 p 3 H T` = `0.995`, `_1.0000000001 H I C` = `(1.41421356236e-5, 3.14159265359)` (`numeric_results_match_pari` in `src/app.rs`)
 - last `K` page, `8` = `5.9722e24` (Earth mass), `A` = `7.346e22` (Moon mass), and `F` = `149597870700` (AU)
 
-Transcendentals are checked by known prefixes (pi, e, ln 2), not by matching Emacs Calc digit for digit. Exact values can be checked with the Emacs Calc command above.
+Transcendentals are checked by known prefixes (pi, e, ln 2) or against PARI/GP, not by matching Emacs Calc digit for digit. Exact values can be checked with the Emacs Calc command above.
 
 ## Not in this version
 
@@ -165,6 +188,15 @@ Entry and stack details that are easy to get wrong:
 - `q` quits when nothing is being typed. While radix or word size is being typed, `q` cancels that prompt and leaves the stack. A variable name can contain `q`. `q` does not quit while `K`, `s l`, or the command reference is open. The shortcut list pages with Tab and Shift-Tab, and `q` still quits there. `p` is not a prompt: it pops an integer and sets the precision.
 - Do not polish add, sub, mul, or div. `(1/3)*3` can display as `0.999…`, and `sqrt(2)^2` as `1.999…`.
 - `snap_close_integer` in `float.rs` snaps only a guard-digit speck: the unrounded value must be within three digits past the last one shown. Judging the rounded value would snap a true result one unit below a power of ten. `0.999999999998 Q` is `0.999999999999`, `_1e-12 E` is `0.999999999999`, and `10 L E` is `9.99999999996`, as in Emacs Calc and PARI/GP. At precision 16, `1 E L` is `0.9999999999999999`, because 16-digit e rounds down.
+- A float exponent saturates inside `DecFloat` and never wraps. `value::in_range`, called from `Engine::unary_mod` and `Engine::binop_mod`, turns a result whose order is past ±10^18 into `overflow`. Squaring `2.5e999999` 45 times is an overflow, not a wrapped exponent.
+- `pow_int` in `value.rs` sends a float base to `DecFloat::powi`, which carries one guard digit per exponent bit. Do not multiply a float at the display precision in a loop: the error grows with the exponent. An exact base is limited by the size of the result (`e * log2` of the larger of numerator and denominator against `MAX_POWER_BITS`, about 2.5 million digits), not by the exponent, so `2. 10000000 ^` and `1 2000000 ^` answer and `10 100000 ^ 100000 ^` is `overflow`. The numerator and denominator are raised separately with `BigInt::pow` and joined with `new_raw`: they share no factor, and multiplying fractions in a loop ran a gcd on million-digit numbers (`1:3 4194303 ^` took 96 s). A negative power is a float unless fraction mode is on (`3:2 _2 ^` is `0.444444444444`). A float of magnitude 1 is `±1.` for any exponent, and an exponent past `i64` goes through exp/ln. A complex base still caps the exponent at 20 bits.
+- `pow_exp_ln` adds one guard digit per integer digit of `exp * ln(base)` (up to 40). Without them `_1.23e600000 1000001:3 ^` was wrong from the eighth digit.
+- `pi / n` is `DecFloat::pi_over(n, prec)`, rounded once. `pi(prec) / 2` gave `1.5707963268` for `m r 1 I S`.
+- Avoid a difference that cancels. Complex `sqrt` takes the larger part from `radius + |x|` and the other as `y / (2 * larger)`. `acos` is `atan2(sqrt((1 - x)(1 + x)), x)`. Real `asinh`, `acosh`, and `atanh` use `ln_1p` forms (`asinh_float`, `acosh_float`) and the odd symmetry. `asin` of a real past 1 is `(±90, ∓acosh|x|)`. `acos` past 1 is `(0, acosh x)`, and `(180, -acosh|x|)` below -1. Real `acosh` below -1 is `(acosh|x|, pi)`. Real `tanh` is `-t / (2 + t)` with `t = expm1(-2|x|)`, rounded once (`sinh / cosh` missed the last digit half the time), and past `2 * precision + 10` it is `±1.`.
+- In degrees, an inverse trig result stays at `prec + 8` (`angle_prec`) until `from_radians` has scaled it. Scaling a rounded angle gave `0.5 I C` = `60.0000000002`.
+- `reduction_prec` in `float.rs` adds digits only for a large argument. A tiny one needs none: `1e-3000 E` is `1.` and `1e-3000 S` is `1.74532925199e-3002`.
+- `+ - * /` keep a tiny complex part: `(1, 1e-20) (0, 1) *` is `(-1e-20, 1.)`. Only transcendental results drop a part more than `prec` orders below the other (`finish_complex`).
+- `c F` runs the continued fraction until the half-ulp tolerance is met. It has no term cap: 80 terms stopped short past about 80 digits.
 - `digit_count` and `strip_trailing_zeros` in `float.rs` run on every rounding. Do not print the mantissa to count or strip digits. That is quadratic and made `exp` at precision 1000 take about 2s instead of 0.3s.
 - An unparsable radix literal names the whole literal: `16#` says `bad entry: 16#`.
 - Modulo forms follow Calc. `M` while typing an integer inserts ` mod ` (`3M1000` is `3 mod 1000`), and a second `M` fills in the previous modulus. `M` is still a digit in a radix literal above 22 (`36#mM7` is one number). DEL removes ` mod ` in one piece, a space waits for the modulus, and in `ec -e` a word ending in `M` continues into the next (`3M 1000`). A bare `M` says `type an integer before M`, and `3.5M` says `modulo forms need integers` and keeps the entry. The value is `Value::Mod(a, m)`, always reduced. `+ - * / ^`, `n`, `&`, and `I Q` take a form with an integer (an exact integer float is accepted; a whole float past the integer bound, such as `1e100001`, is `overflow`) or a form of the same modulus. After ` mod `, `(`, `,` and `)` are not entry keys. Different moduli say `modulo forms need the same modulus`. `/` and `&` multiply by the modular inverse, so `3M6 2 /` says `no modular inverse` and a zero divisor is `division by zero`. `^` uses `BigInt::modpow`, so an exponent such as `10^30` is fine. A negative power inverts first. A form used as the exponent contributes its residue, as in Calc. `0M7 0 ^` is `1 mod 7`, where Calc prints a plain `1`; PARI/GP agrees with `1 mod 7`. Display formats both sides in the current radix (`16#3 mod 16#7`).

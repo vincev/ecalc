@@ -2164,6 +2164,98 @@ mod tests {
         assert_eq!(eval("3M 1000 567 ^").as_deref(), Ok("587 mod 1000"));
     }
 
+    /// Values checked against PARI/GP at 30 digits, rounded to 12.
+    #[test]
+    fn numeric_results_match_pari() {
+        let ok = |program: &str| eval(program).ok().unwrap_or_else(|| "error".to_string());
+        // A float base keeps guard digits, and the exponent has no 20-bit cap.
+        assert_eq!(ok("1.000001 1000000 ^"), "2.71828046932");
+        assert_eq!(ok("1.0000001 2000000 ^"), "1.22140274595");
+        assert_eq!(ok("2. 10000000 ^"), "9.04981730636e3010299");
+        assert_eq!(ok("1 2000000 ^"), "1");
+        assert_eq!(ok("_1 2000001 ^"), "-1");
+        assert_eq!(ok("1.1 _7 ^"), "0.513158118231");
+        assert_eq!(ok("10 100000 ^ 100000 ^"), "error");
+        // Complex square root keeps the small part.
+        assert_eq!(ok("(1000000, 1) Q"), "(1000., 5e-4)");
+        assert_eq!(ok("(_1000000, _1) Q"), "(5e-4, -1000.)");
+        assert_eq!(ok("(3, 4) Q"), "(2., 1.)");
+        // Inverse hyperbolics.
+        assert_eq!(ok("_1000 H I S"), "-7.60090270954");
+        assert_eq!(ok("_1e10 H I S"), "-23.7189981105");
+        assert_eq!(ok("1e-13 H I S"), "1e-13");
+        assert_eq!(ok("1e-13 H I T"), "1e-13");
+        assert_eq!(ok("_0.5 H I T"), "-0.549306144334");
+        assert_eq!(ok("1.00000001 H I C"), "1.41421356119e-4");
+        assert_eq!(ok("1e2100 H T"), "1.");
+        // Inverse trig near and past 1.
+        assert_eq!(ok("0.999999999999 I C"), "8.10284684541e-5");
+        assert_eq!(ok("0.999999 I C"), "0.0810284752065");
+        assert_eq!(ok("0.5 I C"), "60.");
+        assert_eq!(ok("0.5 I S"), "30.");
+        assert_eq!(ok("1.0000000001 I S"), "(90., -8.10284684535e-4)");
+        assert_eq!(ok("_2 I S"), "(-90., 75.4561292902)");
+        // A tiny argument is not an overflow.
+        assert_eq!(ok("1e-3000 E"), "1.");
+        assert_eq!(ok("1e-3000 S"), "1.74532925199e-3002");
+        // The principal value, and the real odd root on `I ^`.
+        assert_eq!(ok("_8 1:3 ^"), "(1., 1.73205080757)");
+        assert_eq!(ok("_8 3 I ^"), "-2");
+        // Arithmetic keeps a tiny complex part.
+        assert_eq!(ok("(1, 1e-20) (0, 1) *"), "(-1e-20, 1.)");
+        // A fraction from 200 digits of pi converts back to the same digits.
+        assert_eq!(ok("200 p P c F c f P -"), "0.");
+        // pi over a whole number is rounded once.
+        assert_eq!(ok("m r 1 I S"), "1.57079632679");
+        assert_eq!(ok("m r 0 I C"), "1.57079632679");
+        assert_eq!(ok("m r 1 0 f T"), "1.57079632679");
+        assert_eq!(ok("m r 1 I T"), "0.785398163397");
+        // acos past 1 has no real part, and acosh below -1 does not cancel.
+        assert_eq!(ok("m r 2 I C"), "(0, 1.31695789692)");
+        assert_eq!(ok("m r _2 I C"), "(3.14159265359, -1.31695789692)");
+        assert_eq!(
+            ok("_1.0000000001 H I C"),
+            "(1.41421356236e-5, 3.14159265359)"
+        );
+        // tanh is rounded once.
+        assert_eq!(ok("0.697636655571 H T"), "0.602865525931");
+        assert_eq!(ok("0.00938796789773 H T"), "9.38769210792e-3");
+        assert_eq!(ok("3 p 3 H T"), "0.995");
+        assert_eq!(ok("3 p 0.5 H T"), "0.462");
+        // exp/ln keeps a digit for each integer digit of `exp * ln(base)`.
+        assert_eq!(
+            ok("_1.23e600000 1000001:3 ^"),
+            "(1.25723995417e200000229968, -2.17760347792e200000229968)"
+        );
+        assert_eq!(ok("1.23e600000 1000000.5 ^"), "1.4334810418e600000389905");
+        // A float of magnitude 1, and exponents past `i64`.
+        assert_eq!(ok("1. 10000000000000000000 ^"), "1.");
+        assert_eq!(ok("_1. 20000000000000000001 ^"), "-1.");
+        assert_eq!(
+            ok("1.0000001 _9223372036854775808 ^"),
+            "4.14980207926e-400565937987"
+        );
+        // Exact powers: the size bound uses log2 of the base, and a
+        // negative power of a fraction is a float unless fraction mode is on.
+        assert_eq!(ok("2 4194305 ^ 2 4194304 ^ /"), "2");
+        assert_eq!(ok("2 8388609 ^"), "error");
+        assert_eq!(ok("3:2 _2 ^"), "0.444444444444");
+        assert_eq!(ok("m f 3:2 _2 ^"), "4:9");
+        assert_eq!(ok("m f _2 _3 ^"), "-1:8");
+        assert_eq!(ok("_3:2 3 ^"), "-27:8");
+    }
+
+    #[test]
+    fn runaway_exponent_is_an_overflow() {
+        let mut program = String::from("2.5e999999");
+        for _ in 0..45 {
+            program.push_str(" I Q");
+        }
+        assert!(eval(&program).is_err());
+        assert!(eval("1e999999 1e13 ^").is_err());
+        assert!(eval("1e-999999 1e13 ^").is_err());
+    }
+
     #[test]
     fn eval_splits_words_and_prints_the_top() {
         assert_eq!(eval("2 20 ^ d g").as_deref(), Ok("1,048,576"));

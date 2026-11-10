@@ -18,6 +18,10 @@ pub const MAX_PRECISION: u32 = 1000;
 pub const DEFAULT_PRECISION: u32 = 12;
 /// Largest power of ten materialized as an integer.
 pub(crate) const MAX_INTEGER_EXPONENT: u32 = 100_000;
+/// Largest `|order|` a result may have. Exponent arithmetic saturates, so a
+/// runaway power lands past this bound and the caller reports overflow
+/// instead of showing a saturated or wrapped exponent.
+const MAX_ORDER: u64 = 1_000_000_000_000_000_000;
 
 #[derive(Clone)]
 pub struct DecFloat {
@@ -84,8 +88,14 @@ impl DecFloat {
         if self.mantissa.is_zero() {
             0
         } else {
-            self.exponent + digit_count(&self.mantissa) as i64 - 1
+            self.exponent
+                .saturating_add(digit_count(&self.mantissa) as i64 - 1)
         }
+    }
+
+    /// False when the exponent ran past [`MAX_ORDER`] in either direction.
+    pub(crate) fn in_range(&self) -> bool {
+        self.is_zero() || self.order().unsigned_abs() <= MAX_ORDER
     }
 
     pub fn neg(&self) -> Self {
@@ -122,11 +132,11 @@ impl DecFloat {
         if b.is_zero() {
             return a.round_to(prec);
         }
-        let exp_diff = a.exponent - b.exponent;
+        let exp_diff = a.exponent.saturating_sub(b.exponent);
         if exp_diff > digit_count(&b.mantissa) as i64 + work as i64 + 2 {
             return a.round_to(prec);
         }
-        if -exp_diff > digit_count(&a.mantissa) as i64 + work as i64 + 2 {
+        if exp_diff.saturating_neg() > digit_count(&a.mantissa) as i64 + work as i64 + 2 {
             return b.round_to(prec);
         }
         let (am, bm, exp) = if a.exponent <= b.exponent {
@@ -205,7 +215,7 @@ impl DecFloat {
             (false, true) => return Ordering::Greater,
             _ => {}
         }
-        if (self.order() - rhs.order()).abs() > 1 {
+        if self.order().saturating_sub(rhs.order()).unsigned_abs() > 1 {
             let ord = self.order().cmp(&rhs.order());
             return if self.is_negative() {
                 ord.reverse()
@@ -213,7 +223,7 @@ impl DecFloat {
                 ord
             };
         }
-        let exp_diff = self.exponent - rhs.exponent;
+        let exp_diff = self.exponent.saturating_sub(rhs.exponent);
         let (left, right) = if exp_diff >= 0 {
             (
                 &self.mantissa * pow10(exp_diff as u32),
@@ -553,19 +563,21 @@ impl DecFloat {
             };
         }
         if x.is_zero() {
-            let half = Self::pi(prec).div(&Self::from_i64(2, prec), prec)?;
+            let half = Self::pi_over(2, prec);
             return Ok(if y.is_positive() { half } else { half.neg() });
         }
+        // The half turn is added at working precision and rounded once.
         let work = work_prec(prec);
         let slope = y.div(x, work)?;
-        let angle = slope.atan(prec)?;
-        if x.is_positive() {
-            Ok(angle)
+        let angle = slope.atan(work)?;
+        let angle = if x.is_positive() {
+            angle
         } else if y.is_positive() {
-            Ok(angle.add(&Self::pi(prec), prec))
+            angle.add(&Self::pi(work), work)
         } else {
-            Ok(angle.sub(&Self::pi(prec), prec))
-        }
+            angle.sub(&Self::pi(work), work)
+        };
+        Ok(snap_close_integer(angle, prec))
     }
 
     pub fn asin(&self, prec: u32) -> Result<Self, CalcError> {
@@ -576,7 +588,7 @@ impl DecFloat {
             return Err(CalcError::Domain("inverse sine argument out of range"));
         }
         if x.abs().cmp_val(&one) == Ordering::Equal {
-            let half = Self::pi(prec).div(&Self::from_i64(2, prec), prec)?;
+            let half = Self::pi_over(2, prec);
             return Ok(if x.is_negative() { half.neg() } else { half });
         }
         let under = one.sub(&x, work).mul(&one.add(&x, work), work);
@@ -584,10 +596,18 @@ impl DecFloat {
         Self::atan2(&x, &adjacent, prec)
     }
 
+    /// `atan2(sqrt((1 - x)(1 + x)), x)`. `pi/2 - asin(x)` cancels near 1:
+    /// `acos(0.999999999999)` would keep six digits.
     pub fn acos(&self, prec: u32) -> Result<Self, CalcError> {
         let work = work_prec(prec);
-        let half = Self::pi(work).div(&Self::from_i64(2, work), work)?;
-        Ok(snap_close_integer(half.sub(&self.asin(work)?, work), prec))
+        let one = Self::one(work);
+        let x = self.round_to(work);
+        if x.abs().cmp_val(&one) == Ordering::Greater {
+            return Err(CalcError::Domain("inverse cosine argument out of range"));
+        }
+        let under = one.sub(&x, work).mul(&one.add(&x, work), work);
+        let opposite = under.sqrt(work)?;
+        Self::atan2(&opposite, &x, prec)
     }
 
     /// Positive integer power, then one rounding. Negative exponents invert.
@@ -603,12 +623,12 @@ impl DecFloat {
             };
         }
         let neg = exp < 0;
-        let exp = exp.checked_abs().ok_or(CalcError::Overflow)?;
-        let bits = 64 - (exp as u64).leading_zeros();
+        // `unsigned_abs` keeps `i64::MIN`, which has no `i64` magnitude.
+        let mut e = exp.unsigned_abs();
+        let bits = 64 - e.leading_zeros();
         let work = work_prec(prec).saturating_add(bits);
         let mut result = Self::one(work);
         let mut base = self.round_to(work);
-        let mut e = exp as u64;
         while e > 0 {
             if e & 1 == 1 {
                 result = result.mul(&base, work);
@@ -618,12 +638,21 @@ impl DecFloat {
                 base = base.mul(&base, work);
             }
         }
-        let result = result.round_to(prec);
+        // One rounding: invert the working value, not the rounded one.
         if neg {
-            Self::one(prec).div(&result, prec)
+            Self::one(work).div(&result, prec)
         } else {
-            Ok(result)
+            Ok(result.round_to(prec))
         }
+    }
+
+    /// `pi / n`, rounded once. Dividing `pi(prec)` rounds twice, and
+    /// `pi / 2` came out as `1.5707963268`.
+    pub fn pi_over(n: i64, prec: u32) -> Self {
+        let work = prec.saturating_add(4);
+        Self::pi(work)
+            .div(&Self::from_i64(n, work), prec)
+            .expect("n is not zero")
     }
 
     pub fn pi(prec: u32) -> Self {
@@ -723,7 +752,7 @@ impl DecFloat {
         }
         let neg = if self.is_negative() { "-" } else { "" };
         let digits = self.mantissa.abs().to_str_radix(10);
-        let order = self.exponent + digits.len() as i64 - 1;
+        let order = self.exponent.saturating_add(digits.len() as i64 - 1);
         if uses_scientific(order, prec) {
             format!("{neg}{}e{order}", scientific_mantissa(&digits))
         } else {
@@ -814,7 +843,9 @@ fn work_prec(prec: u32) -> u32 {
 const MAX_REDUCTION_EXTRA: u32 = 2_048;
 
 fn reduction_prec(order: i64, work: u32, pad: u32) -> Result<u32, CalcError> {
-    let mag = u32::try_from(order.unsigned_abs()).map_err(|_| CalcError::Overflow)?;
+    // Only a large argument loses digits to the reduction. A tiny one is
+    // already its own remainder, so `exp(1e-3000)` needs nothing extra.
+    let mag = u32::try_from(order.max(0)).map_err(|_| CalcError::Overflow)?;
     let extra = mag.saturating_add(pad);
     if extra > MAX_REDUCTION_EXTRA {
         return Err(CalcError::Overflow);
@@ -894,7 +925,7 @@ fn strip_trailing_zeros(mantissa: &mut BigInt, exponent: &mut i64) {
             break;
         }
         *mantissa = q;
-        *exponent += 1;
+        *exponent = exponent.saturating_add(1);
     }
 }
 

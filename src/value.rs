@@ -299,6 +299,22 @@ fn mod_pow(b: &BigInt, e: &BigInt, m: &BigInt) -> Result<Value, CalcError> {
     Value::make_mod(base.modpow(&e.abs(), m), m.clone())
 }
 
+/// A result whose float exponent ran away is an overflow. `DecFloat`
+/// saturates its exponent, so this is where a runaway power is reported.
+pub(crate) fn in_range(v: Value) -> Result<Value, CalcError> {
+    let ok = |r: &Real| !matches!(r, Real::Float(f) if !f.in_range());
+    let fits = match &v {
+        Value::Real(r) => ok(r),
+        Value::Complex(re, im) => ok(re) && ok(im),
+        Value::Mod(_, _) => true,
+    };
+    if fits {
+        Ok(v)
+    } else {
+        Err(CalcError::Overflow)
+    }
+}
+
 fn exact_real(real: &Real) -> Option<BigInt> {
     match real {
         Real::Int(n) => Some(n.clone()),
@@ -360,7 +376,9 @@ pub fn add(a: &Value, b: &Value, mode: &Mode) -> Result<Value, CalcError> {
     let (br, bi) = b.parts();
     let re = add_real(&ar, &br, mode)?;
     let im = add_real(&ai, &bi, mode)?;
-    Ok(finish_complex(re, im, mode.prec))
+    // Arithmetic keeps a tiny part, as Calc and PARI/GP do. Only the
+    // transcendental results drop a rounding speck (`finish_complex`).
+    Ok(Value::complex(re, im))
 }
 
 pub fn sub(a: &Value, b: &Value, mode: &Mode) -> Result<Value, CalcError> {
@@ -380,7 +398,7 @@ pub fn mul(a: &Value, b: &Value, mode: &Mode) -> Result<Value, CalcError> {
     // (ar*br - ai*bi, ar*bi + ai*br)
     let re = sub_real(&mul_real(&ar, &br, mode)?, &mul_real(&ai, &bi, mode)?, mode)?;
     let im = add_real(&mul_real(&ar, &bi, mode)?, &mul_real(&ai, &br, mode)?, mode)?;
-    Ok(finish_complex(re, im, mode.prec))
+    Ok(Value::complex(re, im))
 }
 
 pub fn div(a: &Value, b: &Value, mode: &Mode) -> Result<Value, CalcError> {
@@ -396,7 +414,7 @@ pub fn div(a: &Value, b: &Value, mode: &Mode) -> Result<Value, CalcError> {
         let (ar, ai) = a.parts();
         let re = div_real(&ar, &br, mode)?;
         let im = div_real(&ai, &br, mode)?;
-        return Ok(finish_complex(re, im, mode.prec));
+        return Ok(Value::complex(re, im));
     }
     // One division of each component. Building the conjugate and multiplying
     // first would round those products, and could drop a tiny imaginary part,
@@ -413,7 +431,7 @@ pub fn div(a: &Value, b: &Value, mode: &Mode) -> Result<Value, CalcError> {
         let im_num = (&ai * &br) - (&ar * &bi);
         let re = quotient_real(re_num, norm.clone(), mode)?;
         let im = quotient_real(im_num, norm, mode)?;
-        return Ok(finish_complex(re, im, mode.prec));
+        return Ok(Value::complex(re, im));
     }
     div_complex_float(&ar, &ai, &br, &bi, mode)
 }
@@ -461,10 +479,9 @@ fn div_complex_float(
         .mul(&br, work)
         .sub(&ar.mul(&bi, work), work)
         .div(&norm, work)?;
-    Ok(finish_complex(
+    Ok(Value::complex(
         Real::Float(re.round_to(mode.prec)),
         Real::Float(im.round_to(mode.prec)),
-        mode.prec,
     ))
 }
 
@@ -680,6 +697,9 @@ fn real_exponent_int(exp: &Value) -> Option<BigInt> {
     exact_int(exp)
 }
 
+/// Largest exact power, in bits of the result. `10^1048575` fits.
+const MAX_POWER_BITS: u64 = 1 << 23;
+
 fn pow_int(base: &Value, exp: &BigInt, mode: &Mode) -> Result<Value, CalcError> {
     if exp.is_zero() {
         return Ok(Value::from_int(1));
@@ -691,26 +711,116 @@ fn pow_int(base: &Value, exp: &BigInt, mode: &Mode) -> Result<Value, CalcError> 
             Err(CalcError::DivideByZero)
         };
     }
-    if exp.bits() > 20 {
-        return Err(CalcError::Overflow);
+    match base {
+        // A float carries guard digits through the squarings. Multiplying
+        // at the display precision loses a digit for every digit of the
+        // exponent: `1.000001^1000000` kept six.
+        Value::Real(Real::Float(f)) => {
+            if f.abs().cmp_val(&DecFloat::one(4)) == Ordering::Equal {
+                let one = DecFloat::one(mode.prec);
+                let minus = f.is_negative() && exp.is_odd();
+                return Ok(Value::Real(Real::Float(if minus {
+                    one.neg()
+                } else {
+                    one
+                })));
+            }
+            // Past `i64` only a base within a hair of 1 stays in range. The
+            // magnitude goes through exp/ln and the sign follows the parity.
+            let Some(e) = exp.to_i64() else {
+                let mag = Value::Real(Real::Float(f.abs()));
+                let out = pow_exp_ln(&mag, &Value::from_int(exp.clone()), mode)?;
+                let minus = f.is_negative() && exp.is_odd();
+                return Ok(if minus { neg(&out) } else { out });
+            };
+            return Ok(Value::Real(Real::Float(f.powi(e, mode.prec)?)));
+        }
+        Value::Real(r) if r.abs().is_one() => {
+            let minus = r.is_negative() && exp.is_odd();
+            return Ok(Value::from_int(if minus { -1 } else { 1 }));
+        }
+        // An exact power is bounded by the size of the result, not by the
+        // exponent alone. The numerator and denominator are raised on their
+        // own: they share no factor, so the result needs no gcd. Multiplying
+        // fractions ran a gcd on million-digit numbers at every step, and
+        // `1:3 4194303 ^` took a minute and a half.
+        Value::Real(r) => {
+            let (n, d) = match r {
+                Real::Int(n) => (n.clone(), BigInt::one()),
+                Real::Rat(q) => (q.numer().clone(), q.denom().clone()),
+                Real::Float(_) => unreachable!("floats are handled above"),
+            };
+            let e = exp.abs().to_u64().ok_or(CalcError::Overflow)?;
+            let size = log2_abs(&n).max(log2_abs(&d)) * e as f64;
+            if size > MAX_POWER_BITS as f64 {
+                return Err(CalcError::Overflow);
+            }
+            // `|n|` or `d` is at least 2 here, so `e` is under 2^24.
+            let e = u32::try_from(e).map_err(|_| CalcError::Overflow)?;
+            let (n, d) = (n.pow(e), d.pow(e));
+            if !exp.is_negative() {
+                return Ok(Value::from_rational(BigRational::new_raw(n, d)));
+            }
+            if mode.fraction {
+                let (n, d) = if n.is_negative() { (-d, -n) } else { (d, n) };
+                return Ok(Value::from_rational(BigRational::new_raw(n, d)));
+            }
+            let mut wide = mode.clone();
+            wide.prec = mode.prec.saturating_add(4);
+            let out = div(&Value::from_int(d), &Value::from_int(n), &wide)?;
+            return Ok(round_floats(out, mode.prec));
+        }
+        _ => {
+            if exp.bits() > 20 {
+                return Err(CalcError::Overflow);
+            }
+        }
     }
+    // Guard digits for a complex float base and for the final division.
+    let mut wide = mode.clone();
+    wide.prec = mode
+        .prec
+        .saturating_add(u32::try_from(exp.bits()).unwrap_or(u32::MAX))
+        .saturating_add(4);
     let negative = exp.is_negative();
     let mut e = exp.abs();
     let mut result = Value::from_int(1);
     let mut factor = base.clone();
     while e.is_positive() {
         if e.is_odd() {
-            result = mul(&result, &factor, mode)?;
+            result = mul(&result, &factor, &wide)?;
         }
         e >>= 1;
         if e.is_positive() {
-            factor = mul(&factor, &factor, mode)?;
+            factor = mul(&factor, &factor, &wide)?;
         }
     }
     if negative {
-        div(&Value::from_int(1), &result, mode)
-    } else {
-        Ok(result)
+        result = div(&Value::from_int(1), &result, &wide)?;
+    }
+    Ok(round_floats(result, mode.prec))
+}
+
+/// `log2 |n|`, from the top 64 bits. 0 for 0 and 1.
+fn log2_abs(n: &BigInt) -> f64 {
+    let bits = n.bits();
+    if bits == 0 {
+        return 0.0;
+    }
+    let shift = bits.saturating_sub(64);
+    let top = (n.abs() >> shift).to_u64().unwrap_or(u64::MAX);
+    shift as f64 + (top as f64).log2()
+}
+
+fn round_floats(v: Value, prec: u32) -> Value {
+    let round = |r: Real| match r {
+        Real::Float(f) => Real::Float(f.round_to(prec)),
+        other => other,
+    };
+    match v {
+        Value::Real(r) => Value::Real(round(r)),
+        Value::Complex(re, im) => Value::complex(round(re), round(im)),
+        other => other,
     }
 }
 
@@ -722,6 +832,12 @@ fn pow_rational(base: &Value, exp: &BigRational, mode: &Mode) -> Result<Value, C
     // the common case). Building `root^numer` exactly would trip the integer
     // power guard, so go through exp/ln instead of reporting overflow.
     if exp.numer().bits() > 20 {
+        return pow_exp_ln(base, &Value::from_rational(exp.clone()), mode);
+    }
+    // A fractional power of a negative number is the principal value, as in
+    // Calc and PARI/GP: `(-8)^(1:3)` is `(1, 1.732...)`. The real odd root
+    // `-2` is `I ^`, Calc's `nroot`.
+    if matches!(base, Value::Real(r) if r.is_negative()) && exp.denom().is_odd() {
         return pow_exp_ln(base, &Value::from_rational(exp.clone()), mode);
     }
     // The root is rounded, and raising it to `numer` multiplies that error by
@@ -846,10 +962,33 @@ fn pow_exp_ln(base: &Value, exp: &Value, mode: &Mode) -> Result<Value, CalcError
     // moves the last digit or two. Keep guard digits until the end.
     let mut wide = mode.clone();
     wide.prec = mode.prec.saturating_add(8);
-    let l = ln(base, &wide)?;
-    let p = mul(exp, &l, &wide)?;
+    let mut l = ln(base, &wide)?;
+    let mut p = mul(exp, &l, &wide)?;
+    // `exp` turns each integer digit of `p` into a lost digit of the
+    // result: `(-1.23e600000)^(1000001:3)` has `p` near 10^6 and was wrong
+    // from the eighth digit. Past 40 the result overflows anyway.
+    let int_digits = value_order(&p).clamp(0, 40) as u32;
+    if int_digits > 0 {
+        wide.prec = wide.prec.saturating_add(int_digits + 1);
+        l = ln(base, &wide)?;
+        p = mul(exp, &l, &wide)?;
+    }
     let result = exp_value(&p, &wide)?;
     Ok(polish(result, mode.prec))
+}
+
+/// Order of the larger part. 0 when both are zero.
+fn value_order(v: &Value) -> i64 {
+    let order = |r: &Real| match r.to_float(16) {
+        Ok(f) if !f.is_zero() => f.order(),
+        _ => i64::MIN,
+    };
+    let best = match v {
+        Value::Real(r) => order(r),
+        Value::Complex(re, im) => order(re).max(order(im)),
+        Value::Mod(_, _) => i64::MIN,
+    };
+    if best == i64::MIN { 0 } else { best }
 }
 
 pub fn sqrt(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
@@ -864,25 +1003,29 @@ pub fn sqrt(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         }
         Value::Real(_) => nth_root(v, &BigInt::from(2), mode),
         Value::Complex(re, im) => {
-            let x = re.to_float(mode.prec)?;
-            let y = im.to_float(mode.prec)?;
-            let radius = float_hypot(&x, &y, mode.prec)?;
-            let two = DecFloat::from_i64(2, mode.prec);
-            let re_s = radius
-                .add(&x, mode.prec + 2)
-                .div(&two, mode.prec + 2)?
-                .sqrt(mode.prec)?;
-            let mut im_s = radius
-                .sub(&x, mode.prec + 2)
-                .div(&two, mode.prec + 2)?
-                .sqrt(mode.prec)?;
-            if y.is_negative() {
-                im_s = im_s.neg();
+            let work = mode.prec.saturating_add(4);
+            let x = re.to_float(work)?;
+            let y = im.to_float(work)?;
+            if y.is_zero() {
+                return sqrt(&Value::Real(re.clone()), mode);
             }
-            Ok(finish_complex(
-                Real::Float(re_s),
-                Real::Float(im_s),
-                mode.prec,
+            // The part on the side of `x` comes from `radius + |x|`. The
+            // other one is `y / (2 * that)`: `radius - |x|` cancels when
+            // one part dominates, and `sqrt((1000000, 1))` lost its
+            // imaginary part.
+            let radius = float_hypot(&x, &y, work)?;
+            let two = DecFloat::from_i64(2, work);
+            let large = radius.add(&x.abs(), work).div(&two, work)?.sqrt(work)?;
+            let small = y.abs().div(&large.mul(&two, work), work)?;
+            let (re_s, im_s) = if x.is_negative() {
+                (small, large)
+            } else {
+                (large, small)
+            };
+            let im_s = if y.is_negative() { im_s.neg() } else { im_s };
+            Ok(Value::complex(
+                Real::Float(re_s.polished(mode.prec)),
+                Real::Float(im_s.polished(mode.prec)),
             ))
         }
     }
@@ -1324,10 +1467,7 @@ fn real_is_zero(v: &Value) -> bool {
 fn quarter_turn(mode: &Mode) -> Result<Value, CalcError> {
     match mode.angle {
         AngleMode::Degrees => Ok(Value::from_int(90)),
-        AngleMode::Radians => {
-            let half = DecFloat::pi(mode.prec).div(&DecFloat::from_i64(2, mode.prec), mode.prec)?;
-            Ok(Value::Real(Real::Float(half)))
-        }
+        AngleMode::Radians => Ok(Value::Real(Real::Float(DecFloat::pi_over(2, mode.prec)))),
     }
 }
 
@@ -1479,12 +1619,28 @@ pub fn asin(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         }
     }
     if let Value::Real(r) = v {
-        // Eight digits separates `|z| > 1` from a value that rounds to 1.
-        let one = DecFloat::one(8);
-        if r.abs().to_float(8)?.cmp_val(&one) != Ordering::Greater {
-            let rad = r.to_float(mode.prec)?.asin(mode.prec)?;
+        let angle = angle_prec(mode);
+        if cmp_one(&r.abs()) != Ordering::Greater {
+            let rad = r.to_float(mode.prec)?.asin(angle)?;
             return from_radians_real(rad, mode);
         }
+        // Past 1 the result is `(pi/2, -acosh(x))`, odd in `x`. The log
+        // formula below cancels just above 1.
+        let work = mode.prec.saturating_add(8);
+        let im = acosh_float(&r.abs().to_float(work)?, work)?;
+        let half = DecFloat::pi(work).div(&DecFloat::from_i64(2, work), work)?;
+        let (re, im) = if r.is_negative() {
+            (half.neg(), im)
+        } else {
+            (half, im.neg())
+        };
+        return from_radians(
+            Value::complex(
+                Real::Float(re.round_to(angle)),
+                Real::Float(im.round_to(angle)),
+            ),
+            mode,
+        );
     }
     // asin(z) = -i ln(i z + sqrt(1 - z^2)), result still in radians.
     let i = Value::complex(Real::Int(BigInt::zero()), Real::Int(BigInt::one()));
@@ -1514,6 +1670,28 @@ pub fn acos(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
             };
         }
     }
+    if let Value::Real(r) = v
+        && cmp_one(&r.abs()) != Ordering::Greater
+    {
+        let rad = r.to_float(mode.prec)?.acos(angle_prec(mode))?;
+        return from_radians_real(rad, mode);
+    }
+    // Past 1 the result is `(0, acosh(x))`, and `(pi, -acosh|x|)` below -1.
+    // `pi/2 - asin(x)` left a real part of one ulp.
+    if let Value::Real(r) = v {
+        let work = mode.prec.saturating_add(8);
+        let angle = angle_prec(mode);
+        let im = acosh_float(&r.abs().to_float(work)?, work)?;
+        let rad = if r.is_negative() {
+            Value::complex(
+                Real::Float(DecFloat::pi(angle)),
+                Real::Float(im.neg().round_to(angle)),
+            )
+        } else {
+            Value::complex(Real::Int(BigInt::zero()), Real::Float(im.round_to(angle)))
+        };
+        return from_radians(rad, mode);
+    }
     let half = quarter_turn(mode)?;
     sub(&half, &asin(v, mode)?, mode)
 }
@@ -1526,11 +1704,7 @@ pub fn atan(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         if n.is_one() {
             return match mode.angle {
                 AngleMode::Degrees => Ok(Value::from_int(45)),
-                AngleMode::Radians => {
-                    let q = DecFloat::pi(mode.prec)
-                        .div(&DecFloat::from_i64(4, mode.prec), mode.prec)?;
-                    Ok(Value::Real(Real::Float(q)))
-                }
+                AngleMode::Radians => Ok(Value::Real(Real::Float(DecFloat::pi_over(4, mode.prec)))),
             };
         }
         if n == BigInt::from(-1) {
@@ -1538,7 +1712,7 @@ pub fn atan(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         }
     }
     if let Value::Real(r) = v {
-        let rad = r.to_float(mode.prec)?.atan(mode.prec)?;
+        let rad = r.to_float(mode.prec)?.atan(angle_prec(mode))?;
         return from_radians_real(rad, mode);
     }
     // (ln(1 + i z) - ln(1 - i z)) / (2 i)
@@ -1563,7 +1737,7 @@ pub fn atan2(y: &Value, x: &Value, mode: &Mode) -> Result<Value, CalcError> {
     if yr.is_zero() || xr.is_zero() {
         return atan2_axis(yr, xr, mode);
     }
-    let rad = atan2_radians(yr, xr, mode.prec)?;
+    let rad = atan2_radians(yr, xr, angle_prec(mode))?;
     from_radians_real(rad, mode)
 }
 
@@ -1582,11 +1756,10 @@ fn atan2_axis(y: &Real, x: &Real, mode: &Mode) -> Result<Value, CalcError> {
             if right_angles == 0 {
                 return Ok(Value::from_int(0));
             }
-            let pi = DecFloat::pi(mode.prec);
             let mag = if right_angles.abs() == 2 {
-                pi
+                DecFloat::pi(mode.prec)
             } else {
-                pi.div(&DecFloat::from_i64(2, mode.prec), mode.prec)?
+                DecFloat::pi_over(2, mode.prec)
             };
             let signed = if right_angles < 0 { mag.neg() } else { mag };
             Ok(Value::Real(Real::Float(signed)))
@@ -1608,10 +1781,24 @@ fn from_radians(v: Value, mode: &Mode) -> Result<Value, CalcError> {
     if mode.angle == AngleMode::Radians {
         return Ok(polish(v, mode.prec));
     }
-    let pi = DecFloat::pi(mode.prec + 4);
-    let scale = DecFloat::from_i64(180, mode.prec + 4).div(&pi, mode.prec + 4)?;
-    let scaled = mul(&v, &Value::Real(Real::Float(scale)), mode)?;
+    // Scale the guarded radians and round once. Scaling an angle already
+    // rounded to the display precision moves the last digit: `acos(0.5)`
+    // came out as `60.0000000002`.
+    let mut wide = mode.clone();
+    wide.prec = angle_prec(mode);
+    let pi = DecFloat::pi(wide.prec);
+    let scale = DecFloat::from_i64(180, wide.prec).div(&pi, wide.prec)?;
+    let scaled = mul(&v, &Value::Real(Real::Float(scale)), &wide)?;
     Ok(polish(scaled, mode.prec))
+}
+
+/// Digits an inverse trig result keeps in radians before `from_radians`.
+/// Degrees carry guard digits through the conversion.
+fn angle_prec(mode: &Mode) -> u32 {
+    match mode.angle {
+        AngleMode::Degrees => mode.prec.saturating_add(8),
+        AngleMode::Radians => mode.prec,
+    }
 }
 
 pub fn sinh(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
@@ -1623,19 +1810,92 @@ pub fn cosh(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 }
 
 pub fn tanh(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
+    // Past this size `tanh` is 1 to every digit, and `exp` would overflow
+    // long before the quotient could say so.
+    if let Value::Real(r) = v {
+        let f = r.to_float(mode.prec)?;
+        let limit = DecFloat::from_i64(2 * i64::from(mode.prec) + 10, mode.prec);
+        if f.abs().cmp_val(&limit) == Ordering::Greater {
+            let one = DecFloat::one(mode.prec);
+            let one = if f.is_negative() { one.neg() } else { one };
+            return Ok(Value::Real(Real::Float(one)));
+        }
+        if r.is_zero() {
+            return Ok(Value::Real(Real::Float(DecFloat::zero(mode.prec))));
+        }
+        // `-t / (2 + t)` with `t = expm1(-2|x|)`, rounded once. `sinh / cosh`
+        // rounded each part first and missed the last digit about half the
+        // time.
+        let work = mode.prec.saturating_add(8);
+        let one = DecFloat::one(work);
+        let two = DecFloat::from_i64(2, work);
+        let m2 = r.abs().to_float(work)?.mul(&two, work).neg();
+        let t = if m2.order() < 0 {
+            m2.exp_minus_one(work)?
+        } else {
+            m2.exp(work)?.sub(&one, work)
+        };
+        let out = t.neg().div(&two.add(&t, work), work)?;
+        let out = if r.is_negative() { out.neg() } else { out };
+        return Ok(Value::Real(Real::Float(out.polished(mode.prec))));
+    }
     let s = sinh(v, mode)?;
     let c = cosh(v, mode)?;
     div(&s, &c, mode)
 }
 
 pub fn asinh(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
+    if let Value::Real(r) = v {
+        if r.is_zero() {
+            return Ok(Value::from_int(0));
+        }
+        // Odd in `x`: `ln(x + sqrt(x^2 + 1))` cancels for a negative `x`.
+        let work = mode.prec.saturating_add(8);
+        let out = asinh_float(&r.abs().to_float(work)?, work)?;
+        let out = if r.is_negative() { out.neg() } else { out };
+        return Ok(Value::Real(Real::Float(out.polished(mode.prec))));
+    }
     // ln(z + sqrt(z^2 + 1))
     let inside = add(&square(v, mode)?, &Value::from_int(1), mode)?;
     let sum = add(v, &sqrt(&inside, mode)?, mode)?;
     ln(&sum, mode)
 }
 
+/// `asinh(a)` for `a > 0`. Below 1 it is
+/// `ln1p(a + a^2 / (1 + sqrt(1 + a^2)))`, so a tiny `a` is not lost in `1 + a`.
+fn asinh_float(a: &DecFloat, work: u32) -> Result<DecFloat, CalcError> {
+    let one = DecFloat::one(work);
+    let square = a.mul(a, work);
+    let root = square.add(&one, work).sqrt(work)?;
+    if a.order() < 0 {
+        let t = square.div(&one.add(&root, work), work)?;
+        a.add(&t, work).ln_1p(work)
+    } else {
+        a.add(&root, work).ln(work)
+    }
+}
+
 pub fn acosh(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
+    if let Value::Real(r) = v {
+        match cmp_one(r) {
+            Ordering::Equal => return Ok(Value::from_int(0)),
+            Ordering::Greater => {
+                let work = mode.prec.saturating_add(8);
+                let out = acosh_float(&r.to_float(work)?, work)?;
+                return Ok(Value::Real(Real::Float(out.polished(mode.prec))));
+            }
+            Ordering::Less => {}
+        }
+        // Below -1 it is `(acosh|x|, pi)`. The log form cancels near -1.
+        if r.is_negative() && cmp_one(&r.abs()) == Ordering::Greater {
+            let work = mode.prec.saturating_add(8);
+            let re = acosh_float(&r.abs().to_float(work)?, work)?;
+            return Ok(Value::complex(
+                Real::Float(re.polished(mode.prec)),
+                Real::Float(DecFloat::pi(mode.prec)),
+            ));
+        }
+    }
     // ln(z + sqrt(z - 1) sqrt(z + 1))
     let minus = sqrt(&sub(v, &Value::from_int(1), mode)?, mode)?;
     let plus = sqrt(&add(v, &Value::from_int(1), mode)?, mode)?;
@@ -1643,11 +1903,53 @@ pub fn acosh(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     ln(&sum, mode)
 }
 
+/// `acosh(x)` for `x >= 1`, as `ln1p(t + sqrt(t (t + 2)))` with `t = x - 1`.
+/// The plain log form loses half its digits just above 1.
+fn acosh_float(x: &DecFloat, work: u32) -> Result<DecFloat, CalcError> {
+    let t = x.sub(&DecFloat::one(work), work);
+    if !t.is_positive() {
+        return Ok(DecFloat::zero(work));
+    }
+    let root = t
+        .mul(&t.add(&DecFloat::from_i64(2, work), work), work)
+        .sqrt(work)?;
+    t.add(&root, work).ln_1p(work)
+}
+
 pub fn atanh(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
+    if let Value::Real(r) = v {
+        if r.is_zero() {
+            return Ok(Value::from_int(0));
+        }
+        // Inside (-1, 1): `ln1p(2a / (1 - a)) / 2` on the magnitude. The
+        // difference of two logs is 0 for a tiny argument.
+        if cmp_one(&r.abs()) == Ordering::Less {
+            let work = mode.prec.saturating_add(8);
+            let a = r.abs().to_float(work)?;
+            let one = DecFloat::one(work);
+            let two = DecFloat::from_i64(2, work);
+            let gap = one.sub(&a, work);
+            if gap.is_positive() {
+                let ratio = a.mul(&two, work).div(&gap, work)?;
+                let out = ratio.ln_1p(work)?.div(&two, work)?;
+                let out = if r.is_negative() { out.neg() } else { out };
+                return Ok(Value::Real(Real::Float(out.polished(mode.prec))));
+            }
+        }
+    }
     let num = ln(&add(&Value::from_int(1), v, mode)?, mode)?;
     let den = ln(&sub(&Value::from_int(1), v, mode)?, mode)?;
     let diff = sub(&num, &den, mode)?;
     div(&diff, &Value::from_int(2), mode)
+}
+
+/// A real compared with 1, exactly.
+fn cmp_one(r: &Real) -> Ordering {
+    match r {
+        Real::Int(n) => n.cmp(&BigInt::one()),
+        Real::Rat(q) => q.numer().cmp(q.denom()),
+        Real::Float(f) => f.cmp_val(&DecFloat::one(4)),
+    }
 }
 
 enum Hyper {
@@ -1804,7 +2106,9 @@ fn approximate(target: BigRational, tol: BigRational) -> BigRational {
     let mut h1 = BigInt::one();
     let mut k0 = BigInt::one();
     let mut k1 = BigInt::zero();
-    for _ in 0..80 {
+    // The expansion of a rational is finite, so this ends. A fixed cap of
+    // 80 terms stopped short of the tolerance past about 80 digits.
+    loop {
         let a = floor_rat(&x);
         let h = &a * &h1 + &h0;
         let k = &a * &k1 + &k0;
@@ -1824,7 +2128,6 @@ fn approximate(target: BigRational, tol: BigRational) -> BigRational {
         }
         x = frac.recip();
     }
-    signed(BigRational::new(h1, k1), negative)
 }
 
 fn signed(r: BigRational, negative: bool) -> BigRational {

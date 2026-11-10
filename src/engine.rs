@@ -748,7 +748,7 @@ impl Engine {
     /// [`Self::unary`] for an operation that takes a modulo form.
     fn unary_mod(&mut self, op: impl FnOnce(&Value, &Mode) -> Result<Value, CalcError>) {
         let result = if let Some(top) = self.stack.last() {
-            op(top, &self.mode)
+            op(top, &self.mode).and_then(value::in_range)
         } else {
             self.fail(CalcError::StackUnderflow);
             return;
@@ -777,7 +777,7 @@ impl Engine {
     fn binop_mod(&mut self, op: impl FnOnce(&Value, &Value, &Mode) -> Result<Value, CalcError>) {
         let result = if self.stack.len() >= 2 {
             let n = self.stack.len();
-            op(&self.stack[n - 2], &self.stack[n - 1], &self.mode)
+            op(&self.stack[n - 2], &self.stack[n - 1], &self.mode).and_then(value::in_range)
         } else {
             self.fail(CalcError::StackUnderflow);
             return;
