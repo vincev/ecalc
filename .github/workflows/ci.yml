@@ -4,15 +4,18 @@ on:
   push:
   pull_request:
 
+# The jobs only read the code, so the token gets nothing else.
+permissions:
+  contents: read
+
 jobs:
   check:
     name: fmt and clippy
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
           components: rustfmt, clippy
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
@@ -23,10 +26,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, "1.89.0"]
+        # 1.89 is `rust-version` in Cargo.toml. Change both together.
+        toolchain: [stable, "1.89"]
     steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ matrix.toolchain }}
       - run: cargo test
