@@ -5,6 +5,9 @@
 //! stack and the variables. Mode changes are not undoable. `push` and `dup`
 //! only change the stack, so a one-shot prefix can survive them.
 //!
+//! Every pushed number and every result goes on the trail, with the label
+//! the key map set for the command. The trail is a log, so undo leaves it.
+//!
 //! `unary` and `binop` reject a modulo form. The operations Calc defines on
 //! one (`+ - * / ^`, negate, reciprocal, square) use `unary_mod` and
 //! `binop_mod`, so a new operation cannot take one by accident.
@@ -16,7 +19,7 @@ use crate::radix::{self, MAX_RADIX, MAX_WORD_SIZE, MIN_RADIX, MIN_WORD_SIZE};
 use crate::value::{self, AngleMode, Mode, NOT_FOR_MOD, Value};
 use num_bigint::BigInt;
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 /// What the prompt's message slot is showing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -29,6 +32,19 @@ pub enum Status {
 
 const UNDO_CAP: usize = 100;
 pub(crate) const MAX_VAR_LEN: usize = 32;
+/// Trail entries kept. The oldest is dropped first.
+pub(crate) const TRAIL_CAP: usize = 1000;
+/// Digits the trail may hold, in bytes. A run of million-digit results
+/// drops the oldest entries before the count cap would.
+pub(crate) const TRAIL_BYTES: usize = 64 << 20;
+
+/// One value on the trail. `label` is the command that made it, such as
+/// `*` or `k f`, and is empty for a typed number.
+#[derive(Clone, Debug)]
+pub struct TrailEntry {
+    pub label: String,
+    pub value: Value,
+}
 
 #[derive(Clone, Debug)]
 struct Snapshot {
@@ -44,6 +60,11 @@ pub struct Engine {
     redo: Vec<Snapshot>,
     mode: Mode,
     status: Status,
+    trail: VecDeque<TrailEntry>,
+    /// Sum of `approx_bytes` over the trail.
+    trail_bytes: usize,
+    /// Label for the next trail entries. The key map sets it per command.
+    label: String,
 }
 
 impl Default for Engine {
@@ -61,6 +82,9 @@ impl Engine {
             redo: Vec::new(),
             mode: Mode::default(),
             status: Status::Empty,
+            trail: VecDeque::new(),
+            trail_bytes: 0,
+            label: String::new(),
         }
     }
 
@@ -124,8 +148,48 @@ impl Engine {
 
     pub fn push(&mut self, value: Value) {
         self.checkpoint();
+        self.record(&value);
         self.stack.push(value);
         self.clear_message();
+    }
+
+    /// Label the trail entries of the next command. An empty label is a
+    /// typed number.
+    pub fn set_label(&mut self, label: impl Into<String>) {
+        self.label = label.into();
+    }
+
+    /// Oldest first.
+    pub fn trail(&self) -> &VecDeque<TrailEntry> {
+        &self.trail
+    }
+
+    /// Push a trail value again. It is not recorded a second time.
+    pub fn yank(&mut self, index: usize) {
+        let Some(value) = self.trail.get(index).map(|entry| entry.value.clone()) else {
+            self.fail(CalcError::Domain("no trail entry"));
+            return;
+        };
+        self.checkpoint();
+        self.stack.push(value);
+        self.clear_message();
+    }
+
+    fn record(&mut self, value: &Value) {
+        let bytes = value.approx_bytes();
+        while !self.trail.is_empty()
+            && (self.trail.len() >= TRAIL_CAP
+                || self.trail_bytes.saturating_add(bytes) > TRAIL_BYTES)
+        {
+            if let Some(old) = self.trail.pop_front() {
+                self.trail_bytes = self.trail_bytes.saturating_sub(old.value.approx_bytes());
+            }
+        }
+        self.trail_bytes = self.trail_bytes.saturating_add(bytes);
+        self.trail.push_back(TrailEntry {
+            label: self.label.clone(),
+            value: value.clone(),
+        });
     }
 
     pub fn dup(&mut self) {
@@ -229,6 +293,8 @@ impl Engine {
             return;
         };
         self.checkpoint();
+        self.label = format!("rcl {name}");
+        self.record(&value);
         self.stack.push(value);
         self.show(format!("recalled {name}"));
     }
@@ -338,9 +404,10 @@ impl Engine {
                 self.checkpoint();
                 self.stack.pop();
                 self.stack.pop();
-                self.stack.push(Value::from_int(a));
-                self.stack.push(Value::from_int(b));
-                self.stack.push(Value::from_int(g));
+                for value in [a, b, g].map(Value::from_int) {
+                    self.record(&value);
+                    self.stack.push(value);
+                }
                 self.succeed();
             }
             Err(err) => self.fail(err),
@@ -393,7 +460,9 @@ impl Engine {
             Ok((prime, proven)) => {
                 self.checkpoint();
                 self.stack.pop();
-                self.stack.push(Value::from_int(prime));
+                let value = Value::from_int(prime);
+                self.record(&value);
+                self.stack.push(value);
                 if proven {
                     self.succeed();
                 } else {
@@ -415,7 +484,10 @@ impl Engine {
             Ok((factors, complete)) => {
                 self.checkpoint();
                 self.stack.pop();
-                self.stack.extend(factors.into_iter().map(Value::from_int));
+                for value in factors.into_iter().map(Value::from_int) {
+                    self.record(&value);
+                    self.stack.push(value);
+                }
                 if complete {
                     self.succeed();
                 } else {
@@ -757,6 +829,7 @@ impl Engine {
             Ok(value) => {
                 self.checkpoint();
                 self.stack.pop();
+                self.record(&value);
                 self.stack.push(value);
                 self.succeed();
             }
@@ -787,6 +860,7 @@ impl Engine {
                 self.checkpoint();
                 self.stack.pop();
                 self.stack.pop();
+                self.record(&value);
                 self.stack.push(value);
                 self.succeed();
             }
@@ -811,4 +885,30 @@ pub(crate) fn extends_var(name: &str, c: char) -> bool {
     next.push_str(name);
     next.push(c);
     valid_var(&next)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trail_drops_the_oldest_past_its_byte_budget() {
+        let mut engine = Engine::new();
+        // About 1 MB of digits each.
+        let big = Value::from_int(BigInt::from(1) << 8_000_000u32);
+        let each = big.approx_bytes();
+        for _ in 0..100 {
+            engine.push(big.clone());
+            engine.pop();
+        }
+        assert_eq!(engine.trail().len(), TRAIL_BYTES / each);
+        assert!(engine.trail_bytes <= TRAIL_BYTES);
+
+        for n in 0..TRAIL_CAP + 5 {
+            engine.push(Value::from_int(n));
+        }
+        assert_eq!(engine.trail().len(), TRAIL_CAP);
+        let first = &engine.trail()[0].value;
+        assert_eq!(radix::format_value(first, engine.mode()), "5");
+    }
 }

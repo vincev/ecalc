@@ -73,6 +73,9 @@ prints the message on stderr and exits 1.
 - Display and entry in any radix from 2 to 36, with two's complement for a
   chosen word size and grouped digits.
 - Undo and redo of the stack and variables.
+- A trail of every number typed and every result, with the command that
+  made it. `t y` opens it: type to filter by command or digits, and Enter
+  pushes the selected value back onto the stack.
 
 `cargo test` checks the arithmetic and the screen without opening a terminal.
 

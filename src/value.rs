@@ -75,7 +75,28 @@ pub enum Value {
 pub(crate) const NOT_FOR_MOD: CalcError = CalcError::Domain("not for modulo forms");
 const MOD_NEEDS_INTEGERS: CalcError = CalcError::Domain("modulo forms need integers");
 
+fn int_bytes(n: &BigInt) -> usize {
+    usize::try_from(n.bits().div_ceil(8)).unwrap_or(usize::MAX)
+}
+
+fn real_bytes(r: &Real) -> usize {
+    match r {
+        Real::Int(n) => int_bytes(n),
+        Real::Rat(q) => int_bytes(q.numer()).saturating_add(int_bytes(q.denom())),
+        Real::Float(f) => f.mantissa_bytes(),
+    }
+}
+
 impl Value {
+    /// Bytes held by the digits, roughly. The trail budgets by it.
+    pub(crate) fn approx_bytes(&self) -> usize {
+        match self {
+            Value::Real(r) => real_bytes(r),
+            Value::Complex(re, im) => real_bytes(re).saturating_add(real_bytes(im)),
+            Value::Mod(a, m) => int_bytes(a).saturating_add(int_bytes(m)),
+        }
+    }
+
     pub fn from_int(n: impl Into<BigInt>) -> Self {
         Self::Real(Real::Int(n.into()))
     }

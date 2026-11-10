@@ -38,6 +38,8 @@ pub enum EvalError {
     EmptyStack,
     Quit,
     Help,
+    /// `t y` opens the trail, which a script cannot pick from.
+    Trail,
     /// An open list was left without a choice. The text is the message.
     NeedChoice(&'static str),
     /// A prompt such as radix or word size was left unfinished.
@@ -54,6 +56,7 @@ impl fmt::Display for EvalError {
             Self::EmptyStack => write!(f, "empty stack"),
             Self::Quit => write!(f, "q quits the screen"),
             Self::Help => write!(f, "help is for the screen"),
+            Self::Trail => write!(f, "the trail is for the screen"),
             Self::NeedChoice(msg) | Self::Prompt(msg) => write!(f, "{msg}"),
             Self::Note(msg) => write!(f, "{msg}"),
         }

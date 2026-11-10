@@ -42,7 +42,7 @@ enum Prefix {
     K,
     /// `s` store and recall. `s s`, `s t`, `s r`, `s u`, `s l`, or a digit for `q0`–`q9`.
     S,
-    /// `t` then a digit pops the stack into `q0`–`q9`.
+    /// `t` then a digit pops the stack into `q0`–`q9`. `t y` opens the trail.
     T,
     /// `r` then a digit recalls `q0`–`q9`.
     R,
@@ -86,6 +86,56 @@ pub(crate) enum Overlay {
     Variables { page: usize, note: String },
     /// `K` dialog. `0`–`F` inserts a constant; Tab moves a page.
     Constants { page: usize, note: String },
+    /// `t y` dialog. Typing filters the trail; RET pushes the selected value.
+    Trail(TrailView),
+}
+
+/// Longest value text the trail dialog keeps for display. A row is
+/// narrower, so a longer value still ends in `..`.
+const TRAIL_TEXT_MAX: usize = 512;
+
+/// The trail as the dialog shows it. Each value is formatted once, when the
+/// dialog opens; the display mode cannot change while it is open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TrailView {
+    pub query: String,
+    /// Index into `matches`, oldest first.
+    pub cursor: usize,
+    pub rows: Vec<TrailRow>,
+    /// Indices into `rows` that match the query, oldest first.
+    pub matches: Vec<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TrailRow {
+    pub label: String,
+    /// The value in the display mode, cut at `TRAIL_TEXT_MAX` characters.
+    pub text: String,
+    /// The whole value without grouping, lowercased, for the search.
+    search: String,
+}
+
+impl TrailView {
+    /// Grouping commas are ignored, so `31415` and `31,415` both find
+    /// `31,415,926.5` under `d g`. A comma inside a complex number still
+    /// matches as typed.
+    fn filter(&mut self) {
+        let query = self.query.to_lowercase();
+        let bare = query.replace(',', "");
+        self.matches = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                query.is_empty()
+                    || row.label.to_lowercase().contains(&query)
+                    || row.search.contains(&query)
+                    || (!bare.is_empty() && row.search.contains(&bare))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        self.cursor = self.matches.len().saturating_sub(1);
+    }
 }
 
 pub struct App {
@@ -199,6 +249,29 @@ impl App {
 
     pub(crate) fn docs_matches(&self) -> Vec<&'static crate::docs::Binding> {
         crate::docs::search(self.docs_query())
+    }
+
+    pub fn trail_open(&self) -> bool {
+        matches!(self.overlay, Some(Overlay::Trail(_)))
+    }
+
+    pub(crate) fn trail_view(&self) -> Option<&TrailView> {
+        match &self.overlay {
+            Some(Overlay::Trail(view)) => Some(view),
+            _ => None,
+        }
+    }
+
+    pub fn trail_cursor(&self) -> usize {
+        self.trail_view().map_or(0, |view| view.cursor)
+    }
+
+    /// Trail indices that match the query, oldest first.
+    #[cfg(test)]
+    pub(crate) fn trail_matches(&self) -> Vec<usize> {
+        self.trail_view()
+            .map(|view| view.matches.clone())
+            .unwrap_or_default()
     }
 
     pub fn vars_open(&self) -> bool {
@@ -401,6 +474,10 @@ impl App {
                 self.press_const_list(key);
                 return;
             }
+            Some(Overlay::Trail(_)) => {
+                self.press_trail(key);
+                return;
+            }
             None => {}
         }
         if !matches!(self.pending, Pending::None) {
@@ -436,8 +513,85 @@ impl App {
     fn blocks_quit(&self) -> bool {
         matches!(
             self.overlay,
-            Some(Overlay::Docs { .. } | Overlay::Variables { .. } | Overlay::Constants { .. })
+            Some(
+                Overlay::Docs { .. }
+                    | Overlay::Variables { .. }
+                    | Overlay::Constants { .. }
+                    | Overlay::Trail(_)
+            )
         )
+    }
+
+    fn open_trail(&mut self) {
+        let mode = self.engine.mode();
+        let mut plain = mode.clone();
+        plain.group_digits = false;
+        let rows = self
+            .engine
+            .trail()
+            .iter()
+            .map(|entry| {
+                let search = radix::format_value(&entry.value, &plain).to_lowercase();
+                let mut text = if mode.group_digits {
+                    radix::format_value(&entry.value, mode)
+                } else {
+                    search.clone()
+                };
+                if let Some((cut, _)) = text.char_indices().nth(TRAIL_TEXT_MAX) {
+                    text.truncate(cut);
+                }
+                TrailRow {
+                    label: entry.label.clone(),
+                    text,
+                    search,
+                }
+            })
+            .collect();
+        let mut view = TrailView {
+            query: String::new(),
+            cursor: 0,
+            rows,
+            matches: Vec::new(),
+        };
+        view.filter();
+        self.overlay = Some(Overlay::Trail(view));
+        self.clear_ih();
+        self.engine.clear_message();
+    }
+
+    fn press_trail(&mut self, key: Key) {
+        let Some(Overlay::Trail(view)) = &mut self.overlay else {
+            return;
+        };
+        match key {
+            Key::Enter => self.yank_trail(),
+            Key::Backspace => {
+                if view.query.pop().is_some() {
+                    view.filter();
+                }
+            }
+            Key::Up | Key::ShiftTab => move_cursor(view, -1),
+            Key::Down | Key::Tab => move_cursor(view, 1),
+            Key::Char(c) => {
+                view.query.push(c);
+                view.filter();
+            }
+            Key::Ctrl(_) | Key::Esc => {}
+        }
+    }
+
+    /// Push the selected value and close. With no match the dialog stays.
+    /// A row is the trail entry of the same index: nothing is recorded
+    /// while the dialog is open.
+    fn yank_trail(&mut self) {
+        let Some(view) = self.trail_view() else {
+            return;
+        };
+        let Some(&index) = view.matches.get(view.cursor) else {
+            return;
+        };
+        self.overlay = None;
+        self.run(|engine| engine.yank(index));
     }
 
     fn open_docs(&mut self) {
@@ -563,13 +717,14 @@ impl App {
             return;
         };
         let index = self.const_page() * consts::PAGE + slot;
-        let Some((message, value)) = consts::get(index) else {
+        let Some((message, symbol, value)) = consts::get(index) else {
             if let Some(Overlay::Constants { note, .. }) = &mut self.overlay {
                 *note = "no constant".to_string();
             }
             return;
         };
         self.overlay = None;
+        self.engine.set_label(format!("K {symbol}"));
         self.engine.push(value);
         self.run(|engine| engine.show(message));
     }
@@ -741,6 +896,7 @@ impl App {
         if !self.commit_entry() {
             return;
         }
+        self.label_command(prefix_keys(which), c);
         let twos = which == Prefix::Od;
         match (which, c) {
             (Prefix::F, 'T') => self.run(Engine::atan2),
@@ -827,6 +983,7 @@ impl App {
             (Prefix::S, d) if d.is_ascii_digit() => {
                 self.run(|engine| engine.store(&format!("q{d}"), false));
             }
+            (Prefix::T, 'y') => self.open_trail(),
             (Prefix::T, d) if d.is_ascii_digit() => {
                 self.run(|engine| engine.store(&format!("q{d}"), true));
             }
@@ -932,6 +1089,7 @@ impl App {
                 if let Value::Mod(_, modulus) = &value {
                     self.last_modulus = Some(modulus.to_string());
                 }
+                self.engine.set_label("");
                 self.engine.push(value);
                 self.entry.clear();
                 true
@@ -943,7 +1101,26 @@ impl App {
         }
     }
 
+    /// Trail label for the command now running: `H`, then `I`, then the
+    /// prefix and the key. The flags are in that fixed order, whichever was
+    /// typed first, and show even when the key ignores them.
+    fn label_command(&mut self, prefix: &str, c: char) {
+        let mut parts = Vec::new();
+        if self.hyperbolic {
+            parts.push("H".to_string());
+        }
+        if self.inverse {
+            parts.push("I".to_string());
+        }
+        if !prefix.is_empty() {
+            parts.push(prefix.to_string());
+        }
+        parts.push(c.to_string());
+        self.engine.set_label(parts.join(" "));
+    }
+
     fn dispatch(&mut self, c: char) {
+        self.label_command("", c);
         match c {
             '+' => self.run(Engine::add),
             '-' => self.run(Engine::sub),
@@ -1110,6 +1287,9 @@ impl App {
         if self.help_open() || self.docs_open() {
             return Err(EvalError::Help);
         }
+        if self.trail_open() {
+            return Err(EvalError::Trail);
+        }
         match self.engine.status() {
             // A note, such as "precision 12" or "prime", leaves the script running.
             Status::Error(_) | Status::UnknownKey => Err(self.eval_status()),
@@ -1142,6 +1322,33 @@ impl App {
             Pending::Word(_) => Some("word size needs a number"),
             Pending::Var { .. } => Some("variable needs a name"),
         }
+    }
+}
+
+fn move_cursor(view: &mut TrailView, delta: isize) {
+    let n = view.matches.len();
+    if n == 0 {
+        return;
+    }
+    let current = view.cursor.min(n - 1) as isize;
+    view.cursor = (current + delta).rem_euclid(n as isize) as usize;
+}
+
+/// Keys of a command prefix, as a trail label shows them.
+fn prefix_keys(prefix: Prefix) -> &'static str {
+    match prefix {
+        Prefix::None => "",
+        Prefix::F => "f",
+        Prefix::M => "m",
+        Prefix::C => "c",
+        Prefix::D => "d",
+        Prefix::B => "b",
+        Prefix::K => "k",
+        Prefix::S => "s",
+        Prefix::T => "t",
+        Prefix::R => "r",
+        Prefix::O => "O",
+        Prefix::Od => "O d",
     }
 }
 
@@ -2254,6 +2461,132 @@ mod tests {
         assert!(eval(&program).is_err());
         assert!(eval("1e999999 1e13 ^").is_err());
         assert!(eval("1e-999999 1e13 ^").is_err());
+    }
+
+    fn trail_rows(app: &App) -> Vec<(String, String)> {
+        app.engine()
+            .trail()
+            .iter()
+            .map(|entry| {
+                (
+                    entry.label.clone(),
+                    radix::format_value(&entry.value, app.engine().mode()),
+                )
+            })
+            .collect()
+    }
+
+    fn row(label: &str, value: &str) -> (String, String) {
+        (label.to_string(), value.to_string())
+    }
+
+    #[test]
+    fn trail_records_numbers_and_results() {
+        let mut app = App::new();
+        app.keys("3 4+2*\n\t\u{7f}0.5IS");
+        assert_eq!(
+            trail_rows(&app),
+            vec![
+                row("", "3"),
+                row("", "4"),
+                row("+", "7"),
+                row("", "2"),
+                row("*", "14"),
+                row("", "0.5"),
+                row("I S", "30."),
+            ]
+        );
+
+        let mut app = App::new();
+        app.keys("2023kf 12ss x\nsr x\nr3 PHP L K0 1 ME");
+        let rows = trail_rows(&app);
+        assert_eq!(
+            &rows[1..4],
+            &[row("k f", "7"), row("k f", "17"), row("k f", "17")]
+        );
+        assert_eq!(rows[5], row("rcl x", "12"));
+        assert_eq!(rows[6].0, "P");
+        assert_eq!(rows[7].0, "H P");
+        assert_eq!(rows[8].0, "L");
+        assert_eq!(rows[9], row("K c", "299792458"));
+        // `r3` on an empty register fails and records nothing.
+        assert_eq!(rows.len(), 12);
+
+        // Undo leaves the trail.
+        let mut app = App::new();
+        app.keys("2 3^uu");
+        assert_eq!(app.engine().stack().len(), 1);
+        assert_eq!(trail_rows(&app).last(), Some(&row("^", "8")));
+    }
+
+    #[test]
+    fn trail_dialog_picks_and_filters() {
+        let mut app = App::new();
+        app.keys("3 4+ 10*");
+        app.keys("ty");
+        assert!(app.trail_open());
+        assert_eq!(app.trail_cursor(), 4);
+        app.press(Key::Up);
+        app.press(Key::Up);
+        app.press(Key::Enter);
+        assert!(!app.trail_open());
+        assert_eq!(app.top_string().as_deref(), Some("7"));
+        // The pushed value is not recorded again, and u takes it back.
+        assert_eq!(app.engine().trail().len(), 5);
+        app.keys("u");
+        assert_eq!(app.top_string().as_deref(), Some("70"));
+
+        app.keys("ty+");
+        assert_eq!(app.trail_matches(), vec![2]);
+        app.press(Key::Enter);
+        assert_eq!(app.top_string().as_deref(), Some("7"));
+
+        // Typed digits search the values. `q` is a letter there.
+        app.keys("ty1q");
+        assert!(!app.should_quit());
+        assert!(app.trail_matches().is_empty());
+        app.press(Key::Enter);
+        assert!(app.trail_open());
+        app.keys("\u{7f}");
+        assert_eq!(app.trail_matches(), vec![3]);
+        app.press(Key::Esc);
+        assert!(!app.trail_open());
+        assert_eq!(app.top_string().as_deref(), Some("7"));
+
+        // Grouping commas do not get in the way of a search.
+        let mut app = App::new();
+        app.keys("50p P 1e19* dg ty31415");
+        assert_eq!(app.trail_matches(), vec![3]);
+        app.keys("\u{7f}\u{7f}\u{7f},415");
+        assert_eq!(app.trail_matches(), vec![3]);
+
+        // The flags have a fixed order, whichever came first.
+        let mut app = App::new();
+        app.keys("2IHS 2HIS");
+        let rows = trail_rows(&app);
+        assert_eq!(rows[1].0, "H I S");
+        assert_eq!(rows[3].0, "H I S");
+
+        // A huge value is formatted once and kept short for display, but
+        // the search still sees all of its digits.
+        let mut app = App::new();
+        app.keys("2 8191^ ty");
+        let view = app.trail_view().unwrap();
+        assert_eq!(view.rows[2].text.chars().count(), TRAIL_TEXT_MAX);
+        app.keys("7857896448");
+        assert_eq!(app.trail_matches(), vec![2]);
+        // A comma inside a complex number matches as typed.
+        let mut app = App::new();
+        app.keys("(1, 23) ty1, 2");
+        assert_eq!(app.trail_matches(), vec![0]);
+
+        // An empty trail opens, and RET does nothing.
+        let mut app = App::new();
+        app.keys("ty\n");
+        assert!(app.trail_open());
+        assert!(app.engine().stack().is_empty());
+
+        assert_eq!(eval("1 t y"), Err(EvalError::Trail));
     }
 
     #[test]

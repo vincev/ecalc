@@ -94,9 +94,10 @@ pub(crate) fn pages() -> usize {
     CATALOG.len().div_ceil(PAGE)
 }
 
-pub(crate) fn get(index: usize) -> Option<(String, Value)> {
+/// Message, symbol, and value of one constant.
+pub(crate) fn get(index: usize) -> Option<(String, &'static str, Value)> {
     let item = CATALOG.get(index)?;
-    Some((message(item), value(item)))
+    Some((message(item), item.symbol, value(item)))
 }
 
 /// Hex key, symbol, and short name for one page.

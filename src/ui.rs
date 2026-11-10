@@ -396,6 +396,13 @@ fn draw(frame: &mut Frame, app: &App, palette: Palette) {
         Some(Overlay::Docs { .. }) => draw_docs(frame.buffer_mut(), area, app, palette),
         Some(Overlay::Variables { .. }) => draw_variables(frame.buffer_mut(), area, app, palette),
         Some(Overlay::Constants { .. }) => draw_constants(frame.buffer_mut(), area, app, palette),
+        Some(Overlay::Trail { .. }) => draw_trail(
+            frame.buffer_mut(),
+            area,
+            above_prompt(area, chunks[1]),
+            app,
+            palette,
+        ),
         None => {}
     }
 }
@@ -1409,6 +1416,162 @@ fn draw_variables(buf: &mut Buffer, area: Rect, app: &App, palette: Palette) {
     dialog.footer(buf, &hints);
 }
 
+/// Most trail rows shown at once. The list scrolls with the selection.
+const TRAIL_ROWS: u16 = 12;
+/// Width of the label column in the trail: the longest visible label,
+/// from 8 up to 16 columns. A longer label ends in `..`.
+const TRAIL_LABEL_MIN: usize = 8;
+const TRAIL_LABEL_MAX: usize = 16;
+
+fn trail_hints() -> Vec<(&'static str, &'static str)> {
+    vec![("↑↓", "move"), ("ret", "push"), ("esc", "close")]
+}
+
+/// `t y`. The trail, newest at the bottom like the stack, with a search
+/// field on the note row. The text comes from the dialog's state, formatted
+/// once when it opened. It sits above the prompt, or uses the whole window
+/// when that band is too short.
+fn draw_trail(buf: &mut Buffer, window: Rect, above: Rect, app: &App, palette: Palette) {
+    let chrome = 2 + HELP_V_PAD + HELP_FOOTER;
+    let area = if above.width >= 10 && above.height > chrome {
+        above
+    } else {
+        window
+    };
+    let Some(view) = app.trail_view() else {
+        return;
+    };
+    let matches = &view.matches;
+    let rows = (matches.len() as u16).clamp(1, TRAIL_ROWS);
+    let Some(dialog) = Dialog::open(buf, area, rows, DIALOG_W, palette) else {
+        return;
+    };
+    dialog.title(buf, "Trail");
+    let cursor = view.cursor.min(matches.len().saturating_sub(1));
+    draw_docs_query(&dialog, buf, &view.query, cursor, matches.len(), palette);
+    let end = dialog.inner_x + dialog.text_w;
+    if matches.is_empty() {
+        let text = if view.rows.is_empty() {
+            "the trail is empty"
+        } else {
+            "no match"
+        };
+        paint_str(
+            buf,
+            dialog.inner_x,
+            dialog.content_y,
+            end,
+            text,
+            Style::default().fg(palette.gray).bg(palette.bg),
+        );
+    } else {
+        let shown = (dialog.content_h as usize).min(matches.len());
+        let start = docs_window(cursor, matches.len(), shown);
+        let visible = &matches[start..start + shown];
+        let label_w = visible
+            .iter()
+            .map(|&index| view.rows[index].label.chars().count())
+            .max()
+            .unwrap_or(0)
+            .clamp(TRAIL_LABEL_MIN, TRAIL_LABEL_MAX);
+        for (row, &index) in visible.iter().enumerate() {
+            let item = &view.rows[index];
+            draw_trail_row(
+                buf,
+                dialog.inner_x,
+                dialog.content_y + row as u16,
+                end,
+                (&item.label, label_w),
+                &item.text,
+                start + row == cursor,
+                palette,
+            );
+        }
+    }
+    let hints = trail_hints();
+    dialog.footer(buf, &hints);
+}
+
+/// `❯ label   value`, cutting the value with `..` when the row is too narrow.
+#[allow(clippy::too_many_arguments)]
+fn draw_trail_row(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    end: u16,
+    (label, label_w): (&str, usize),
+    value: &str,
+    selected: bool,
+    palette: Palette,
+) {
+    let label_style = Style::default()
+        .fg(if selected {
+            palette.fg
+        } else {
+            palette.fg_secondary
+        })
+        .bg(palette.bg)
+        .add_modifier(Modifier::BOLD);
+    let value_style = Style::default()
+        .fg(if selected { palette.fg } else { palette.gray })
+        .bg(palette.bg);
+    let mut col = paint_str(
+        buf,
+        x,
+        y,
+        end,
+        if selected { "❯ " } else { "  " },
+        if selected {
+            arrow_style(palette)
+        } else {
+            Style::default().bg(palette.bg)
+        },
+    );
+    if label.chars().count() > label_w {
+        let field_end = col.saturating_add(label_w as u16).min(end);
+        let head: String = label.chars().take(label_w.saturating_sub(2)).collect();
+        col = paint_str(buf, col, y, field_end, &head, label_style);
+        col = paint_str(
+            buf,
+            col,
+            y,
+            field_end,
+            "..",
+            Style::default().fg(palette.gray).bg(palette.bg),
+        );
+    } else {
+        col = paint_field(
+            buf,
+            col,
+            y,
+            end,
+            label,
+            label_w as u16,
+            label_style,
+            palette,
+        );
+    }
+    col = paint_gap(buf, col, y, end, 2, palette);
+    if col >= end {
+        return;
+    }
+    let room = (end - col) as usize;
+    if value.chars().count() <= room {
+        paint_str(buf, col, y, end, value, value_style);
+        return;
+    }
+    let head: String = value.chars().take(room.saturating_sub(2)).collect();
+    col = paint_str(buf, col, y, end, &head, value_style);
+    paint_str(
+        buf,
+        col,
+        y,
+        end,
+        "..",
+        Style::default().fg(palette.gray).bg(palette.bg),
+    );
+}
+
 /// Physics constants, sixteen to a page: eight down each column.
 fn draw_constants(buf: &mut Buffer, area: Rect, app: &App, palette: Palette) {
     let rows = app.const_rows();
@@ -1586,12 +1749,14 @@ fn draw_shortcuts(buf: &mut Buffer, area: Rect, app: &App, palette: Palette) {
     let const_hints = const_footer_hints(app);
     let help_hints = help_bar(app);
     let docs = docs_hints();
+    let trail = trail_hints();
     let bar = crate::docs::shortcuts();
     let hints: &[(&str, &str)] = match app.overlay() {
         Some(Overlay::Docs { .. }) => &docs,
         Some(Overlay::Help { .. }) => &help_hints,
         Some(Overlay::Variables { .. }) => &var_hints,
         Some(Overlay::Constants { .. }) => &const_hints,
+        Some(Overlay::Trail { .. }) => &trail,
         None => &bar,
     };
     let key_style = Style::default()
@@ -2198,6 +2363,34 @@ mod tests {
         let rows = lines(&render(&mut app, 64, 20));
         assert!(rows.iter().any(|row| row.contains("nothing stored")));
         assert!(rows.iter().all(|row| !row.contains("tab:next")));
+    }
+
+    #[test]
+    fn trail_shows_labels_and_the_selection() {
+        let mut app = App::new();
+        app.keys("3 4+ty");
+        let rows = lines(&render(&mut app, 80, 30));
+        assert!(rows.iter().any(|row| row.contains("Trail")));
+        assert!(rows.iter().any(|row| row.contains("3/3")));
+        let selected = rows.iter().find(|row| row.contains("❯ +")).unwrap();
+        assert!(selected.contains('7'));
+        assert!(rows.iter().any(|row| row.contains("ret:push")));
+
+        app.keys("zz");
+        let rows = lines(&render(&mut app, 80, 30));
+        assert!(rows.iter().any(|row| row.contains("no match")));
+
+        let mut app = App::new();
+        app.keys("ty");
+        let rows = lines(&render(&mut app, 80, 30));
+        assert!(rows.iter().any(|row| row.contains("the trail is empty")));
+
+        // A long label widens its column up to 16, then ends in `..`.
+        let mut app = App::new();
+        app.keys("5ssab\nsrab\n7ssabcdefghijklmnop\nsrabcdefghijklmnop\nty");
+        let rows = lines(&render(&mut app, 80, 30));
+        assert!(rows.iter().any(|row| row.contains("rcl ab            5")));
+        assert!(rows.iter().any(|row| row.contains("rcl abcdefghij..  7")));
     }
 
     #[test]

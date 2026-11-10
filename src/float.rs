@@ -31,6 +31,11 @@ pub struct DecFloat {
 }
 
 impl DecFloat {
+    /// Bytes held by the mantissa, roughly. The trail budgets by it.
+    pub(crate) fn mantissa_bytes(&self) -> usize {
+        usize::try_from(self.mantissa.bits().div_ceil(8)).unwrap_or(usize::MAX)
+    }
+
     pub fn zero(prec: u32) -> Self {
         Self {
             mantissa: BigInt::zero(),
