@@ -698,6 +698,11 @@ fn proven_bound() -> &'static BigInt {
 
 fn choose_int(n: &BigInt, k: &BigInt) -> Result<BigInt, CalcError> {
     if k.is_negative() {
+        // C(n, k) = C(n, n - k) still holds when both are negative and
+        // k <= n: `_3 _5 k c` is C(-3, 2) = 6, as in Calc and PARI/GP.
+        if n.is_negative() && k <= n {
+            return choose_int(n, &(n - k));
+        }
         return Ok(BigInt::zero());
     }
     if k.is_zero() {
@@ -1279,6 +1284,20 @@ mod tests {
             }
             assert_eq!(factorial_int(&BigInt::from(n)).unwrap(), running, "{n}!");
         }
+    }
+
+    #[test]
+    fn choose_with_both_arguments_negative() {
+        let c = |n: i64, k: i64| choose_int(&BigInt::from(n), &BigInt::from(k)).unwrap();
+        // PARI/GP `binomial` and Calc `choose` agree on all of these.
+        assert_eq!(c(-1, -1), BigInt::from(1));
+        assert_eq!(c(-3, -5), BigInt::from(6));
+        assert_eq!(c(-3, -4), BigInt::from(-3));
+        assert_eq!(c(-3, -3), BigInt::from(1));
+        assert_eq!(c(-3, -2), BigInt::from(0));
+        assert_eq!(c(-5, -7), BigInt::from(15));
+        assert_eq!(c(4, -1), BigInt::from(0));
+        assert_eq!(c(0, -1), BigInt::from(0));
     }
 
     #[test]
