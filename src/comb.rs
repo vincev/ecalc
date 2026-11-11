@@ -139,7 +139,8 @@ pub fn factorial(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
             Ok(Value::real(Real::Float(factorial_float(&x, mode.prec)?)))
         }
         Value::Real(r) => {
-            let x = to_float(r, mode.prec)?;
+            // A fraction is exact: keep the guard digits Spouge works in.
+            let x = to_float(r, mode.prec.saturating_add(16))?;
             Ok(Value::real(Real::Float(factorial_float(&x, mode.prec)?)))
         }
     }

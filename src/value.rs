@@ -219,6 +219,22 @@ impl Real {
             Self::Float(f) => Ok(f.round_to(prec)),
         }
     }
+
+    /// The argument of a function that rounds its own result to `prec`.
+    /// A float is the number it is. An integer or a fraction is exact, so
+    /// it is converted with the guard digits the function works in:
+    /// rounding `167:166` to 12 digits first cost `L` three of them, and
+    /// rounding the integer `123456789012345678` made its sine meaningless.
+    fn operand(&self, prec: u32) -> Result<DecFloat, CalcError> {
+        match self {
+            Self::Float(f) => Ok(f.round_to(prec)),
+            Self::Int(n) => {
+                let guarded = prec.saturating_add(10).saturating_add(prec / 5);
+                Ok(DecFloat::from_bigint(n, guarded))
+            }
+            Self::Rat(_) => self.to_float(prec.saturating_add(10).saturating_add(prec / 5)),
+        }
+    }
 }
 
 impl fmt::Display for Value {
@@ -1062,7 +1078,7 @@ pub fn nth_root(base: &Value, n: &BigInt, mode: &Mode) -> Result<Value, CalcErro
         {
             return Ok(Value::from_rational(root));
         }
-        let f = r.to_float(mode.prec)?;
+        let f = r.operand(mode.prec)?;
         // Newton for a modest degree. A huge degree stays on exp/ln: a
         // billionth root is one of those, and `powi` of that degree is not
         // worth it.
@@ -1247,8 +1263,8 @@ fn hypot_real(a: &Real, b: &Real, mode: &Mode) -> Result<Real, CalcError> {
             return Ok(real_from_rational(root));
         }
     }
-    let af = a.to_float(mode.prec)?;
-    let bf = b.to_float(mode.prec)?;
+    let af = a.operand(mode.prec)?;
+    let bf = b.operand(mode.prec)?;
     Ok(Real::Float(float_hypot(&af, &bf, mode.prec)?))
 }
 
@@ -1307,7 +1323,7 @@ pub fn isqrt(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         let (_, root) = int_nth_root(&n, 2).ok_or(CalcError::Overflow)?;
         return Ok(Value::from_int(root));
     }
-    let f = r.to_float(mode.prec)?.sqrt(mode.prec)?;
+    let f = r.operand(mode.prec)?.sqrt(mode.prec)?;
     Ok(Value::from_int(f.floor_to_bigint()?))
 }
 
@@ -1333,7 +1349,7 @@ pub fn ln(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         Value::Real(r) if r.is_one() => Ok(Value::from_int(0)),
         Value::Real(r) if r.is_zero() => Err(CalcError::Domain("logarithm of zero")),
         Value::Real(r) if r.is_positive() => Ok(polish(
-            Value::Real(Real::Float(r.to_float(mode.prec)?.ln(mode.prec)?)),
+            Value::Real(Real::Float(r.operand(mode.prec)?.ln(mode.prec)?)),
             mode.prec,
         )),
         Value::Real(r) => {
@@ -1370,12 +1386,12 @@ pub fn exp_value(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         Value::Mod(_, _) => Err(NOT_FOR_MOD),
         Value::Real(r) if r.is_zero() => Ok(Value::from_int(1)),
         Value::Real(r) => Ok(polish(
-            Value::Real(Real::Float(r.to_float(mode.prec)?.exp(mode.prec)?)),
+            Value::Real(Real::Float(r.operand(mode.prec)?.exp(mode.prec)?)),
             mode.prec,
         )),
         Value::Complex(re, im) => {
-            let e = re.to_float(mode.prec)?.exp(mode.prec + 2)?;
-            let (s, c) = im.to_float(mode.prec)?.sin_cos(mode.prec + 2)?;
+            let e = re.operand(mode.prec)?.exp(mode.prec + 2)?;
+            let (s, c) = im.operand(mode.prec)?.sin_cos(mode.prec + 2)?;
             let re_o = e.mul(&c, mode.prec);
             let im_o = e.mul(&s, mode.prec);
             Ok(finish_complex(
@@ -1406,7 +1422,7 @@ pub fn lnp1(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
         Value::Mod(_, _) => Err(NOT_FOR_MOD),
         Value::Real(r) => {
-            let f = r.to_float(mode.prec)?;
+            let f = r.operand(mode.prec)?;
             let wide = mode.prec.saturating_mul(2).saturating_add(4);
             let shifted = DecFloat::one(wide).add(&f, wide);
             if shifted.is_negative() {
@@ -1588,7 +1604,7 @@ pub fn tan(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         } else {
             mode.prec
         };
-        let tangent = x.to_float(arg_prec)?.tan(mode.prec)?;
+        let tangent = keep_float(&x, arg_prec)?.tan(mode.prec)?;
         return Ok(polish(Value::Real(Real::Float(tangent)), mode.prec));
     }
     let Value::Complex(re, im) = v else {
@@ -1665,7 +1681,7 @@ fn trig_complex(v: &Value, mode: &Mode, want_sin: bool) -> Result<Value, CalcErr
     } else {
         mode.prec
     };
-    let xf = x.to_float(arg_prec)?;
+    let xf = keep_float(&x, arg_prec)?;
     let yf = y.to_float(arg_prec)?;
     if yf.is_zero() {
         let (s, c) = xf.sin_cos(mode.prec)?;
@@ -1797,8 +1813,25 @@ fn high_float(r: &Real, mode: &Mode) -> Result<DecFloat, CalcError> {
         Real::Rat(q) => float::digit_count(q.numer()).max(float::digit_count(q.denom())),
         Real::Float(f) => f.prec().max(f.order().unsigned_abs().min(10_000) as u32),
     };
-    let prec = digits.max(mode.prec + 8).min(mode.prec.saturating_add(200));
+    // A fraction needs its integer digits on top of the guard digits.
+    let order = match r {
+        Real::Rat(_) => r.to_float(16)?.order().clamp(0, 190) as u32,
+        _ => 0,
+    };
+    let prec = digits
+        .max(mode.prec + 10 + mode.prec / 5 + order)
+        .min(mode.prec.saturating_add(200).max(digits.min(2_100)));
     r.to_float(prec)
+}
+
+/// The angle `to_radians` produced, with the digits it kept. Rounding it
+/// to the display precision again threw away the integer digits of a large
+/// exact argument.
+fn keep_float(r: &Real, prec: u32) -> Result<DecFloat, CalcError> {
+    match r {
+        Real::Float(f) => Ok(f.clone()),
+        other => other.to_float(prec),
+    }
 }
 
 pub fn asin(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
@@ -1816,7 +1849,7 @@ pub fn asin(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     if let Value::Real(r) = v {
         let angle = angle_prec(mode);
         if cmp_one(&r.abs()) != Ordering::Greater {
-            let rad = r.to_float(mode.prec)?.asin(angle)?;
+            let rad = r.operand(mode.prec)?.asin(angle)?;
             return from_radians_real(rad, mode);
         }
         // Past 1 the result is `(pi/2, -acosh(x))`, odd in `x`. The log
@@ -1858,7 +1891,7 @@ pub fn acos(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     if let Value::Real(r) = v
         && cmp_one(&r.abs()) != Ordering::Greater
     {
-        let rad = r.to_float(mode.prec)?.acos(angle_prec(mode))?;
+        let rad = r.operand(mode.prec)?.acos(angle_prec(mode))?;
         return from_radians_real(rad, mode);
     }
     // Past 1 the result is `(0, acosh(x))`, and `(pi, -acosh|x|)` below -1.
@@ -1896,7 +1929,7 @@ pub fn atan(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         }
     }
     if let Value::Real(r) = v {
-        let rad = r.to_float(mode.prec)?.atan(angle_prec(mode))?;
+        let rad = r.operand(mode.prec)?.atan(angle_prec(mode))?;
         return from_radians_real(rad, mode);
     }
     complex_angle_kernel(v, mode, cplx::atan)
@@ -1944,8 +1977,8 @@ fn atan2_axis(y: &Real, x: &Real, mode: &Mode) -> Result<Value, CalcError> {
 }
 
 fn atan2_radians(y: &Real, x: &Real, prec: u32) -> Result<DecFloat, CalcError> {
-    let yf = y.to_float(prec)?;
-    let xf = x.to_float(prec)?;
+    let yf = y.operand(prec)?;
+    let xf = x.operand(prec)?;
     DecFloat::atan2(&yf, &xf, prec)
 }
 
@@ -2072,7 +2105,7 @@ pub fn acosh(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     if let Value::Real(r) = v
         && cmp_one(&r.abs()) != Ordering::Greater
     {
-        let im = r.to_float(mode.prec)?.acos(mode.prec)?;
+        let im = r.operand(mode.prec)?.acos(mode.prec)?;
         return Ok(Value::complex(Real::Int(BigInt::zero()), Real::Float(im)));
     }
     complex_kernel(v, mode, cplx::acosh)
@@ -2150,8 +2183,8 @@ enum Hyper {
 
 fn hyperbolic(v: &Value, mode: &Mode, kind: Hyper) -> Result<Value, CalcError> {
     let (x, y) = v.parts();
-    let xf = x.to_float(mode.prec)?;
-    let yf = y.to_float(mode.prec)?;
+    let xf = x.operand(mode.prec)?;
+    let yf = y.operand(mode.prec)?;
     if yf.is_zero() {
         let z = match kind {
             Hyper::Sinh => sinh_float(&xf, mode.prec)?,

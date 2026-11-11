@@ -2510,6 +2510,19 @@ mod tests {
         // A fraction of a degree keeps the precision, and zero to a real
         // power is zero.
         assert_eq!(ok("30 p 1:3 S"), "5.81773135499383395465720208828e-3");
+        // An exact argument keeps guard digits: a fraction is not rounded
+        // to the display precision before the function sees it.
+        assert_eq!(ok("167:166 L"), "6.00602406021e-3");
+        assert_eq!(ok("2885:31 E"), "2.61460336532e40");
+        assert_eq!(ok("227:3 H C"), "3.63568126033e32");
+        assert_eq!(ok("m r 305:304 I T"), "0.787040198046");
+        assert_eq!(ok("m r 661:660 424:423 f T"), "0.784974527771");
+        assert_eq!(ok("m r 3431:3 S"), "0.126600114906");
+        assert_eq!(ok("m r 3684:469 T"), "-971.791450453");
+        // A large integer in radians keeps all of its digits.
+        assert_eq!(ok("m r 123456789012345678 S"), "-0.998852840435");
+        assert_eq!(ok("m r 123456789012345678 C"), "0.0478853125215");
+        assert_eq!(ok("m r 123456789012345678 T"), "-20.8592737071");
         // A float exponent gives a float, whichever side it is typed on.
         assert_eq!(ok("5013800. H E"), "1e5013800");
         assert_eq!(ok("10 5013800. ^"), "1e5013800");
