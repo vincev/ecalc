@@ -62,6 +62,32 @@ That prints `2.71828046931937688381979970845`, then
 Where the two disagree on meaning, the key follows Calc: `_8 3 I ^` is
 `-2` (Calc's `nroot`), where PARI's `sqrtn(-8, 3)` is complex.
 
+## Reference tests
+
+`tests/reference.rs` compares random cases with PARI/GP and Emacs Calc. It
+needs `gp` and `emacs` on the `PATH`, so both tests are ignored and plain
+`cargo test` (and CI) skips them. Run them after touching anything numeric:
+
+```sh
+cargo test --release --test reference -- --ignored --nocapture
+```
+
+That is about 6,000 exact results (choose, permutations, factorials, gcd,
+primes, factoring, Stirling numbers, `\` and `%`, floor, modular powers,
+fraction arithmetic) and 19,000 float results (every function and `+ - * /
+^`, real and complex, at 5 to 200 digits), in a few seconds. A float result
+may be 0.75 of a unit in the last place from PARI/GP; the worst seen is
+0.53. `EC_REF_SEED=7` picks another sequence and `EC_REF_SCALE=10` runs ten
+times the cases. A failure prints the RPN program for `ec -e`. A missing
+`gp` or `emacs` fails the test with a message that says so.
+
+The differences that are deliberate are skipped where the case is built or
+judged, with the reason: a tiny complex part dropped from a transcendental
+result, an exact `0` where PARI has round-off, an exact power too large to
+hold, `+ - * /` of a fraction with a float, and Calc's own wrong `%` for a
+negative operand past 15 digits. Add a new operation to `UNARY`, `BINARY`,
+or `exact_case` when you add its key.
+
 ## Layout
 
 - `src/float.rs` — decimal floats (`BigInt` mantissa, base-10 exponent). Precision is significant digits, default 12. `+ - * /`, sqrt, exp, ln, sin/cos/tan, inverse trig.
@@ -72,6 +98,7 @@ Where the two disagree on meaning, the key follows Calc: `_8 3 I ^` is
 - `src/engine.rs` — stack, undo, modes, operations.
 - `src/app.rs` — key mapping. Test this without a tty.
 - `src/ui.rs`, `src/main.rs` — arguments (`clap`) and the ratatui screen.
+- `tests/reference.rs` — random comparison with PARI/GP and Emacs Calc, ignored by default.
 
 ## Number rules
 
