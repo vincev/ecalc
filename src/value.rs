@@ -1917,6 +1917,14 @@ pub fn acosh(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
             ));
         }
     }
+    // Inside [-1, 1) it is `(0, acos(x))`. The log form left a real part
+    // of a few ulps.
+    if let Value::Real(r) = v
+        && cmp_one(&r.abs()) != Ordering::Greater
+    {
+        let im = r.to_float(mode.prec)?.acos(mode.prec)?;
+        return Ok(Value::complex(Real::Int(BigInt::zero()), Real::Float(im)));
+    }
     // ln(z + sqrt(z - 1) sqrt(z + 1))
     let minus = sqrt(&sub(v, &Value::from_int(1), mode)?, mode)?;
     let plus = sqrt(&add(v, &Value::from_int(1), mode)?, mode)?;
@@ -1944,18 +1952,33 @@ pub fn atanh(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         }
         // Inside (-1, 1): `ln1p(2a / (1 - a)) / 2` on the magnitude. The
         // difference of two logs is 0 for a tiny argument.
-        if cmp_one(&r.abs()) == Ordering::Less {
-            let work = mode.prec.saturating_add(8);
-            let a = r.abs().to_float(work)?;
-            let one = DecFloat::one(work);
-            let two = DecFloat::from_i64(2, work);
-            let gap = one.sub(&a, work);
-            if gap.is_positive() {
-                let ratio = a.mul(&two, work).div(&gap, work)?;
-                let out = ratio.ln_1p(work)?.div(&two, work)?;
-                let out = if r.is_negative() { out.neg() } else { out };
-                return Ok(Value::Real(Real::Float(out.polished(mode.prec))));
-            }
+        let work = mode.prec.saturating_add(8);
+        let a = r.abs().to_float(work)?;
+        let one = DecFloat::one(work);
+        let two = DecFloat::from_i64(2, work);
+        let gap = one.sub(&a, work);
+        if cmp_one(&r.abs()) == Ordering::Less && gap.is_positive() {
+            let ratio = a.mul(&two, work).div(&gap, work)?;
+            let out = ratio.ln_1p(work)?.div(&two, work)?;
+            let out = if r.is_negative() { out.neg() } else { out };
+            return Ok(Value::Real(Real::Float(out.polished(mode.prec))));
+        }
+        // Past 1 it is `(atanh(1/x), -pi/2)`, odd in `x`, and `atanh(1/a)`
+        // is `ln1p(2 / (a - 1)) / 2`. The two logs lost the real part of a
+        // large argument and rounded `pi/2` twice.
+        if cmp_one(&r.abs()) == Ordering::Greater && gap.is_negative() {
+            let ratio = two.div(&gap.neg(), work)?;
+            let re = ratio.ln_1p(work)?.div(&two, work)?;
+            let half = DecFloat::pi_over(2, mode.prec);
+            let (re, im) = if r.is_negative() {
+                (re.neg(), half)
+            } else {
+                (re, half.neg())
+            };
+            return Ok(Value::complex(
+                Real::Float(re.polished(mode.prec)),
+                Real::Float(im),
+            ));
         }
     }
     let num = ln(&add(&Value::from_int(1), v, mode)?, mode)?;

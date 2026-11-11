@@ -807,7 +807,9 @@ fn half_index(v: &Value) -> Option<BigInt> {
     let odd = match v {
         Value::Real(Real::Rat(r)) if r.denom() == &BigInt::from(2) => r.numer().clone(),
         Value::Real(Real::Float(f)) => {
-            let prec = f.prec().max(4);
+            // Doubling can add a digit. Rounding it away turned `5.5001`
+            // into `11`, and the answer was `5.5!`.
+            let prec = f.prec().max(4).saturating_add(1);
             let twice = f.mul(&DecFloat::from_i64(2, prec), prec);
             let n = twice.to_integer_exact()?;
             if !n.is_odd() {

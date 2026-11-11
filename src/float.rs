@@ -452,8 +452,15 @@ impl DecFloat {
             return Err(CalcError::Domain("logarithm of a non-positive number"));
         }
         let work = work_prec(prec);
-        let powered = self.order();
+        let mut powered = self.order();
         let mut m = self.round_to(work + 4);
+        // A value in [0.7071, 1) is already in the series range. Scaling it
+        // to 9.99... and subtracting ln(10) cancels every digit that
+        // `1 - x` is short of 1: `ln(1 - 5e-19)` kept one digit in 20.
+        let low = Self::from_unnormalized(BigInt::from(7071), -4, 4);
+        if powered == -1 && m.cmp_val(&low) != Ordering::Less {
+            powered = 0;
+        }
         m.exponent -= powered;
         m.prec = work + 4;
         // Halve into [1/sqrt(2), sqrt(2)), so the artanh argument stays near 0.17.
@@ -877,8 +884,28 @@ pub(crate) fn digit_count(n: &BigInt) -> u32 {
     digits
 }
 
+/// Powers of ten below this exponent are kept in a per-thread table.
+const POW10_CACHED: usize = 4096;
+
+/// `10^n`. Every rounding asks for a few of these, and raising 10 afresh
+/// each time was most of the cost of a 1000-digit `exp`.
 fn pow10(n: u32) -> BigInt {
-    BigInt::from(10).pow(n)
+    thread_local! {
+        static TABLE: std::cell::RefCell<Vec<BigInt>> =
+            std::cell::RefCell::new(vec![BigInt::one()]);
+    }
+    let index = n as usize;
+    if index >= POW10_CACHED {
+        return BigInt::from(10).pow(n);
+    }
+    TABLE.with(|table| {
+        let mut table = table.borrow_mut();
+        while table.len() <= index {
+            let next = &table[table.len() - 1] * 10u32;
+            table.push(next);
+        }
+        table[index].clone()
+    })
 }
 
 fn div_round(num: &BigInt, den: &BigInt) -> BigInt {

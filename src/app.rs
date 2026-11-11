@@ -2402,6 +2402,31 @@ mod tests {
         assert_eq!(ok("0.5 I S"), "30.");
         assert_eq!(ok("1.0000000001 I S"), "(90., -8.10284684535e-4)");
         assert_eq!(ok("_2 I S"), "(-90., 75.4561292902)");
+        // atanh past 1 keeps its real part, and acosh inside (-1, 1) has none.
+        assert_eq!(ok("20 H I T"), "(0.0500417292785, -1.57079632679)");
+        assert_eq!(ok("_1.0000001 H I T"), "(-8.40562144076, 1.57079632679)");
+        assert_eq!(
+            ok("_1.3111e13 H I T"),
+            "(-7.62718328121e-14, 1.57079632679)"
+        );
+        assert_eq!(ok("_0.26 H I C"), "(0, 1.8338185297)");
+        assert_eq!(ok("0.5 H I C"), "(0, 1.0471975512)");
+        assert_eq!(ok("_1 H I C"), "(0, 3.14159265359)");
+        // ln just below 1 does not cancel against ln(10).
+        assert_eq!(
+            ok("20 p 0.9999999999999999995 L"),
+            "-5.0000000000000000013e-19"
+        );
+        assert_eq!(
+            ok("20 p 0.99999999999999999 H L"),
+            "-4.3429448190325182982e-18"
+        );
+        assert_eq!(ok("0.75 L"), "-0.287682072452");
+        // A non-integer whose double gains a digit is not a half-integer.
+        assert_eq!(ok("5.5001 !"), "287.936897959");
+        assert_eq!(ok("64.49 !"), "9.79286031719e89");
+        assert_eq!(ok("500.3 !"), "7.87533108633e1134");
+        assert_eq!(ok("5.5 !"), "287.885277815");
         // A tiny argument is not an overflow.
         assert_eq!(ok("1e-3000 E"), "1.");
         assert_eq!(ok("1e-3000 S"), "1.74532925199e-3002");
