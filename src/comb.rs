@@ -721,12 +721,9 @@ fn choose_nonneg(n: &BigInt, k: &BigInt) -> Result<BigInt, CalcError> {
     if steps > MAX_FACTORIAL {
         return Err(CalcError::Overflow);
     }
-    let mut acc = BigInt::one();
-    for i in 1..=steps {
-        acc *= n - &k + i;
-        acc /= BigInt::from(i);
-    }
-    Ok(acc)
+    // (n-k+1) ... n over k!, each a product tree, and one exact division.
+    // Multiplying and dividing in turn kept a giant in every step.
+    Ok(range_product(&(n - &k), 1, steps) / range_product(&BigInt::zero(), 2, steps))
 }
 
 fn perm_int(n: &BigInt, k: &BigInt) -> Result<Value, CalcError> {
@@ -735,28 +732,29 @@ fn perm_int(n: &BigInt, k: &BigInt) -> Result<Value, CalcError> {
         if steps > MAX_FACTORIAL {
             return Err(CalcError::Overflow);
         }
-        let mut den = BigInt::one();
-        for i in 1..=steps {
-            let term = n + i;
-            if term.is_zero() {
-                return Err(CalcError::Domain("permutation is undefined"));
-            }
-            den *= term;
+        // One of n+1 ... n+steps is zero.
+        if n.is_negative() && *n >= -BigInt::from(steps) {
+            return Err(CalcError::Domain("permutation is undefined"));
         }
-        return Ok(Value::from_rational(BigRational::new(BigInt::one(), den)));
+        // 1 over the product is already in lowest terms.
+        let den = range_product(n, 1, steps);
+        let (num, den) = if den.is_negative() {
+            (-BigInt::one(), -den)
+        } else {
+            (BigInt::one(), den)
+        };
+        return Ok(Value::from_rational(BigRational::new_raw(num, den)));
     }
     let steps = k.to_u32().ok_or(CalcError::Overflow)?;
     if steps > MAX_FACTORIAL {
         return Err(CalcError::Overflow);
     }
-    let mut acc = BigInt::one();
-    for i in 0..steps {
-        acc *= n - i;
-        if acc.is_zero() {
-            return Ok(Value::from_int(0));
-        }
+    // (n-k+1) ... n. The product is zero when the range crosses zero.
+    let low = n - k;
+    if !n.is_negative() && low.is_negative() {
+        return Ok(Value::from_int(0));
     }
-    Ok(Value::from_int(acc))
+    Ok(Value::from_int(range_product(&low, 1, steps)))
 }
 
 fn fact_as_float(x: &DecFloat, prec: u32) -> Result<DecFloat, CalcError> {
@@ -794,25 +792,31 @@ fn factorial_int(n: &BigInt) -> Result<BigInt, CalcError> {
     if n > MAX_FACTORIAL {
         return Err(CalcError::Overflow);
     }
-    Ok(range_product(2, n))
+    Ok(range_product(&BigInt::zero(), 2, n))
 }
 
-/// Product of `lo..=hi`, split in half so the large multiplications are
-/// between numbers of similar size. A running product multiplied a growing
-/// giant by one small number at a time, and `100000 !` took 0.8 s.
-fn range_product(lo: u32, hi: u32) -> BigInt {
+/// Product of `base + lo ..= base + hi`, split in half so the large
+/// multiplications are between numbers of similar size. A running product
+/// multiplied a growing giant by one small number at a time, and
+/// `100000 !` took 0.8 s.
+fn range_product(base: &BigInt, lo: u32, hi: u32) -> BigInt {
     if lo > hi {
         return BigInt::one();
     }
     if hi - lo < 16 {
-        let mut acc = BigInt::from(lo);
+        let mut acc = base + lo;
         for k in lo + 1..=hi {
-            acc *= k;
+            // A factorial has no base, and a word multiply is much cheaper.
+            if base.is_zero() {
+                acc *= k;
+            } else {
+                acc *= base + k;
+            }
         }
         return acc;
     }
     let mid = lo + (hi - lo) / 2;
-    range_product(lo, mid) * range_product(mid + 1, hi)
+    range_product(base, lo, mid) * range_product(base, mid + 1, hi)
 }
 
 /// `k + 1/2` when `v` is an exact half-integer. `None` for anything else,
@@ -1273,6 +1277,33 @@ mod tests {
                 running *= n;
             }
             assert_eq!(factorial_int(&BigInt::from(n)).unwrap(), running, "{n}!");
+        }
+    }
+
+    #[test]
+    fn choose_and_perm_product_trees_match_running_products() {
+        for n in [-70i64, -3, 0, 1, 40, 300, 1_000_000_007] {
+            for k in [0i64, 1, 2, 17, 18, 40, 130] {
+                let (nb, kb) = (BigInt::from(n), BigInt::from(k));
+                let mut perm = BigInt::one();
+                for i in 0..k {
+                    perm *= n - i;
+                }
+                let mut fact = BigInt::one();
+                for i in 2..=k {
+                    fact *= i;
+                }
+                assert_eq!(
+                    crate::value::exact_int(&perm_int(&nb, &kb).unwrap()),
+                    Some(perm.clone()),
+                    "perm({n}, {k})"
+                );
+                assert_eq!(
+                    choose_int(&nb, &kb).unwrap(),
+                    perm / fact,
+                    "choose({n}, {k})"
+                );
+            }
         }
     }
 
