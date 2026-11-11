@@ -2440,6 +2440,78 @@ mod tests {
             ok("100 p 123456.789 !"),
             "2.70930718211486985194578858644470701287895765175172753167443863815580156611744637642676388916884102e574968"
         );
+        // Complex inverse functions do not cancel (`src/cplx.rs`). PARI/GP at
+        // 12 digits is itself wrong for the first one; these are from 60.
+        assert_eq!(
+            ok("m r (_3461328.16571, 17) H I S"),
+            "(-15.7503101169, 4.91140948965e-6)"
+        );
+        assert_eq!(
+            ok("m r (_37, _1187295.5) H I S"),
+            "(-14.6803357706, -1.57076516353)"
+        );
+        assert_eq!(ok("(1, 2) I S"), "(24.4698005207, 87.5806623727)");
+        assert_eq!(ok("(11, 35) I C"), "(72.5588966358, -246.128101883)");
+        assert_eq!(
+            ok("(_30, 6.279e-5) I T"),
+            "(-88.090847567, 3.99289899624e-6)"
+        );
+        assert_eq!(ok("(7e-5, 46) H I T"), "(3.30656589513e-8, 1.54906061995)");
+        assert_eq!(ok("(_2, 1) H I C"), "(1.46935174437, 2.63423635037)");
+        assert_eq!(
+            ok("30 p m r (0.3, 0.4) I S"),
+            "(0.280629562291805826304196312258, 0.4051123371780308725073384052)"
+        );
+        // The imaginary axis follows PARI/GP.
+        assert_eq!(ok("m r (0, 2) H I S"), "(1.31695789692, 1.57079632679)");
+        assert_eq!(ok("m r (0, _2) H I S"), "(-1.31695789692, -1.57079632679)");
+        assert_eq!(ok("m r (0, 2) I T"), "(1.57079632679, 0.549306144334)");
+        assert_eq!(ok("m r (0, 2) H I C"), "(1.44363547518, 1.57079632679)");
+        // Complex trig in degrees reduces the real part like a real angle.
+        assert_eq!(
+            ok("(19898.92, _0.323) S"),
+            "(0.987921499546, 8.7411513021e-4)"
+        );
+        assert_eq!(
+            ok("(19898.92, _0.323) T"),
+            "(-6.36290417959, -0.234176058122)"
+        );
+        assert_eq!(ok("(_7200000, _12) T"), "(0, -0.206429956437)");
+        assert_eq!(ok("(90, 1) T"), "(0, 57.3015971591)");
+        // tanh keeps the small part, and ln works near the unit circle.
+        assert_eq!(ok("(_0.01, 9e-11) H T"), "(-9.99966668e-3, 8.99910006e-11)");
+        assert_eq!(
+            ok("m r (0.9999996, 3.92367472653e-5) L"),
+            "(-3.99230318217e-7, 3.92367629399e-5)"
+        );
+        assert_eq!(ok("m r (0.6, 0.8) L"), "(0, 0.927295218002)");
+        // expm1 and lnp1, complex and real.
+        assert_eq!(
+            ok("(6.7651569e-5, 2.1944e-8) f E"),
+            "(6.76538574188e-5, 2.19454845962e-8)"
+        );
+        assert_eq!(
+            ok("(_3.825628196e-5, 3.8e-10) f L"),
+            "(-3.82570137502e-5, 3.80014537943e-10)"
+        );
+        assert_eq!(ok("2.312 f E"), "9.09459366661");
+        assert_eq!(ok("_6e36 f E"), "-1.");
+        assert_eq!(ok("_12 f L"), "(2.3978952728, 3.14159265359)");
+        // A log that feeds a division keeps its tiny imaginary part.
+        assert_eq!(
+            ok("30 p (13, 7764843e-25) (8, 5277312283390279603874e-61) B"),
+            "(1.23347990604703072013227088475, 2.87238474086702084381528179455e-20)"
+        );
+        // A complex product rounds each sum once.
+        assert_eq!(
+            ok("(_1.000005, 0.443579) I Q"),
+            "(0.803247670784, -0.88716243579)"
+        );
+        // A fraction of a degree keeps the precision, and zero to a real
+        // power is zero.
+        assert_eq!(ok("30 p 1:3 S"), "5.81773135499383395465720208828e-3");
+        assert_eq!(ok("0. 5.3 ^"), "0");
+        assert_eq!(ok("0 _0.5 ^"), "error");
         // A tiny argument is not an overflow.
         assert_eq!(ok("1e-3000 E"), "1.");
         assert_eq!(ok("1e-3000 S"), "1.74532925199e-3002");

@@ -8,6 +8,7 @@
 //! It takes `+ - * / ^`, negation, and reciprocal, with an integer or a
 //! form of the same modulus. Every other operation rejects it.
 
+use crate::cplx;
 use crate::error::CalcError;
 use crate::float::{self, DEFAULT_PRECISION, DecFloat};
 use num_bigint::BigInt;
@@ -380,6 +381,110 @@ fn finish_complex(re: Real, im: Real, prec: u32) -> Value {
     Value::Complex(re, im)
 }
 
+/// Both parts as floats at `work` digits.
+fn float_parts(v: &Value, work: u32) -> Result<cplx::Pair, CalcError> {
+    let (re, im) = v.parts();
+    Ok((re.to_float(work)?, im.to_float(work)?))
+}
+
+/// Round a kernel result once and drop a part that is a rounding speck.
+fn complex_result((re, im): cplx::Pair, prec: u32) -> Value {
+    finish_complex(
+        Real::Float(re.polished(prec)),
+        Real::Float(im.polished(prec)),
+        prec,
+    )
+}
+
+/// A complex kernel that takes and returns plain parts (no angle mode).
+fn complex_kernel(
+    v: &Value,
+    mode: &Mode,
+    kernel: impl Fn(&DecFloat, &DecFloat, u32) -> Result<cplx::Pair, CalcError>,
+) -> Result<Value, CalcError> {
+    let pair = cplx::refine(mode.prec, |work| {
+        let (x, y) = float_parts(v, work)?;
+        kernel(&x, &y, work)
+    })?;
+    Ok(complex_result(pair, mode.prec))
+}
+
+/// An inverse trig kernel: the result is in radians and both parts are
+/// scaled to the angle mode before the one rounding.
+fn complex_angle_kernel(
+    v: &Value,
+    mode: &Mode,
+    kernel: impl Fn(&DecFloat, &DecFloat, u32) -> Result<cplx::Pair, CalcError>,
+) -> Result<Value, CalcError> {
+    let pair = cplx::refine(mode.prec, |work| {
+        let (x, y) = float_parts(v, work)?;
+        let (re, im) = kernel(&x, &y, work)?;
+        if mode.angle == AngleMode::Radians {
+            return Ok((re, im));
+        }
+        let scale = DecFloat::from_i64(180, work).div(&DecFloat::pi(work), work)?;
+        Ok((re.mul(&scale, work), im.mul(&scale, work)))
+    })?;
+    Ok(complex_result(pair, mode.prec))
+}
+
+/// Sine and cosine of a real angle in the current mode, at `work` digits.
+/// Degrees are reduced modulo 360 exactly first, and a multiple of 90 is
+/// exact, so the real part of a complex angle is as good as a real one.
+fn mode_sin_cos(r: &Real, mode: &Mode, work: u32) -> Result<cplx::Pair, CalcError> {
+    if mode.angle == AngleMode::Radians {
+        // Keep every digit of a large argument: the reduction needs them.
+        let order = r.to_float(16)?.order().clamp(0, 2_100) as u32;
+        let digits = match r {
+            Real::Float(f) => f.prec(),
+            _ => 0,
+        };
+        return r
+            .to_float(work.saturating_add(order).max(digits))?
+            .sin_cos(work);
+    }
+    let reduced = reduce_degrees(r, work)?;
+    if let Some(n) = reduced.to_integer_exact()
+        && n.is_multiple_of(&BigInt::from(90))
+    {
+        let quarter = (n / BigInt::from(90)).mod_floor(&BigInt::from(4));
+        let (s, c) = match quarter.to_i32().unwrap_or(0) {
+            0 => (0, 1),
+            1 => (1, 0),
+            2 => (0, -1),
+            _ => (-1, 0),
+        };
+        return Ok((DecFloat::from_i64(s, work), DecFloat::from_i64(c, work)));
+    }
+    degrees_to_radians(&reduced, work.saturating_add(4))?.sin_cos(work)
+}
+
+/// A real number of degrees in `(-180, 180]`, exact where the input is.
+fn reduce_degrees(r: &Real, work: u32) -> Result<DecFloat, CalcError> {
+    let full = BigInt::from(360);
+    if let Some(n) = exact_real(r) {
+        let mut m = n.mod_floor(&full);
+        if m > BigInt::from(180) {
+            m -= &full;
+        }
+        return Ok(DecFloat::from_bigint(&m, work));
+    }
+    match r {
+        Real::Float(f) => Ok(reduce_degree_float(f).unwrap_or_else(|| f.clone())),
+        Real::Rat(q) => reduce_degree_rational(q, work).ok_or(CalcError::Overflow),
+        Real::Int(n) => Ok(DecFloat::from_bigint(n, work)),
+    }
+}
+
+/// The imaginary part of a complex angle, in radians.
+fn mode_radians(r: &Real, mode: &Mode, work: u32) -> Result<DecFloat, CalcError> {
+    let f = r.to_float(work)?;
+    match mode.angle {
+        AngleMode::Radians => Ok(f),
+        AngleMode::Degrees => degrees_to_radians(&f, work),
+    }
+}
+
 pub fn neg(v: &Value) -> Value {
     match v {
         Value::Real(r) => Value::Real(r.neg()),
@@ -416,10 +521,22 @@ pub fn mul(a: &Value, b: &Value, mode: &Mode) -> Result<Value, CalcError> {
     if ai.is_zero() && bi.is_zero() {
         return Ok(Value::Real(mul_real(&ar, &br, mode)?));
     }
-    // (ar*br - ai*bi, ar*bi + ai*br)
-    let re = sub_real(&mul_real(&ar, &br, mode)?, &mul_real(&ai, &bi, mode)?, mode)?;
-    let im = add_real(&mul_real(&ar, &bi, mode)?, &mul_real(&ai, &br, mode)?, mode)?;
-    Ok(Value::complex(re, im))
+    // (ar*br - ai*bi, ar*bi + ai*br). The products are kept in full and
+    // each sum is rounded once: rounding them first lost the digits that
+    // cancel, and `(-1.000005, 0.443579) I Q` was 5 ulp off.
+    let mut wide = mode.clone();
+    wide.prec = mode.prec.saturating_mul(2).saturating_add(4);
+    let re = sub_real(
+        &mul_real(&ar, &br, &wide)?,
+        &mul_real(&ai, &bi, &wide)?,
+        &wide,
+    )?;
+    let im = add_real(
+        &mul_real(&ar, &bi, &wide)?,
+        &mul_real(&ai, &br, &wide)?,
+        &wide,
+    )?;
+    Ok(round_floats(Value::complex(re, im), mode.prec))
 }
 
 pub fn div(a: &Value, b: &Value, mode: &Mode) -> Result<Value, CalcError> {
@@ -699,6 +816,16 @@ pub fn pow(base: &Value, exp: &Value, mode: &Mode) -> Result<Value, CalcError> {
     }
     if let Some(n) = real_exponent_int(exp) {
         return pow_int(base, &n, mode);
+    }
+    // Zero to a real power never reaches the logarithm: `0. 5.3 ^` is 0.
+    if base.is_zero()
+        && let Value::Real(r) = exp
+    {
+        return if r.is_positive() {
+            Ok(Value::from_int(0))
+        } else {
+            Err(CalcError::DivideByZero)
+        };
     }
     if let Value::Real(r) = exp
         && let Some(q) = r.to_rational()
@@ -983,7 +1110,7 @@ fn pow_exp_ln(base: &Value, exp: &Value, mode: &Mode) -> Result<Value, CalcError
     // moves the last digit or two. Keep guard digits until the end.
     let mut wide = mode.clone();
     wide.prec = mode.prec.saturating_add(8);
-    let mut l = ln(base, &wide)?;
+    let mut l = ln_keep(base, &wide)?;
     let mut p = mul(exp, &l, &wide)?;
     // `exp` turns each integer digit of `p` into a lost digit of the
     // result: `(-1.23e600000)^(1000001:3)` has `p` near 10^6 and was wrong
@@ -991,7 +1118,7 @@ fn pow_exp_ln(base: &Value, exp: &Value, mode: &Mode) -> Result<Value, CalcError
     let int_digits = value_order(&p).clamp(0, 40) as u32;
     if int_digits > 0 {
         wide.prec = wide.prec.saturating_add(int_digits + 1);
-        l = ln(base, &wide)?;
+        l = ln_keep(base, &wide)?;
         p = mul(exp, &l, &wide)?;
     }
     let result = exp_value(&p, &wide)?;
@@ -1204,17 +1331,25 @@ pub fn ln(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
             };
             Ok(Value::complex(re, pi))
         }
-        Value::Complex(_, _) => {
-            let mag = abs(v, mode)?;
-            let re = ln(&mag, mode)?;
-            let (x, y) = v.parts();
-            let angle = atan2_radians(&y, &x, mode.prec)?;
-            let Value::Real(re) = re else {
-                return Ok(re);
-            };
-            Ok(finish_complex(re, Real::Float(angle), mode.prec))
-        }
+        Value::Complex(_, _) => complex_kernel(v, mode, cplx::ln),
     }
+}
+
+/// `ln` for a caller that goes on computing. A complex result keeps both
+/// parts: `finish_complex` on the log of the base dropped a tiny imaginary
+/// part and moved the 21st digit of a 30-digit `B`.
+fn ln_keep(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
+    if !matches!(v, Value::Complex(_, _)) {
+        return ln(v, mode);
+    }
+    let (re, im) = cplx::refine(mode.prec, |work| {
+        let (x, y) = float_parts(v, work)?;
+        cplx::ln(&x, &y, work)
+    })?;
+    Ok(Value::complex(
+        Real::Float(re.polished(mode.prec)),
+        Real::Float(im.polished(mode.prec)),
+    ))
 }
 
 pub fn exp_value(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
@@ -1240,29 +1375,41 @@ pub fn exp_value(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 }
 
 pub fn expm1(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
-    if let Value::Real(r) = v
-        && let Some(f) = (!r.is_zero()).then(|| r.to_float(mode.prec)).transpose()?
-        && f.order() < 0
-    {
-        return Ok(polish(
-            Value::Real(Real::Float(f.exp_minus_one(mode.prec)?)),
-            mode.prec,
-        ));
+    match v {
+        Value::Mod(_, _) => Err(NOT_FOR_MOD),
+        Value::Real(r) if r.is_zero() => Ok(Value::from_int(0)),
+        // One rounding. `exp(x) - 1` at the display precision is a digit
+        // short whenever `exp(x)` has one more integer digit.
+        Value::Real(r) => {
+            let work = mode.prec.saturating_add(8);
+            let out = cplx::expm1_real(&r.to_float(work)?, work)?;
+            Ok(Value::Real(Real::Float(out.polished(mode.prec))))
+        }
+        Value::Complex(_, _) => complex_kernel(v, mode, cplx::expm1),
     }
-    sub(&exp_value(v, mode)?, &Value::from_int(1), mode)
 }
 
 pub fn lnp1(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
         Value::Mod(_, _) => Err(NOT_FOR_MOD),
-        Value::Real(r) => Ok(polish(
-            Value::Real(Real::Float(r.to_float(mode.prec)?.ln_1p(mode.prec)?)),
-            mode.prec,
-        )),
-        Value::Complex(_, _) => {
-            let sum = add(v, &Value::from_int(1), mode)?;
-            ln(&sum, mode)
+        Value::Real(r) => {
+            let f = r.to_float(mode.prec)?;
+            let wide = mode.prec.saturating_mul(2).saturating_add(4);
+            let shifted = DecFloat::one(wide).add(&f, wide);
+            if shifted.is_negative() {
+                // Below -1 it is `(ln|1 + x|, pi)`, as `L` gives for a
+                // negative number.
+                return Ok(Value::complex(
+                    Real::Float(shifted.abs().ln(mode.prec)?),
+                    Real::Float(DecFloat::pi(mode.prec)),
+                ));
+            }
+            Ok(polish(
+                Value::Real(Real::Float(f.ln_1p(mode.prec)?)),
+                mode.prec,
+            ))
         }
+        Value::Complex(_, _) => complex_kernel(v, mode, cplx::ln1p),
     }
 }
 
@@ -1272,7 +1419,7 @@ pub fn log10(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     }
     let mut wide = mode.clone();
     wide.prec = mode.prec.saturating_add(8);
-    let l = ln(v, &wide)?;
+    let l = ln_keep(v, &wide)?;
     let base = Value::Real(Real::Float(DecFloat::ln10(wide.prec)));
     let q = div(&l, &base, &wide)?;
     Ok(polish(q, mode.prec))
@@ -1291,8 +1438,8 @@ pub fn log(x: &Value, base: &Value, mode: &Mode) -> Result<Value, CalcError> {
     }
     let mut wide = mode.clone();
     wide.prec = mode.prec.saturating_add(8);
-    let num = ln(x, &wide)?;
-    let den = ln(base, &wide)?;
+    let num = ln_keep(x, &wide)?;
+    let den = ln_keep(base, &wide)?;
     let q = div(&num, &den, &wide)?;
     Ok(polish(q, mode.prec))
 }
@@ -1431,12 +1578,15 @@ pub fn tan(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         let tangent = x.to_float(arg_prec)?.tan(mode.prec)?;
         return Ok(polish(Value::Real(Real::Float(tangent)), mode.prec));
     }
-    let s = sin(v, mode)?;
-    let c = cos(v, mode)?;
-    if c.is_zero() {
-        return Err(CalcError::Domain("tangent is undefined"));
-    }
-    div(&s, &c, mode)
+    let Value::Complex(re, im) = v else {
+        return Err(NOT_FOR_MOD);
+    };
+    let pair = cplx::refine(mode.prec, |work| {
+        let (s, c) = mode_sin_cos(re, mode, work)?;
+        let y = mode_radians(im, mode, work)?;
+        cplx::tan(&s, &c, &y, work)
+    })?;
+    Ok(complex_result(pair, mode.prec))
 }
 
 fn degree_mod(deg: &BigInt) -> BigInt {
@@ -1511,15 +1661,23 @@ fn trig_complex(v: &Value, mode: &Mode, want_sin: bool) -> Result<Value, CalcErr
             mode.prec,
         ));
     }
-    let (s, c) = xf.sin_cos(mode.prec + 2)?;
-    let sh = sinh_float(&yf, mode.prec + 2)?;
-    let ch = cosh_float(&yf, mode.prec + 2)?;
-    let (re, im) = if want_sin {
-        (s.mul(&ch, mode.prec), c.mul(&sh, mode.prec))
-    } else {
-        (c.mul(&ch, mode.prec), s.neg().mul(&sh, mode.prec))
-    };
-    Ok(finish_complex(Real::Float(re), Real::Float(im), mode.prec))
+    // (sin x cosh y, cos x sinh y) and (cos x cosh y, -sin x sinh y). The
+    // real part of the angle is reduced on its own: converting the pair at
+    // the display precision moved the tenth digit of
+    // `sin((19898.92, -0.323))` in degrees.
+    let (re, im) = v.parts();
+    let pair = cplx::refine(mode.prec, |work| {
+        let (s, c) = mode_sin_cos(&re, mode, work)?;
+        let y = mode_radians(&im, mode, work)?;
+        let sh = cplx::sinh(&y, work)?;
+        let ch = cplx::cosh(&y, work)?;
+        Ok(if want_sin {
+            (s.mul(&ch, work), c.mul(&sh, work))
+        } else {
+            (c.mul(&ch, work), s.neg().mul(&sh, work))
+        })
+    })?;
+    Ok(complex_result(pair, mode.prec))
 }
 
 fn to_radians(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
@@ -1545,7 +1703,7 @@ fn to_radians(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         )?)));
     }
     if let Value::Real(r) = v
-        && let Some(reduced) = reduce_real_degrees(r)
+        && let Some(reduced) = reduce_real_degrees(r, mode.prec + 8)
     {
         return Ok(Value::Real(Real::Float(degrees_to_radians(
             &reduced,
@@ -1557,10 +1715,10 @@ fn to_radians(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 }
 
 /// Angle in `(-180, 180]`, so converting to radians keeps the fraction.
-fn reduce_real_degrees(r: &Real) -> Option<DecFloat> {
+fn reduce_real_degrees(r: &Real, prec: u32) -> Option<DecFloat> {
     match r {
         Real::Float(f) => reduce_degree_float(f),
-        Real::Rat(q) => reduce_degree_rational(q),
+        Real::Rat(q) => reduce_degree_rational(q, prec),
         Real::Int(_) => None,
     }
 }
@@ -1596,20 +1754,23 @@ fn reduce_degree_float(f: &DecFloat) -> Option<DecFloat> {
     Some(DecFloat::from_decimal(residue, exp, prec))
 }
 
-fn reduce_degree_rational(q: &BigRational) -> Option<DecFloat> {
+fn reduce_degree_rational(q: &BigRational, prec: u32) -> Option<DecFloat> {
     let full = BigInt::from(360);
     let modulus = &full * q.denom();
     let mut residue = q.numer().mod_floor(&modulus);
     if residue > BigInt::from(180) * q.denom() {
         residue -= &modulus;
     }
-    let prec = float::digit_count(&residue)
+    // The operands are exact and the quotient keeps the caller's digits.
+    // A width taken from the operands alone gave `1:3` sixteen digits, and
+    // `30 p 1:3 S` was wrong from the seventeenth.
+    let exact = float::digit_count(&residue)
         .max(float::digit_count(q.denom()))
         .saturating_add(8)
         .max(16);
-    let n = DecFloat::from_bigint(&residue, prec);
-    let d = DecFloat::from_bigint(q.denom(), prec);
-    n.div(&d, prec).ok()
+    let n = DecFloat::from_bigint(&residue, exact);
+    let d = DecFloat::from_bigint(q.denom(), exact);
+    n.div(&d, exact.max(prec)).ok()
 }
 
 fn degrees_to_radians(deg: &DecFloat, prec: u32) -> Result<DecFloat, CalcError> {
@@ -1663,17 +1824,7 @@ pub fn asin(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
             mode,
         );
     }
-    // asin(z) = -i ln(i z + sqrt(1 - z^2)), result still in radians.
-    let i = Value::complex(Real::Int(BigInt::zero()), Real::Int(BigInt::one()));
-    let z2 = square(v, mode)?;
-    let one_minus = sub(&Value::from_int(1), &z2, mode)?;
-    let root = sqrt(&one_minus, mode)?;
-    let iz = mul(&i, v, mode)?;
-    let inside = add(&iz, &root, mode)?;
-    let l = ln(&inside, mode)?;
-    let neg_i = neg(&i);
-    let rad = mul(&neg_i, &l, mode)?;
-    from_radians(rad, mode)
+    complex_angle_kernel(v, mode, cplx::asin)
 }
 
 pub fn acos(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
@@ -1713,8 +1864,7 @@ pub fn acos(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         };
         return from_radians(rad, mode);
     }
-    let half = quarter_turn(mode)?;
-    sub(&half, &asin(v, mode)?, mode)
+    complex_angle_kernel(v, mode, cplx::acos)
 }
 
 pub fn atan(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
@@ -1736,15 +1886,7 @@ pub fn atan(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         let rad = r.to_float(mode.prec)?.atan(angle_prec(mode))?;
         return from_radians_real(rad, mode);
     }
-    // (ln(1 + i z) - ln(1 - i z)) / (2 i)
-    let i = Value::complex(Real::Int(BigInt::zero()), Real::Int(BigInt::one()));
-    let iz = mul(&i, v, mode)?;
-    let a = ln(&add(&Value::from_int(1), &iz, mode)?, mode)?;
-    let b = ln(&sub(&Value::from_int(1), &iz, mode)?, mode)?;
-    let diff = sub(&a, &b, mode)?;
-    let two_i = Value::complex(Real::Int(BigInt::zero()), Real::Int(BigInt::from(2)));
-    let rad = div(&diff, &two_i, mode)?;
-    from_radians(rad, mode)
+    complex_angle_kernel(v, mode, cplx::atan)
 }
 
 pub fn atan2(y: &Value, x: &Value, mode: &Mode) -> Result<Value, CalcError> {
@@ -1860,9 +2002,7 @@ pub fn tanh(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         let out = if r.is_negative() { out.neg() } else { out };
         return Ok(Value::Real(Real::Float(out.polished(mode.prec))));
     }
-    let s = sinh(v, mode)?;
-    let c = cosh(v, mode)?;
-    div(&s, &c, mode)
+    complex_kernel(v, mode, cplx::tanh)
 }
 
 pub fn asinh(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
@@ -1876,10 +2016,7 @@ pub fn asinh(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         let out = if r.is_negative() { out.neg() } else { out };
         return Ok(Value::Real(Real::Float(out.polished(mode.prec))));
     }
-    // ln(z + sqrt(z^2 + 1))
-    let inside = add(&square(v, mode)?, &Value::from_int(1), mode)?;
-    let sum = add(v, &sqrt(&inside, mode)?, mode)?;
-    ln(&sum, mode)
+    complex_kernel(v, mode, cplx::asinh)
 }
 
 /// `asinh(a)` for `a > 0`. Below 1 it is
@@ -1925,11 +2062,7 @@ pub fn acosh(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         let im = r.to_float(mode.prec)?.acos(mode.prec)?;
         return Ok(Value::complex(Real::Int(BigInt::zero()), Real::Float(im)));
     }
-    // ln(z + sqrt(z - 1) sqrt(z + 1))
-    let minus = sqrt(&sub(v, &Value::from_int(1), mode)?, mode)?;
-    let plus = sqrt(&add(v, &Value::from_int(1), mode)?, mode)?;
-    let sum = add(v, &mul(&minus, &plus, mode)?, mode)?;
-    ln(&sum, mode)
+    complex_kernel(v, mode, cplx::acosh)
 }
 
 /// `acosh(x)` for `x >= 1`, as `ln1p(t + sqrt(t (t + 2)))` with `t = x - 1`.
@@ -1981,10 +2114,11 @@ pub fn atanh(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
             ));
         }
     }
-    let num = ln(&add(&Value::from_int(1), v, mode)?, mode)?;
-    let den = ln(&sub(&Value::from_int(1), v, mode)?, mode)?;
-    let diff = sub(&num, &den, mode)?;
-    div(&diff, &Value::from_int(2), mode)
+    if v.is_real() {
+        // Only +1 and -1 are left.
+        return Err(CalcError::Domain("logarithm of zero"));
+    }
+    complex_kernel(v, mode, cplx::atanh)
 }
 
 /// A real compared with 1, exactly.
