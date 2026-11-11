@@ -794,11 +794,25 @@ fn factorial_int(n: &BigInt) -> Result<BigInt, CalcError> {
     if n > MAX_FACTORIAL {
         return Err(CalcError::Overflow);
     }
-    let mut acc = BigInt::one();
-    for k in 2..=n {
-        acc *= BigInt::from(k);
+    Ok(range_product(2, n))
+}
+
+/// Product of `lo..=hi`, split in half so the large multiplications are
+/// between numbers of similar size. A running product multiplied a growing
+/// giant by one small number at a time, and `100000 !` took 0.8 s.
+fn range_product(lo: u32, hi: u32) -> BigInt {
+    if lo > hi {
+        return BigInt::one();
     }
-    Ok(acc)
+    if hi - lo < 16 {
+        let mut acc = BigInt::from(lo);
+        for k in lo + 1..=hi {
+            acc *= k;
+        }
+        return acc;
+    }
+    let mid = lo + (hi - lo) / 2;
+    range_product(lo, mid) * range_product(mid + 1, hi)
 }
 
 /// `k + 1/2` when `v` is an exact half-integer. `None` for anything else,
@@ -1249,6 +1263,17 @@ mod tests {
             factorial(&neg, &mode()).unwrap().to_string(),
             "1.77245385091"
         );
+    }
+
+    #[test]
+    fn factorial_product_tree_matches_a_running_product() {
+        let mut running = BigInt::one();
+        for n in 0..=300u32 {
+            if n > 1 {
+                running *= n;
+            }
+            assert_eq!(factorial_int(&BigInt::from(n)).unwrap(), running, "{n}!");
+        }
     }
 
     #[test]
