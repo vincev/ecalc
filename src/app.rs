@@ -2510,6 +2510,14 @@ mod tests {
         // A fraction of a degree keeps the precision, and zero to a real
         // power is zero.
         assert_eq!(ok("30 p 1:3 S"), "5.81773135499383395465720208828e-3");
+        // A float exponent gives a float, whichever side it is typed on.
+        assert_eq!(ok("5013800. H E"), "1e5013800");
+        assert_eq!(ok("10 5013800. ^"), "1e5013800");
+        assert_eq!(ok("10. 5013800 ^"), "1e5013800");
+        assert_eq!(ok("2 3. ^"), "8.");
+        assert_eq!(ok("2:3 2. ^"), "0.444444444444");
+        assert_eq!(ok("2 0. ^"), "1.");
+        assert_eq!(ok("3 H E"), "1000");
         assert_eq!(ok("0. 5.3 ^"), "0");
         assert_eq!(ok("0 _0.5 ^"), "error");
         // A tiny argument is not an overflow.

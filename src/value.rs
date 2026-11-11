@@ -815,6 +815,19 @@ pub fn pow(base: &Value, exp: &Value, mode: &Mode) -> Result<Value, CalcError> {
         return mod_pow(&b, &e, &m);
     }
     if let Some(n) = real_exponent_int(exp) {
+        // A float exponent gives a float, as in Calc: `2 3. ^` is `8.`.
+        // Raising the exact base first made `5013800. H E` an overflow,
+        // where `10. 5013800 ^` is `1e5013800`.
+        if matches!(exp, Value::Real(Real::Float(_))) && !base.is_mod() {
+            // The base keeps a guard digit per exponent bit, like `powi`.
+            let mut wide = mode.clone();
+            wide.prec = mode
+                .prec
+                .saturating_add(n.bits().min(64) as u32)
+                .saturating_add(4);
+            let out = pow_int(&to_float(base, &wide)?, &n, mode)?;
+            return to_float(&out, mode);
+        }
         return pow_int(base, &n, mode);
     }
     // Zero to a real power never reaches the logarithm: `0. 5.3 ^` is 0.
