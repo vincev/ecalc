@@ -869,7 +869,7 @@ fn factorial_float(x: &DecFloat, prec: u32) -> Result<DecFloat, CalcError> {
         return Err(CalcError::Overflow);
     }
     let a = spouge_terms(prec);
-    let work = prec.saturating_add(16).saturating_add(a / 3).max(32);
+    let work = spouge_work(prec, a, x.order());
     let x = x.round_to(work);
     let one = DecFloat::one(work);
     let (shifted, steps) = if x.cmp_val(&one) == Ordering::Greater {
@@ -914,6 +914,18 @@ fn spouge_coefficients(work: u32, a: u32) -> Result<Arc<Vec<DecFloat>>, CalcErro
     {
         return Ok(hit);
     }
+    // `e^1 .. e^(a-1)` by repeated multiplication. A separate `exp` for
+    // each coefficient was 1270 of them at 1000 digits, and `0.3 !` there
+    // did not finish in a minute. The extra digits cover the rounding of
+    // each step.
+    let wide = work.saturating_add(8);
+    let e = DecFloat::e(wide);
+    let mut e_powers = Vec::with_capacity(a as usize);
+    let mut e_power = DecFloat::one(wide);
+    for _ in 1..a {
+        e_power = e_power.mul(&e, wide);
+        e_powers.push(e_power.clone());
+    }
     let mut coeffs = Vec::with_capacity(a as usize);
     let mut fact = BigInt::one();
     for k in 1..a {
@@ -923,11 +935,11 @@ fn spouge_coefficients(work: u32, a: u32) -> Result<Arc<Vec<DecFloat>>, CalcErro
         let ak = a - k;
         let power = int_pow(ak, k);
         let root = DecFloat::from_i64(ak as i64, work).sqrt(work)?;
-        let scaled = DecFloat::from_i64(ak as i64, work).exp(work)?;
+        let scaled = &e_powers[ak as usize - 1];
         let mut magnitude = DecFloat::from_bigint(&power, work)
             .div(&root, work)?
             .div(&DecFloat::from_bigint(&fact, work), work)?
-            .mul(&scaled, work);
+            .mul(scaled, work);
         if k % 2 == 0 {
             magnitude = magnitude.neg();
         }
@@ -957,6 +969,23 @@ fn spouge_factorial(z: &DecFloat, work: u32, a: u32) -> Result<DecFloat, CalcErr
         .exp(work)?
         .mul(&za.neg().exp(work)?, work)
         .mul(&sum, work))
+}
+
+/// Working digits for Spouge's sum.
+///
+/// The coefficients alternate in sign and reach about `10^(0.555 a)`, while
+/// the sum they leave can be as small as `sqrt(2 pi)`, so that many digits
+/// cancel. A third of `a` was enough for a small argument, where the sum is
+/// itself large, and lost ten digits of `972.32 !` at precision 100. The
+/// exponent `(z + 1/2) ln(z + a)` also turns each of its integer digits into
+/// a lost digit of the result.
+fn spouge_work(prec: u32, a: u32, order: i64) -> u32 {
+    let cancel = a.saturating_mul(14) / 25 + 1;
+    let exponent = order.clamp(0, 30) as u32 + 4;
+    prec.saturating_add(16)
+        .saturating_add(cancel)
+        .saturating_add(exponent)
+        .max(32)
 }
 
 fn spouge_terms(prec: u32) -> u32 {

@@ -337,20 +337,17 @@ impl DecFloat {
         }
         let work = work_prec(prec);
         let x = self.round_to(work);
-        let ord = x.order();
-        let mut guess = Self::from_unnormalized(BigInt::from(2), ord.div_euclid(2), work);
-        if ord.rem_euclid(2) != 0 {
-            guess = guess.mul(&Self::from_i64(3, work), work);
+        // The integer square root of the mantissa, scaled to twice the
+        // working digits with an even exponent. Newton on decimal floats
+        // started from one digit and ran every step at full precision.
+        let digits = digit_count(&x.mantissa);
+        let mut shift = work.saturating_mul(2).saturating_sub(digits);
+        if x.exponent.saturating_sub(i64::from(shift)).rem_euclid(2) != 0 {
+            shift += 1;
         }
-        let two = Self::from_i64(2, work);
-        for _ in 0..80 {
-            let next = guess.add(&x.div(&guess, work)?, work).div(&two, work)?;
-            if next.nearly(&guess, work.saturating_sub(1)) {
-                guess = next;
-                break;
-            }
-            guess = next;
-        }
+        let exponent = x.exponent.saturating_sub(i64::from(shift));
+        let root = (&x.mantissa * pow10(shift)).sqrt();
+        let guess = Self::from_unnormalized(root, exponent.div_euclid(2), work);
         Ok(snap_close_integer(guess, prec))
     }
 
