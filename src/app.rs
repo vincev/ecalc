@@ -7,6 +7,8 @@
 //! `eval` is the script form of those same keys. Whitespace separates words,
 //! and the result is the top of the stack.
 
+use std::cell::Cell;
+
 use crate::consts;
 use crate::engine::{Engine, Status};
 use crate::error::{CalcError, EvalError};
@@ -26,6 +28,44 @@ pub enum Key {
     Ctrl(char),
     Up,
     Down,
+    Left,
+    Right,
+    Home,
+    End,
+}
+
+/// Where a sideways scroll key moves a row of `len` characters shown
+/// `width` wide, as in Emacs: `C-a` and `C-e` jump to the start and the end,
+/// Left and Right (`C-b`, `C-f`) move a window less the two `$` columns, so
+/// no character is skipped. `None` for any other key.
+pub(crate) fn hscroll(offset: usize, key: Key, len: usize, width: usize) -> Option<usize> {
+    let max = max_hscroll(len, width);
+    let step = width.saturating_sub(2).max(1);
+    let offset = offset.min(max);
+    Some(match key {
+        Key::Home => 0,
+        Key::End => max,
+        Key::Left => offset.saturating_sub(step),
+        Key::Right => (offset + step).min(max),
+        Key::Ctrl(c) => match c.to_ascii_lowercase() {
+            'a' => 0,
+            'e' => max,
+            'b' => offset.saturating_sub(step),
+            'f' => (offset + step).min(max),
+            _ => return None,
+        },
+        _ => return None,
+    })
+}
+
+fn is_hscroll_key(key: Key) -> bool {
+    hscroll(0, key, 0, 0).is_some()
+}
+
+/// Furthest offset that still fills the row: the end of the text sits in the
+/// last column.
+pub(crate) fn max_hscroll(len: usize, width: usize) -> usize {
+    len.saturating_sub(width)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,13 +144,18 @@ pub(crate) struct TrailView {
     pub rows: Vec<TrailRow>,
     /// Indices into `rows` that match the query, oldest first.
     pub matches: Vec<usize>,
+    /// Sideways scroll of the selected row. Moving or filtering resets it.
+    pub scroll: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TrailRow {
     pub label: String,
-    /// The value in the display mode, cut at `TRAIL_TEXT_MAX` characters.
+    /// The value in the display mode, cut at `TRAIL_TEXT_MAX` characters
+    /// until the row is scrolled.
     pub text: String,
+    /// `text` is cut. Scrolling formats the whole value.
+    cut: bool,
     /// The whole value without grouping, lowercased, for the search.
     search: String,
 }
@@ -135,6 +180,7 @@ impl TrailView {
             .map(|(index, _)| index)
             .collect();
         self.cursor = self.matches.len().saturating_sub(1);
+        self.scroll = 0;
     }
 }
 
@@ -154,6 +200,13 @@ pub struct App {
     hyperbolic: bool,
     /// Modulus of the last modulo form typed. `M M` fills it in, as in Calc.
     last_modulus: Option<String>,
+    /// Sideways scroll of every stack row, as Emacs scrolls the Calc window.
+    /// Any key but a scroll key returns it to the start.
+    hscroll: usize,
+    /// Value columns and value rows of the stack, as last drawn.
+    stack_view: Cell<(usize, usize)>,
+    /// Value columns of a trail row, as last drawn.
+    trail_width: Cell<usize>,
     quit: bool,
 }
 
@@ -176,12 +229,45 @@ impl App {
             inverse: false,
             hyperbolic: false,
             last_modulus: None,
+            hscroll: 0,
+            stack_view: Cell::new((0, 0)),
+            trail_width: Cell::new(0),
             quit: false,
         }
     }
 
     pub fn engine(&self) -> &Engine {
         &self.engine
+    }
+
+    /// Sideways scroll of the stack rows. The screen clamps it to the rows it shows.
+    pub(crate) fn hscroll(&self) -> usize {
+        self.hscroll
+    }
+
+    /// The screen reports the stack's value columns and rows when it draws.
+    pub(crate) fn set_stack_view(&self, width: usize, rows: usize) {
+        self.stack_view.set((width, rows));
+    }
+
+    /// The screen reports the trail's value columns when it draws.
+    pub(crate) fn set_trail_width(&self, width: usize) {
+        self.trail_width.set(width);
+    }
+
+    fn scroll_stack(&mut self, key: Key) {
+        let (width, rows) = self.stack_view.get();
+        let lines = self.engine.stack_lines();
+        let len = lines
+            .iter()
+            .rev()
+            .take(rows)
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0);
+        if let Some(offset) = hscroll(self.hscroll, key, len, width) {
+            self.hscroll = offset;
+        }
     }
 
     pub fn should_quit(&self) -> bool {
@@ -444,6 +530,10 @@ impl App {
             self.quit = true;
             return;
         }
+        let scroll_key = is_hscroll_key(key);
+        if !scroll_key {
+            self.hscroll = 0;
+        }
         if numeric_pending && matches!(key, Key::Char('q')) {
             self.cancel();
             return;
@@ -488,6 +578,10 @@ impl App {
             self.press_prefix(key);
             return;
         }
+        if scroll_key {
+            self.scroll_stack(key);
+            return;
+        }
         match key {
             Key::Char(c) => self.press_char(c),
             Key::Enter => self.press_enter(),
@@ -504,7 +598,7 @@ impl App {
             }
             Key::Ctrl('r') | Key::Ctrl('R') => self.run(Engine::redo),
             Key::Ctrl(_) => self.run(Engine::unknown_key),
-            Key::Up | Key::Down | Key::Esc => {}
+            Key::Up | Key::Down | Key::Left | Key::Right | Key::Home | Key::End | Key::Esc => {}
         }
     }
 
@@ -532,17 +626,16 @@ impl App {
             .iter()
             .map(|entry| {
                 let search = radix::format_value(&entry.value, &plain).to_lowercase();
-                let mut text = if mode.group_digits {
-                    radix::format_value(&entry.value, mode)
-                } else {
-                    search.clone()
-                };
-                if let Some((cut, _)) = text.char_indices().nth(TRAIL_TEXT_MAX) {
-                    text.truncate(cut);
+                // The display form, not `search`: that one is lowercased.
+                let mut text = radix::format_value(&entry.value, mode);
+                let cut = text.char_indices().nth(TRAIL_TEXT_MAX);
+                if let Some((at, _)) = cut {
+                    text.truncate(at);
                 }
                 TrailRow {
                     label: entry.label.clone(),
                     text,
+                    cut: cut.is_some(),
                     search,
                 }
             })
@@ -552,6 +645,7 @@ impl App {
             cursor: 0,
             rows,
             matches: Vec::new(),
+            scroll: 0,
         };
         view.filter();
         self.overlay = Some(Overlay::Trail(view));
@@ -560,9 +654,25 @@ impl App {
     }
 
     fn press_trail(&mut self, key: Key) {
+        let width = self.trail_width.get();
         let Some(Overlay::Trail(view)) = &mut self.overlay else {
             return;
         };
+        if is_hscroll_key(key) {
+            let Some(&index) = view.matches.get(view.cursor) else {
+                return;
+            };
+            let row = &mut view.rows[index];
+            if row.cut {
+                let entry = &self.engine.trail()[index];
+                row.text = radix::format_value(&entry.value, self.engine.mode());
+                row.cut = false;
+            }
+            if let Some(offset) = hscroll(view.scroll, key, row.text.chars().count(), width) {
+                view.scroll = offset;
+            }
+            return;
+        }
         match key {
             Key::Enter => self.yank_trail(),
             Key::Backspace => {
@@ -576,7 +686,7 @@ impl App {
                 view.query.push(c);
                 view.filter();
             }
-            Key::Ctrl(_) | Key::Esc => {}
+            Key::Ctrl(_) | Key::Left | Key::Right | Key::Home | Key::End | Key::Esc => {}
         }
     }
 
@@ -610,7 +720,13 @@ impl App {
             Key::Up | Key::ShiftTab => self.move_docs(-1),
             Key::Down | Key::Tab => self.move_docs(1),
             Key::Char(c) => self.edit_docs_query(|query| query.push(c)),
-            Key::Enter | Key::Ctrl(_) | Key::Esc => {}
+            Key::Enter
+            | Key::Ctrl(_)
+            | Key::Left
+            | Key::Right
+            | Key::Home
+            | Key::End
+            | Key::Esc => {}
         }
     }
 
@@ -1332,6 +1448,7 @@ fn move_cursor(view: &mut TrailView, delta: isize) {
     }
     let current = view.cursor.min(n - 1) as isize;
     view.cursor = (current + delta).rem_euclid(n as isize) as usize;
+    view.scroll = 0;
 }
 
 /// Keys of a command prefix, as a trail label shows them.
@@ -2612,6 +2729,18 @@ mod tests {
     }
 
     #[test]
+    fn trail_shows_hex_as_the_stack_does() {
+        let mut app = App::new();
+        app.keys("d6 255\n");
+        app.keys("ty");
+        let view = app.trail_view().expect("trail");
+        assert_eq!(view.rows[0].text, "16#FF");
+        assert_eq!(app.trail_matches(), [0]);
+        app.keys("ff");
+        assert_eq!(app.trail_matches(), [0], "the search still ignores case");
+    }
+
+    #[test]
     fn trail_records_numbers_and_results() {
         let mut app = App::new();
         app.keys("3 4+2*\n\t\u{7f}0.5IS");
@@ -2944,6 +3073,10 @@ mod tests {
                 (Key::Ctrl('r'), tail)
             } else if let Some(tail) = rest.strip_prefix("S-Tab") {
                 (Key::ShiftTab, tail)
+            } else if let Some(tail) = rest.strip_prefix('←') {
+                (Key::Left, tail)
+            } else if let Some(tail) = rest.strip_prefix('→') {
+                (Key::Right, tail)
             } else if let Some(tail) = rest.strip_prefix("Esc") {
                 (Key::Esc, tail)
             } else if let Some(tail) = rest.strip_prefix("ret") {

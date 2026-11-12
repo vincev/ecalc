@@ -4,7 +4,7 @@
 //! palette on a dark terminal, and dark text on a light one. The headless
 //! screen test paints the GrokNight canvas.
 
-use crate::app::{App, CONST_COLUMN, Key, Overlay, VAR_COLUMN};
+use crate::app::{App, CONST_COLUMN, Key, Overlay, VAR_COLUMN, max_hscroll};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -382,9 +382,9 @@ fn draw(frame: &mut Frame, app: &App, palette: Palette) {
     // Prompt, then a blank row, the shortcuts, and a blank row at the screen edge.
     let chunks = screen_chunks(area);
 
-    draw_stack(frame.buffer_mut(), chunks[0], app, palette);
+    let cut = draw_stack(frame.buffer_mut(), chunks[0], app, palette);
     draw_prompt(frame.buffer_mut(), chunks[1], app, palette);
-    draw_shortcuts(frame.buffer_mut(), chunks[3], app, palette);
+    draw_shortcuts(frame.buffer_mut(), chunks[3], app, cut, palette);
     match app.overlay() {
         Some(Overlay::Help { .. }) => draw_help(
             frame.buffer_mut(),
@@ -441,28 +441,39 @@ fn inset_sides(area: Rect) -> Rect {
     }
 }
 
-fn draw_stack(buf: &mut Buffer, area: Rect, app: &App, palette: Palette) {
+/// Draws the stack. True when a row shown is cut with `$`, so the
+/// shortcut bar offers the scroll keys.
+fn draw_stack(buf: &mut Buffer, area: Rect, app: &App, palette: Palette) -> bool {
     if area.height == 0 || area.width == 0 {
-        return;
+        return false;
     }
-    let lines = stack_lines(app, area.height as usize, area.width as usize, palette);
+    let (lines, cut) = stack_lines(app, area.height as usize, area.width as usize, palette);
     Paragraph::new(lines).render(area, buf);
+    cut
 }
 
-fn stack_lines(app: &App, rows: usize, width: usize, palette: Palette) -> Vec<Line<'static>> {
+fn stack_lines(
+    app: &App,
+    rows: usize,
+    width: usize,
+    palette: Palette,
+) -> (Vec<Line<'static>>, bool) {
     if rows == 0 {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     let room = rows - 1;
     let content_width = width.saturating_sub(STACK_INDENT);
-    let wrapped: Vec<Vec<String>> = app
-        .engine()
-        .stack_lines()
+    app.set_stack_view(content_width, room);
+    let all = app.engine().stack_lines();
+    let shown = &all[all.len().saturating_sub(room)..];
+    let longest = shown
         .iter()
-        .map(|line| wrap_continued(line, content_width))
-        .collect();
-    let shown = fit_stack(&wrapped, room);
-    let pad = room.saturating_sub(shown.len());
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let offset = app.hscroll().min(max_hscroll(longest, content_width));
+    let cut = longest > content_width;
+    let pad = room - shown.len();
     let mut lines = Vec::with_capacity(rows);
     let blank = Style::default().bg(palette.bg);
     for _ in 0..pad {
@@ -471,7 +482,8 @@ fn stack_lines(app: &App, rows: usize, width: usize, palette: Palette) -> Vec<Li
     let value = Style::default().fg(palette.fg).bg(palette.bg);
     let indent = " ".repeat(STACK_INDENT);
     for text in shown {
-        lines.push(Line::from(Span::styled(format!("{indent}{text}"), value)));
+        let row = hscroll_row(text, offset, content_width);
+        lines.push(Line::from(Span::styled(format!("{indent}{row}"), value)));
     }
     lines.push(Line::from(Span::styled(
         format!("{indent}."),
@@ -480,85 +492,29 @@ fn stack_lines(app: &App, rows: usize, width: usize, palette: Palette) -> Vec<Li
             .bg(palette.bg)
             .add_modifier(Modifier::BOLD),
     )));
-    lines
+    (lines, cut)
 }
 
-/// Break `text` so each piece fits in `width` columns.
-///
-/// A piece that continues ends with `\`. Later pieces start with one space, so
-/// the continuation is obvious, and that space counts toward `width`. A width
-/// of one has no room for the marker, so the text is one character per line.
-fn wrap_continued(text: &str, width: usize) -> Vec<String> {
+/// `width` columns of `text` from character `offset`, as Emacs shows a line
+/// it does not wrap: `$` in the first column when text is hidden to the
+/// left, and in the last column when more follows. A row scrolled past its
+/// whole text is a lone `$`.
+fn hscroll_row(text: &str, offset: usize, width: usize) -> String {
     if width == 0 {
-        return vec![String::new()];
+        return String::new();
     }
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= width {
-        return vec![text.to_string()];
-    }
-    if width == 1 {
-        return chars.into_iter().map(|c| c.to_string()).collect();
-    }
-    let mut lines = Vec::new();
-    let first = width - 1;
-    let mut line: String = chars[..first].iter().collect();
-    let mut start = first;
-    if start < chars.len() {
-        line.push('\\');
-    }
-    lines.push(line);
-    while start < chars.len() {
-        let remaining = chars.len() - start;
-        // The indent uses one column. A line that still continues also keeps a
-        // column for `\`. Width 2 can hold the indent and one character only.
-        let (take, slash) = if width == 2 {
-            (1, false)
-        } else if remaining > width - 1 {
-            (width - 2, true)
-        } else {
-            (remaining, false)
-        };
-        let end = start + take;
-        let mut line = String::from(" ");
-        line.extend(chars[start..end].iter().copied());
-        start = end;
-        if slash {
-            line.push('\\');
-        }
-        lines.push(line);
-    }
-    lines
-}
-
-/// Keep the newest values that fit in `room` rows, oldest first.
-///
-/// A value is kept whole. The newest value may be clipped to its leading rows
-/// when it alone is taller than the screen; those rows still end in `\` when
-/// more digits remain.
-fn fit_stack(wrapped: &[Vec<String>], room: usize) -> Vec<String> {
-    let mut picked: Vec<&[String]> = Vec::new();
-    let mut used = 0usize;
-    for lines in wrapped.iter().rev() {
-        if used >= room {
-            break;
-        }
-        let left = room - used;
-        if lines.len() <= left {
-            picked.push(lines.as_slice());
-            used += lines.len();
-        } else if picked.is_empty() {
-            picked.push(&lines[..left]);
-            break;
-        } else {
-            break;
+    let len = text.chars().count();
+    let mut row: Vec<char> = text.chars().skip(offset).take(width).collect();
+    if offset > 0 && len > 0 {
+        match row.first_mut() {
+            Some(first) => *first = '$',
+            None => row.push('$'),
         }
     }
-    picked.reverse();
-    let mut shown = Vec::with_capacity(room);
-    for lines in picked {
-        shown.extend(lines.iter().cloned());
+    if len > offset + width {
+        row[width - 1] = '$';
     }
-    shown
+    row.into_iter().collect()
 }
 
 fn draw_prompt(buf: &mut Buffer, area: Rect, app: &App, palette: Palette) {
@@ -1424,7 +1380,12 @@ const TRAIL_LABEL_MIN: usize = 8;
 const TRAIL_LABEL_MAX: usize = 16;
 
 fn trail_hints() -> Vec<(&'static str, &'static str)> {
-    vec![("↑↓", "move"), ("ret", "push"), ("esc", "close")]
+    vec![
+        ("↑↓", "move"),
+        ("←→", "scroll"),
+        ("ret", "push"),
+        ("esc", "close"),
+    ]
 }
 
 /// `t y`. The trail, newest at the bottom like the stack, with a search
@@ -1474,16 +1435,26 @@ fn draw_trail(buf: &mut Buffer, window: Rect, above: Rect, app: &App, palette: P
             .max()
             .unwrap_or(0)
             .clamp(TRAIL_LABEL_MIN, TRAIL_LABEL_MAX);
+        // The prefix, the label, and the gap before the value.
+        let value_w = (dialog.text_w as usize).saturating_sub(2 + label_w + 2);
+        app.set_trail_width(value_w);
         for (row, &index) in visible.iter().enumerate() {
             let item = &view.rows[index];
+            let selected = start + row == cursor;
+            let offset = if selected {
+                view.scroll
+                    .min(max_hscroll(item.text.chars().count(), value_w))
+            } else {
+                0
+            };
             draw_trail_row(
                 buf,
                 dialog.inner_x,
                 dialog.content_y + row as u16,
                 end,
                 (&item.label, label_w),
-                &item.text,
-                start + row == cursor,
+                (&item.text, offset),
+                selected,
                 palette,
             );
         }
@@ -1492,7 +1463,8 @@ fn draw_trail(buf: &mut Buffer, window: Rect, above: Rect, app: &App, palette: P
     dialog.footer(buf, &hints);
 }
 
-/// `❯ label   value`, cutting the value with `..` when the row is too narrow.
+/// `❯ label   value`. A value wider than the row is cut with `$`, as on the
+/// stack, from character `offset`.
 #[allow(clippy::too_many_arguments)]
 fn draw_trail_row(
     buf: &mut Buffer,
@@ -1500,7 +1472,7 @@ fn draw_trail_row(
     y: u16,
     end: u16,
     (label, label_w): (&str, usize),
-    value: &str,
+    (value, offset): (&str, usize),
     selected: bool,
     palette: Palette,
 ) {
@@ -1556,19 +1528,13 @@ fn draw_trail_row(
         return;
     }
     let room = (end - col) as usize;
-    if value.chars().count() <= room {
-        paint_str(buf, col, y, end, value, value_style);
-        return;
-    }
-    let head: String = value.chars().take(room.saturating_sub(2)).collect();
-    col = paint_str(buf, col, y, end, &head, value_style);
     paint_str(
         buf,
         col,
         y,
         end,
-        "..",
-        Style::default().fg(palette.gray).bg(palette.bg),
+        &hscroll_row(value, offset, room),
+        value_style,
     );
 }
 
@@ -1729,7 +1695,9 @@ fn paint_var_cell(
     paint_str(buf, col, y, end, "..", punct);
 }
 
-fn draw_shortcuts(buf: &mut Buffer, area: Rect, app: &App, palette: Palette) {
+/// The bar under the prompt. `cut` adds the scroll keys before `?` while a
+/// stack row is cut with `$`.
+fn draw_shortcuts(buf: &mut Buffer, area: Rect, app: &App, cut: bool, palette: Palette) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -1750,7 +1718,14 @@ fn draw_shortcuts(buf: &mut Buffer, area: Rect, app: &App, palette: Palette) {
     let help_hints = help_bar(app);
     let docs = docs_hints();
     let trail = trail_hints();
-    let bar = crate::docs::shortcuts();
+    let mut bar = crate::docs::shortcuts();
+    if cut {
+        let at = bar
+            .iter()
+            .position(|(key, _)| *key == "?")
+            .unwrap_or(bar.len());
+        bar.insert(at, ("←→", "scroll"));
+    }
     let hints: &[(&str, &str)] = match app.overlay() {
         Some(Overlay::Docs { .. }) => &docs,
         Some(Overlay::Help { .. }) => &help_hints,
@@ -1820,6 +1795,10 @@ fn map_key(key: &KeyEvent) -> Option<Key> {
         KeyCode::Esc => Some(Key::Esc),
         KeyCode::Up => Some(Key::Up),
         KeyCode::Down => Some(Key::Down),
+        KeyCode::Left => Some(Key::Left),
+        KeyCode::Right => Some(Key::Right),
+        KeyCode::Home => Some(Key::Home),
+        KeyCode::End => Some(Key::End),
         KeyCode::Char(c) if ctrl => Some(Key::Ctrl(normalize_ctrl(c))),
         KeyCode::Char(c) => Some(Key::Char(c)),
         _ => None,
@@ -1860,15 +1839,6 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_string()
-    }
-
-    /// A stack row has a digit somewhere in the value columns. A continuation
-    /// is a space in the first of those columns, so a blank pad row is not one.
-    fn value_row(row: &str, from: usize, last: usize) -> bool {
-        row.chars()
-            .skip(from)
-            .take(last.saturating_sub(from) + 1)
-            .any(|c| c != ' ')
     }
 
     fn screen(app: &mut App, width: u16, height: u16) -> String {
@@ -1927,113 +1897,118 @@ mod tests {
     }
 
     #[test]
-    fn wrap_continued_breaks_on_the_backslash() {
-        assert_eq!(wrap_continued("12345", 5), ["12345"]);
-        assert_eq!(wrap_continued("123456", 5), ["1234\\", " 56"]);
-        assert_eq!(
-            wrap_continued("-1234567890", 5),
-            ["-123\\", " 456\\", " 7890"]
-        );
-        assert_eq!(wrap_continued("ab", 1), ["a", "b"]);
-        assert_eq!(wrap_continued("ab", 0), [""]);
+    fn hscroll_row_marks_hidden_text_with_dollars() {
+        assert_eq!(hscroll_row("12345", 0, 5), "12345");
+        assert_eq!(hscroll_row("123456", 0, 5), "1234$");
+        assert_eq!(hscroll_row("123456789", 3, 5), "$567$");
+        assert_eq!(hscroll_row("123456789", 4, 5), "$6789");
+        assert_eq!(hscroll_row("12", 4, 5), "$");
+        assert_eq!(hscroll_row("", 4, 5), "");
+        assert_eq!(hscroll_row("123", 0, 0), "");
     }
 
-    #[test]
-    fn fit_stack_keeps_the_newest_values() {
-        let wrapped = vec![
-            vec!["1".to_string()],
-            vec!["22\\".to_string(), "2".to_string()],
-            vec!["3".to_string()],
-        ];
-        assert_eq!(
-            fit_stack(&wrapped, 3),
-            vec!["22\\".to_string(), "2".to_string(), "3".to_string()]
-        );
-        let huge = vec!["aaaa\\".to_string(), "bbbb\\".to_string(), "cc".to_string()];
-        assert_eq!(
-            fit_stack(&[huge.clone(), vec!["9".to_string()]], 2),
-            vec!["9".to_string()]
-        );
-        assert_eq!(
-            fit_stack(&[huge], 2),
-            vec!["aaaa\\".to_string(), "bbbb\\".to_string()]
-        );
-    }
-
-    #[test]
-    fn long_integer_wraps_inside_the_stack() {
-        let mut app = App::new();
-        app.keys("2\n100\n!");
-        let full = app.engine().stack_lines().pop().expect("factorial");
-        assert!(full.len() > 40, "100! should be wider than the test screen");
-
-        let buffer = render(&mut app, 40, 24);
-        let rows = lines(&buffer);
+    /// The value columns of each stack row above the `.`, trimmed.
+    fn stack_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        let rows = lines(&render(app, width, height));
         let prompt = rows.iter().find(|row| row.contains('❯')).expect("prompt");
         let typed_at = col(prompt, '❯') + 2;
         let dot = rows.iter().position(|row| row.trim() == ".").expect("dot");
-        let inset_last = buffer.area.width as usize - SIDE_PAD as usize - 1;
-        let mut shown = Vec::new();
-        for row in &rows[..dot] {
-            if value_row(row, typed_at, inset_last) {
-                shown.push(row.as_str());
-            }
-        }
-        assert!(shown.len() >= 2, "the 2 and the factorial should both fit");
-        assert_eq!(shown[0].chars().nth(typed_at), Some('2'));
-        assert!(!shown[0].contains('\\'));
-
-        let mut joined = String::new();
-        for (i, row) in shown[1..].iter().enumerate() {
-            let content = row_text(row, typed_at);
-            let last = i + 1 == shown.len() - 1;
-            let body = content.strip_suffix('\\').unwrap_or(&content);
-            if i == 0 {
-                assert_eq!(
-                    row.chars().nth(typed_at),
-                    Some(full.chars().next().unwrap())
-                );
-                joined.push_str(body);
-            } else {
-                assert_eq!(row.chars().nth(typed_at), Some(' '));
-                assert_ne!(row.chars().nth(typed_at + 1), Some(' '));
-                let digits = body.strip_prefix(' ').expect("continuation indent");
-                joined.push_str(digits);
-            }
-            if last {
-                assert!(!content.ends_with('\\'));
-            } else {
-                assert!(content.ends_with('\\'));
-                assert_eq!(row.chars().nth(inset_last), Some('\\'));
-                assert_eq!(row.chars().nth(inset_last + 1), Some(' '));
-            }
-        }
-        assert_eq!(joined, full);
-
-        let clipped = lines(&render(&mut app, 40, 12));
-        let clip_dot = clipped
+        rows[..dot]
             .iter()
-            .position(|row| row.trim() == ".")
-            .expect("dot");
-        let mut head = String::new();
-        let mut pieces = 0;
-        for row in &clipped[..clip_dot] {
-            if !value_row(row, typed_at, inset_last) {
-                continue;
-            }
-            let content = row_text(row, typed_at);
-            assert!(
-                content.ends_with('\\'),
-                "a clipped factorial still ends in \\"
-            );
-            let body = content.strip_suffix('\\').unwrap();
-            let digits = body.strip_prefix(' ').unwrap_or(body);
-            head.push_str(digits);
-            pieces += 1;
-        }
-        assert!(pieces > 1);
-        assert!(full.starts_with(&head));
-        assert_ne!(head, full);
+            .map(|row| row_text(row, typed_at))
+            .filter(|row| !row.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn a_long_value_is_one_row_cut_with_a_dollar() {
+        let mut app = App::new();
+        app.keys("2\n100\n!");
+        let full = app.engine().stack_lines().pop().expect("factorial");
+        // 40 columns less two of padding on each side and the indent.
+        let width = 40 - 2 * SIDE_PAD as usize - STACK_INDENT;
+        assert!(full.len() > 2 * width);
+
+        let shown = stack_rows(&mut app, 40, 12);
+        assert_eq!(shown.len(), 2);
+        assert_eq!(shown[0], "2");
+        assert_eq!(shown[1].chars().count(), width);
+        assert!(shown[1].ends_with('$'));
+        assert_eq!(&shown[1][..width - 1], &full[..width - 1]);
+
+        app.press(Key::Right);
+        let shown = stack_rows(&mut app, 40, 12);
+        assert_eq!(shown[0], "$", "a short value scrolled away");
+        let step = width - 2;
+        assert_eq!(shown[1], format!("${}$", &full[step + 1..step + width - 1]));
+
+        app.press(Key::Ctrl('e'));
+        let shown = stack_rows(&mut app, 40, 12);
+        assert_eq!(shown[1], format!("${}", &full[full.len() - width + 1..]));
+        app.press(Key::Right);
+        assert_eq!(stack_rows(&mut app, 40, 12)[1], shown[1]);
+
+        app.press(Key::Ctrl('a'));
+        assert!(stack_rows(&mut app, 40, 12)[1].starts_with(&full[..5]));
+
+        app.press(Key::End);
+        app.keys("1");
+        let shown = stack_rows(&mut app, 40, 12);
+        assert_eq!(shown[0], "2", "typing returns to the start");
+    }
+
+    #[test]
+    fn the_bar_offers_scrolling_while_a_row_is_cut() {
+        let bar = |app: &mut App| {
+            lines(&render(app, 90, 12))
+                .into_iter()
+                .find(|row| row.contains("ret:push"))
+                .expect("shortcut bar")
+        };
+        let mut app = App::new();
+        app.keys("12\n!");
+        assert!(!bar(&mut app).contains("scroll"));
+        app.keys("\n100\n!");
+        let row = bar(&mut app);
+        assert!(row.contains("u:undo  │  ←→:scroll  │  ?:help"), "{row}");
+        assert!(row.contains("q:quit"), "the whole bar fits at 90 columns");
+    }
+
+    #[test]
+    fn every_value_keeps_one_row_under_a_huge_one() {
+        let mut app = App::new();
+        app.keys("7\n8\n1000\n!");
+        let shown = stack_rows(&mut app, 40, 12);
+        assert_eq!(shown.len(), 3);
+        assert_eq!(&shown[..2], ["7", "8"]);
+    }
+
+    #[test]
+    fn the_selected_trail_row_scrolls() {
+        let mut app = App::new();
+        app.keys("700\n!");
+        let full = app.engine().stack_lines().pop().expect("factorial");
+        assert!(full.len() > 512, "past the cut the trail keeps");
+        app.keys("ty");
+        let row_of = |app: &mut App| -> String {
+            let rows = lines(&render(app, 80, 30));
+            let row = rows
+                .iter()
+                .find(|row| row.contains("❯ !"))
+                .expect("selected")
+                .clone();
+            row.split_whitespace().nth(3).expect("value").to_string()
+        };
+        let start = row_of(&mut app);
+        assert!(start.ends_with('$'));
+        assert!(full.starts_with(start.trim_end_matches('$')));
+        app.press(Key::Ctrl('e'));
+        let end = row_of(&mut app);
+        assert!(end.starts_with('$'));
+        assert!(full.ends_with(end.trim_start_matches('$')));
+        app.press(Key::Up);
+        app.press(Key::Down);
+        assert_eq!(row_of(&mut app), start, "moving resets the scroll");
     }
 
     #[test]

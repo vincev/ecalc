@@ -82,6 +82,16 @@ const BINDINGS: &[Binding] = &[
         catalog: true,
     },
     Binding {
+        keys: "←→",
+        name: "scroll",
+        summary: "scroll long values sideways",
+        body: "A value wider than the screen stays on one row, as in Emacs Calc: $ in the last column means more follows, and $ in the first means text is hidden to the left. Left and Right, or C-b and C-f, scroll every stack row by a screen. C-a or Home goes to the start, C-e or End to the end. Any other key returns to the start. In the trail the same keys scroll the selected row.",
+        help: Some(83),
+        bar: None,
+        mode: None,
+        catalog: true,
+    },
+    Binding {
         keys: "n",
         name: "negate",
         summary: "change sign",
@@ -685,7 +695,7 @@ const BINDINGS: &[Binding] = &[
         keys: "t y",
         name: "trail",
         summary: "pick a past value from the trail",
-        body: "t y opens the trail: every number pushed and every result, newest at the bottom, with the command that made it. Typing filters by label or digits. Up and Down, or Tab and S-Tab, move. RET pushes the selected value, and u takes it back. Esc closes. Undo does not remove trail entries. The trail keeps the last 1000 values for this session.",
+        body: "t y opens the trail: every number pushed and every result, newest at the bottom, with the command that made it. Typing filters by label or digits. Up and Down, or Tab and S-Tab, move. Left and Right, C-a, and C-e scroll a long value. RET pushes the selected value, and u takes it back. Esc closes. Undo does not remove trail entries. The trail keeps the last 1000 values for this session.",
         help: Some(48),
         bar: None,
         mode: None,
@@ -1126,6 +1136,8 @@ mod tests {
         assert_eq!(pos("C"), pos("S") + 1);
         assert_eq!(pos("T"), pos("C") + 1);
         assert_eq!(pos("M"), pos(":") + 1);
+        assert_eq!(pos("←→"), entries.len() - 1);
+        assert!(pos("←→") >= HELP_ROWS * 3, "on the second page");
 
         let page = help_columns(0, 3, HELP_ROWS);
         assert_eq!(page.len(), 3);
