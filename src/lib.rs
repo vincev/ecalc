@@ -15,6 +15,7 @@ pub mod parse;
 mod radix;
 pub mod ui;
 pub mod value;
+mod vector;
 
 pub use app::{App, eval};
 pub use engine::Engine;

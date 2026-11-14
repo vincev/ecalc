@@ -33,6 +33,42 @@ pushes.
 Press `?` for the keys. Press `?` again for a page on each one, and type
 to search (`isqrt` finds `f Q`).
 
+A value wider than the screen stays on one row, as in Emacs: `$` marks
+digits hidden on either side. Left and Right scroll it, and `C-a` and `C-e`
+(or Home and End) jump to the start and the end.
+
+### Vectors
+
+`[` starts a vector and `]` ends it. Commas or spaces separate the
+elements, which can be any number, a complex, a modulo form, or another
+vector.
+
+```
+[1, 2] [3, 4] +       -> [4, 6]
+[1, 2, 3] 10 *        -> [10, 20, 30]
+[4, 9] Q              -> [2, 3]
+3M7 [1 2 3 4 5 6] ^   -> [3 mod 7, 2 mod 7, 6 mod 7, 4 mod 7, 5 mod 7, 1 mod 7]
+[2, 4, 7] k p         -> [1, 0, 1]
+[6, 8, 15] k f        -> [[2, 3], [2, 2, 2], [3, 5]]
+```
+
+Keys follow Calc where Calc gives a result, and go element by element where
+Calc leaves the vector alone. So `*` of two vectors is the dot product
+(`[1, 2] [3, 4] *` is `11`), `[1, 2, 3] 2 ^` is `14`, the vector dotted with
+itself, and `A` is the length (`[3, 4] A` is `5`).
+
+Two one-shot prefixes change the next key:
+
+- `V M` maps it over the elements, even where the vector has its own
+  meaning: `[1, 2] [3, 4] V M *` is `[3, 8]`, and `[1, 2, 3] 2 V M ^` is
+  `[1, 4, 9]`.
+- `V R` folds it over the vector on top: `[1, 2, 3, 4] V R +` is `10`, and
+  `2023 k f V R *` multiplies the factors back to `2023`.
+
+`v p` packs values from the stack into a vector (`1 2 3 3 v p` is
+`[1, 2, 3]`), `v u` unpacks one, `v x` builds `[1, 2, ..., n]`, and `v l`
+is the length. Matrices are not supported.
+
 ### Shell
 
 `-e` (`--eval`) runs one calculation and prints the top of the stack. It
@@ -59,14 +95,17 @@ prints the message on stderr and exits 1.
 - Integer modulo forms, as in Calc: `M` while typing an integer starts its
   modulus, so `3M1000 567 ^` is `587 mod 1000`. Arithmetic, powers, and
   inverses stay reduced.
+- Vectors, nested up to 100 deep, with element-by-element arithmetic, the dot
+  product, map (`V M`), and reduce (`V R`).
 - Precision in significant digits, 12 by default.
 - Powers, roots, floor, integer division, and remainder. `12 \ 12:7` is `7`.
 - Sine, cosine, and tangent, with inverses and hyperbolic forms. Angles
   start in degrees.
 - Logarithms, exponentials, factorial, combinations, permutations, and
   Stirling numbers of the first and second kind.
-- Gcd, lcm, the extended gcd, a modular inverse, a prime test, prime
-  factors, and Euler's totient. The next and previous prime, and the nth
+- Gcd, lcm, the extended gcd, a modular inverse, a prime test (`1` or `0`,
+  as Calc's `prime`), prime factors as a vector (`2023 k f` is
+  `[7, 17, 17]`), and Euler's totient. The next and previous prime, and the nth
   prime (`1000000 H k n` is `15485863`).
 - Stored variables, and the HP 35s physics constants, plus Earth, the Moon,
   the Sun, and the astronomical unit.

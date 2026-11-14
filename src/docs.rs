@@ -92,6 +92,76 @@ const BINDINGS: &[Binding] = &[
         catalog: true,
     },
     Binding {
+        keys: "[ ]",
+        name: "vector",
+        summary: "type a vector",
+        body: "[ starts a vector and ] ends it: [1, 2, 3]. Commas or spaces separate the elements, as in Calc: [1 2 3] is the same vector. An element can be any number, a complex (1, 2), a modulo form (3M7), or another vector. + and - go element by element, and a number meets every element: [1, 2] 10 + is [11, 12]. * of two vectors is the dot product, and [1, 2, 3] 2 ^ is 14, the vector dotted with itself. Most other keys go element by element: [4, 9] Q is [2, 3], and 3M7 [1, 2, 3] ^ is [3 mod 7, 2 mod 7, 6 mod 7]. A is the length: [3, 4] A is 5. A long vector stays on one row and scrolls sideways.",
+        help: Some(84),
+        bar: None,
+        mode: None,
+        catalog: true,
+    },
+    Binding {
+        keys: "v p",
+        name: "pack",
+        summary: "pack values into a vector",
+        body: "v p pops a count n, then packs the n values under it into a vector, the deepest first. 1 2 3 3 v p is [1, 2, 3]. V p works too.",
+        help: Some(85),
+        bar: None,
+        mode: None,
+        catalog: true,
+    },
+    Binding {
+        keys: "v u",
+        name: "unpack",
+        summary: "vector onto the stack",
+        body: "v u replaces the vector on top with its elements, the last one on top. [6, 8, 15] k f v u leaves [2, 3], [2, 2, 2], and [3, 5].",
+        help: Some(86),
+        bar: None,
+        mode: None,
+        catalog: true,
+    },
+    Binding {
+        keys: "v x",
+        name: "index",
+        summary: "the vector 1 to n",
+        body: "v x replaces n with [1, 2, ..., n], as Calc's index. 6 v x is [1, 2, 3, 4, 5, 6]. Up to 10000 elements.",
+        help: Some(87),
+        bar: None,
+        mode: None,
+        catalog: true,
+    },
+    Binding {
+        keys: "V M",
+        name: "map",
+        summary: "next key element by element",
+        body: "V M makes the next operation go element by element, even where a vector means something else: [1, 2] [3, 4] V M * is [3, 8], where * gives the dot product 11. [1, 2, 3] 2 V M ^ is [1, 4, 9], and [1, 2] V M & is [1, 0.5]. The mode line shows map until the operation runs.",
+        help: Some(88),
+        bar: None,
+        mode: None,
+        catalog: true,
+    },
+    Binding {
+        keys: "V R",
+        name: "reduce",
+        summary: "fold the next key over",
+        body: "V R folds the next two-argument operation over the vector on top: [1, 2, 3, 4] V R + is 10, and 2023 k f V R * is 2023. A matrix folds over all its elements, as in Calc: [[1, 2], [3, 4]] V R + is 10. An empty vector gives 0 for + and -, and 1 for *. The mode line shows reduce until the operation runs.",
+        help: Some(89),
+        bar: None,
+        mode: None,
+        catalog: true,
+    },
+    Binding {
+        keys: "v l",
+        name: "length",
+        summary: "number of elements",
+        body: "v l replaces the vector on top with its number of elements. [1, [2, 3]] v l is 2.",
+        help: None,
+        bar: None,
+        mode: None,
+        catalog: true,
+    },
+    Binding {
         keys: "n",
         name: "negate",
         summary: "change sign",
@@ -384,8 +454,8 @@ const BINDINGS: &[Binding] = &[
     Binding {
         keys: "k p",
         name: "prime",
-        summary: "primality test",
-        body: "k p reports whether the integer on top is prime, and leaves that number on the stack. The message is prime, not prime, or probably prime.",
+        summary: "primality test, 1 or 0",
+        body: "k p replaces the integer on top with 1 if it is prime and 0 if not, as Calc's prime function, and the message says prime, not prime, or probably prime. A probably prime number gives 1. Anything below 2 gives 0. A vector is tested element by element: [2, 4, 7] k p is [1, 0, 1]. RET first keeps the number.",
         help: Some(39),
         bar: None,
         mode: None,
@@ -395,7 +465,7 @@ const BINDINGS: &[Binding] = &[
         keys: "k f",
         name: "factor",
         summary: "prime factors",
-        body: "k f replaces an integer with its prime factors, smallest first. 2023 k f leaves 7, then 17, then 17, and * * multiplies them back to 2023. A negative number leads with -1. 0 and 1 stay as they are. Trial division uses Calc's prime table through 5003, then Pollard rho splits a composite cofactor up to 1024 bits. A cofactor that cannot be proven prime or split stays in one piece, and the message is may not be fully factored.",
+        body: "k f replaces an integer with the vector of its prime factors, smallest first, as Calc's prfac: 2023 k f is [7, 17, 17], and V R * multiplies them back to 2023. v u puts the factors on the stack one by one. A negative number leads with -1. 0 and 1 give [0] and [1]. A vector of integers gives a vector of factor lists: [6, 8, 15] k f is [[2, 3], [2, 2, 2], [3, 5]]. Trial division uses Calc's prime table through 5003, then Pollard rho splits a composite cofactor up to 1024 bits. A cofactor that cannot be proven prime or split stays in one piece, and the message is may not be fully factored.",
         help: Some(40),
         bar: None,
         mode: None,
@@ -932,6 +1002,16 @@ const BINDINGS: &[Binding] = &[
         catalog: false,
     },
     Binding {
+        keys: "v",
+        name: "v-",
+        summary: "",
+        body: "",
+        help: None,
+        bar: None,
+        mode: Some("v-"),
+        catalog: false,
+    },
+    Binding {
         keys: "k",
         name: "k-",
         summary: "",
@@ -1136,8 +1216,10 @@ mod tests {
         assert_eq!(pos("C"), pos("S") + 1);
         assert_eq!(pos("T"), pos("C") + 1);
         assert_eq!(pos("M"), pos(":") + 1);
-        assert_eq!(pos("←→"), entries.len() - 1);
         assert!(pos("←→") >= HELP_ROWS * 3, "on the second page");
+        assert_eq!(pos("[ ]"), pos("←→") + 1);
+        assert_eq!(pos("V R"), entries.len() - 1);
+        assert_eq!(entries.len(), HELP_ROWS * 3 * 2, "two full pages");
 
         let page = help_columns(0, 3, HELP_ROWS);
         assert_eq!(page.len(), 3);
@@ -1150,7 +1232,7 @@ mod tests {
         let shown: usize = rest.iter().map(|column| column.len()).sum();
         assert_eq!(shown, entries.len() - HELP_ROWS * 3);
         assert_eq!(rest[0][0].0, "P");
-        assert!(rest.last().unwrap().len() < HELP_ROWS);
+        assert_eq!(rest.last().unwrap().len(), HELP_ROWS);
 
         let short = help_columns(0, 3, 13);
         assert_eq!(short.iter().map(|column| column.len()).sum::<usize>(), 39);

@@ -1975,6 +1975,28 @@ mod tests {
     }
 
     #[test]
+    fn a_long_vector_scrolls_like_a_long_number() {
+        let mut app = App::new();
+        app.keys("200vx");
+        let full = app.engine().stack_lines().pop().expect("vector");
+        let width = 40 - 2 * SIDE_PAD as usize - STACK_INDENT;
+        let shown = stack_rows(&mut app, 40, 12);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].chars().count(), width);
+        assert!(shown[0].ends_with('$'));
+        assert!(full.starts_with(shown[0].trim_end_matches('$')));
+        app.press(Key::End);
+        let end = stack_rows(&mut app, 40, 12).remove(0);
+        assert!(end.starts_with('$'));
+        assert!(end.ends_with("199, 200]"), "{end}");
+        let bar = lines(&render(&mut app, 90, 12))
+            .into_iter()
+            .find(|row| row.contains("ret:push"))
+            .expect("shortcut bar");
+        assert!(bar.contains("←→:scroll"));
+    }
+
+    #[test]
     fn every_value_keeps_one_row_under_a_huge_one() {
         let mut app = App::new();
         app.keys("7\n8\n1000\n!");

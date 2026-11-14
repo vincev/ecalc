@@ -121,7 +121,7 @@ pub fn factorial(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
         return result.map(|f| Value::real(Real::Float(f)));
     }
     match v {
-        Value::Complex(_, _) | Value::Mod(_, _) => {
+        Value::Complex(_, _) | Value::Mod(_, _) | Value::Vector(_) => {
             Err(CalcError::Domain("factorial needs a real number"))
         }
         Value::Real(Real::Int(n)) => Ok(Value::from_int(factorial_int(n)?)),
@@ -397,15 +397,18 @@ fn nth_prime_u64(n: u64) -> u64 {
     unreachable!("the bound holds the nth prime")
 }
 
-pub fn prime_message(v: &Value) -> Result<&'static str, CalcError> {
+/// Whether an integer is prime, and whether that is proven: `(true, false)`
+/// is probably prime. Anything below 2, a negative number included, is not
+/// prime, as in Calc's `prime`.
+pub fn prime_test(v: &Value) -> Result<(bool, bool), CalcError> {
     let n = as_integer(v, "prime test needs an integer")?;
     if n.bits() > 8192 {
         return Err(CalcError::Domain("number is too large"));
     }
     Ok(match classify(&n) {
-        PrimeKind::Prime => "prime",
-        PrimeKind::NotPrime => "not prime",
-        PrimeKind::ProbablyPrime => "probably prime",
+        PrimeKind::Prime => (true, true),
+        PrimeKind::NotPrime => (false, true),
+        PrimeKind::ProbablyPrime => (true, false),
     })
 }
 
@@ -786,7 +789,7 @@ fn strict_integer(v: &Value) -> Option<BigInt> {
 fn as_real_float(v: &Value, prec: u32, msg: &'static str) -> Result<DecFloat, CalcError> {
     match v {
         Value::Real(r) => to_float(r, prec),
-        Value::Complex(_, _) | Value::Mod(_, _) => Err(CalcError::Domain(msg)),
+        Value::Complex(_, _) | Value::Mod(_, _) | Value::Vector(_) => Err(CalcError::Domain(msg)),
     }
 }
 
@@ -1048,7 +1051,7 @@ fn as_rational(v: &Value, msg: &'static str) -> Result<BigRational, CalcError> {
         Value::Real(Real::Float(f)) => Ok(BigRational::from(
             f.to_integer_exact().ok_or(CalcError::Domain(msg))?,
         )),
-        Value::Complex(_, _) | Value::Mod(_, _) => Err(CalcError::Domain(msg)),
+        Value::Complex(_, _) | Value::Mod(_, _) | Value::Vector(_) => Err(CalcError::Domain(msg)),
     }
 }
 
@@ -1355,24 +1358,18 @@ mod tests {
 
     #[test]
     fn prime_test_is_exact_for_small_numbers_and_cautious_above_the_bound() {
-        assert_eq!(prime_message(&Value::from_int(17)).unwrap(), "prime");
-        assert_eq!(prime_message(&Value::from_int(2)).unwrap(), "prime");
-        assert_eq!(prime_message(&Value::from_int(1)).unwrap(), "not prime");
-        assert_eq!(prime_message(&Value::from_int(561)).unwrap(), "not prime");
+        let test = |n: BigInt| prime_test(&Value::from_int(n)).unwrap();
+        assert_eq!(test(17.into()), (true, true));
+        assert_eq!(test(2.into()), (true, true));
+        assert_eq!(test(1.into()), (false, true));
+        assert_eq!(test((-7).into()), (false, true));
+        assert_eq!(test(561.into()), (false, true));
+        assert_eq!(test(15_485_863.into()), (true, true));
         assert_eq!(
-            prime_message(&Value::from_int(15_485_863)).unwrap(),
-            "prime"
+            test(BigInt::from(10_007) * BigInt::from(10_009)),
+            (false, true)
         );
-        let composite = BigInt::from(10_007) * BigInt::from(10_009);
-        assert_eq!(
-            prime_message(&Value::from_int(composite)).unwrap(),
-            "not prime"
-        );
-        let mersenne = (BigInt::one() << 127u32) - 1;
-        assert_eq!(
-            prime_message(&Value::from_int(mersenne)).unwrap(),
-            "probably prime"
-        );
+        assert_eq!(test((BigInt::one() << 127u32) - 1), (true, false));
     }
 
     #[test]

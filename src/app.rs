@@ -10,11 +10,12 @@
 use std::cell::Cell;
 
 use crate::consts;
-use crate::engine::{Engine, Status};
+use crate::engine::{Engine, Status, VectorMode};
 use crate::error::{CalcError, EvalError};
 use crate::parse::Entry;
 use crate::radix;
 use crate::value::Value;
+use num_bigint::BigInt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
@@ -86,6 +87,9 @@ enum Prefix {
     T,
     /// `r` then a digit recalls `q0`–`q9`.
     R,
+    /// `v` or `V`, Calc's vector prefix: `v p`, `v u`, `v x`, `v l`, and
+    /// the one-shot `V M` and `V R`.
+    V,
     /// Calc's option prefix. `O d` sets a radix in two's complement.
     O,
     /// `O` followed by `d`.
@@ -198,6 +202,9 @@ pub struct App {
     inverse: bool,
     /// One-shot hyperbolic prefix.
     hyperbolic: bool,
+    /// `V M` or `V R`, waiting for the operation it applies to. One-shot,
+    /// like `I` and `H`.
+    vector_mode: Option<VectorMode>,
     /// Modulus of the last modulo form typed. `M M` fills it in, as in Calc.
     last_modulus: Option<String>,
     /// Sideways scroll of every stack row, as Emacs scrolls the Calc window.
@@ -228,6 +235,7 @@ impl App {
             help_rows: crate::docs::HELP_ROWS,
             inverse: false,
             hyperbolic: false,
+            vector_mode: None,
             last_modulus: None,
             hscroll: 0,
             stack_view: Cell::new((0, 0)),
@@ -476,6 +484,11 @@ impl App {
         if self.hyperbolic {
             parts.push("hyp".to_string());
         }
+        match self.vector_mode {
+            Some(VectorMode::Map) => parts.push("map".to_string()),
+            Some(VectorMode::Reduce) => parts.push("reduce".to_string()),
+            None => {}
+        }
         let prefix = match self.prefix {
             Prefix::F => Some("f"),
             Prefix::M => Some("m"),
@@ -485,6 +498,7 @@ impl App {
             Prefix::K => Some("k"),
             Prefix::S => Some("s"),
             Prefix::T => Some("t"),
+            Prefix::V => Some("v"),
             Prefix::R => Some("r"),
             Prefix::O => Some("O"),
             Prefix::Od => Some("Od"),
@@ -761,11 +775,15 @@ impl App {
     fn clear_ih(&mut self) {
         self.inverse = false;
         self.hyperbolic = false;
+        self.vector_mode = None;
     }
 
-    /// An operation consumes `I` and `H`. `push` and a successful `dup` do not.
+    /// An operation consumes `I`, `H`, `V M`, and `V R`. `push` and a
+    /// successful `dup` do not.
     fn run(&mut self, op: impl FnOnce(&mut Engine)) {
+        self.engine.set_vector_mode(self.vector_mode);
         op(&mut self.engine);
+        self.engine.set_vector_mode(None);
         self.clear_ih();
     }
 
@@ -1100,6 +1118,18 @@ impl App {
                 self.run(|engine| engine.store(&format!("q{d}"), false));
             }
             (Prefix::T, 'y') => self.open_trail(),
+            (Prefix::V, 'p') => self.run(Engine::pack),
+            (Prefix::V, 'u') => self.run(Engine::unpack),
+            (Prefix::V, 'x') => self.run(Engine::index),
+            (Prefix::V, 'l') => self.run(Engine::length),
+            (Prefix::V, 'M') => {
+                self.vector_mode = Some(VectorMode::Map);
+                self.engine.clear_message();
+            }
+            (Prefix::V, 'R') => {
+                self.vector_mode = Some(VectorMode::Reduce);
+                self.engine.clear_message();
+            }
             (Prefix::T, d) if d.is_ascii_digit() => {
                 self.run(|engine| engine.store(&format!("q{d}"), true));
             }
@@ -1128,7 +1158,7 @@ impl App {
             self.run(Engine::undo);
             return;
         }
-        if c == 'n' && !self.entry.is_empty() {
+        if c == 'n' && !self.entry.is_empty() && self.entry.can_toggle_sign() {
             self.entry.toggle_sign();
             return;
         }
@@ -1137,6 +1167,10 @@ impl App {
             return;
         }
         if self.commit_entry() {
+            // A new number can follow a finished one: `[1,2][3,4]`, `5[`.
+            if self.entry.push(c, self.engine.mode().radix) {
+                return;
+            }
             self.dispatch(c);
         }
     }
@@ -1145,7 +1179,12 @@ impl App {
     /// the previous modulus. Anything else falls through to the command keys.
     fn press_mod(&mut self) -> bool {
         if self.entry.awaits_modulus() {
-            match self.last_modulus.clone() {
+            let modulus = self
+                .entry
+                .typed_modulus()
+                .map(str::to_string)
+                .or_else(|| self.last_modulus.clone());
+            match modulus {
                 Some(modulus) => self.entry.fill_modulus(&modulus),
                 None => self.run(|engine| {
                     engine.fail(CalcError::Domain("no previous modulus"));
@@ -1162,7 +1201,7 @@ impl App {
         }
         // `3.5 M` keeps the entry and says why, instead of committing 3.5
         // and reporting an unknown key. A finished form falls through.
-        if !self.entry.as_str().contains(" mod ") {
+        if !self.entry.element().contains(" mod ") {
             self.run(|engine| engine.fail(CalcError::Domain("modulo forms need integers")));
             return true;
         }
@@ -1202,7 +1241,7 @@ impl App {
         }
         match self.entry.parse(self.engine.mode()) {
             Ok(value) => {
-                if let Value::Mod(_, modulus) = &value {
+                if let Some(modulus) = last_modulus_in(&value) {
                     self.last_modulus = Some(modulus.to_string());
                 }
                 self.engine.set_label("");
@@ -1222,6 +1261,11 @@ impl App {
     /// typed first, and show even when the key ignores them.
     fn label_command(&mut self, prefix: &str, c: char) {
         let mut parts = Vec::new();
+        match self.vector_mode {
+            Some(VectorMode::Map) => parts.push("V M".to_string()),
+            Some(VectorMode::Reduce) => parts.push("V R".to_string()),
+            None => {}
+        }
         if self.hyperbolic {
             parts.push("H".to_string());
         }
@@ -1256,6 +1300,7 @@ impl App {
             'k' => self.prefix = Prefix::K,
             's' => self.prefix = Prefix::S,
             't' => self.prefix = Prefix::T,
+            'v' | 'V' => self.prefix = Prefix::V,
             'r' => self.prefix = Prefix::R,
             'n' => self.run(Engine::negate),
             '&' => self.run(Engine::reciprocal),
@@ -1359,6 +1404,9 @@ impl App {
             self.script_boundary()?;
         }
         if !end && self.entry.is_incomplete() {
+            // The space between words stays inside an open `(…` or `[…`,
+            // as it does on the screen: `[1 2 3]` is three elements.
+            self.entry.push_space(self.engine.mode());
             return Ok(());
         }
         if !self.entry.is_empty() && !self.commit_entry() {
@@ -1451,6 +1499,15 @@ fn move_cursor(view: &mut TrailView, delta: isize) {
     view.scroll = 0;
 }
 
+/// The modulus of the last modulo form in a value, inside a vector too.
+fn last_modulus_in(value: &Value) -> Option<&BigInt> {
+    match value {
+        Value::Mod(_, modulus) => Some(modulus),
+        Value::Vector(items) => items.iter().rev().find_map(last_modulus_in),
+        _ => None,
+    }
+}
+
 /// Keys of a command prefix, as a trail label shows them.
 fn prefix_keys(prefix: Prefix) -> &'static str {
     match prefix {
@@ -1463,6 +1520,7 @@ fn prefix_keys(prefix: Prefix) -> &'static str {
         Prefix::K => "k",
         Prefix::S => "s",
         Prefix::T => "t",
+        Prefix::V => "V",
         Prefix::R => "r",
         Prefix::O => "O",
         Prefix::Od => "O d",
@@ -1891,18 +1949,26 @@ mod tests {
         app.keys("u");
         assert_eq!(app.engine().stack_lines(), ["35", "15"]);
 
+        // `k p` is Calc's `prime`: 1 or 0, with the verdict as a message.
         let mut app = App::new();
         app.keys("17\nkp");
         assert_eq!(app.engine().message(), "prime");
         assert!(!app.engine().is_error());
-        assert_eq!(app.top_string().as_deref(), Some("17"));
+        assert_eq!(app.top_string().as_deref(), Some("1"));
         app.keys("u");
-        assert!(app.engine().stack().is_empty());
+        assert_eq!(app.engine().stack_lines(), ["17"]);
 
         let mut app = App::new();
         app.keys("561\nkp");
         assert_eq!(app.engine().message(), "not prime");
-        assert_eq!(app.top_string().as_deref(), Some("561"));
+        assert_eq!(app.top_string().as_deref(), Some("0"));
+        assert_eq!(top("_7\nkp"), "0");
+        assert_eq!(top("1\nkp"), "0");
+
+        let mut app = App::new();
+        app.keys("170141183460469231731687303715884105727\nkp");
+        assert_eq!(app.engine().message(), "probably prime");
+        assert_eq!(app.top_string().as_deref(), Some("1"));
 
         let mut app = App::new();
         app.keys("1n!");
@@ -1988,32 +2054,43 @@ mod tests {
     }
 
     #[test]
-    fn prime_factors_push_smallest_first() {
+    fn prime_factors_make_a_vector() {
         let mut app = App::new();
         app.keys("2023\nkf");
-        assert_eq!(app.engine().stack_lines(), ["7", "17", "17"]);
+        assert_eq!(app.engine().stack_lines(), ["[7, 17, 17]"]);
         assert_eq!(app.engine().message(), "");
-        app.keys("**");
-        assert_eq!(app.top_string().as_deref(), Some("2023"));
+        app.keys("VR*");
+        assert_eq!(app.engine().stack_lines(), ["2023"]);
 
         let mut app = App::new();
         app.keys("5\n2023\nkf");
-        assert_eq!(app.engine().stack_lines(), ["5", "7", "17", "17"]);
+        assert_eq!(app.engine().stack_lines(), ["5", "[7, 17, 17]"]);
         app.keys("u");
         assert_eq!(app.engine().stack_lines(), ["5", "2023"]);
+        app.keys("kfvu**");
+        assert_eq!(app.engine().stack_lines(), ["5", "2023"]);
 
+        assert_eq!(top("_2023\nkf"), "[-1, 7, 17, 17]");
+        assert_eq!(top("_2023\nkfVR*"), "-2023");
+        // As Calc's `prfac`.
+        assert_eq!(top("0\nkf"), "[0]");
+        assert_eq!(top("1\nkf"), "[1]");
+        assert_eq!(top("_1\nkf"), "[-1]");
+        assert_eq!(top("7\nkf"), "[7]");
+        assert_eq!(top("2023.\nkfVR*"), "2023");
+        assert_eq!(eval("2023 k f").as_deref(), Ok("[7, 17, 17]"));
+        assert_eq!(eval("2023 k f V R *").as_deref(), Ok("2023"));
+        assert_eq!(eval("2023 k f v u * *").as_deref(), Ok("2023"));
+
+        // A vector of integers gives one factor list each.
         let mut app = App::new();
-        app.keys("_2023\nkf");
-        assert_eq!(app.engine().stack_lines(), ["-1", "7", "17", "17"]);
-        app.keys("***");
-        assert_eq!(app.top_string().as_deref(), Some("-2023"));
-
-        assert_eq!(top("0\nkf"), "0");
-        assert_eq!(top("1\nkf"), "1");
-        assert_eq!(top("_1\nkf"), "-1");
-        assert_eq!(top("2023.\nkf**"), "2023");
-        assert_eq!(eval("2023 k f").as_deref(), Ok("17"));
-        assert_eq!(eval("2023 k f * *").as_deref(), Ok("2023"));
+        app.keys("[6, 8, 15]\nkf");
+        assert_eq!(app.engine().stack_lines(), ["[[2, 3], [2, 2, 2], [3, 5]]"]);
+        app.keys("vu");
+        assert_eq!(
+            app.engine().stack_lines(),
+            ["[2, 3]", "[2, 2, 2]", "[3, 5]"]
+        );
 
         let mut app = App::new();
         app.keys("3:2\nkf");
@@ -2030,28 +2107,197 @@ mod tests {
         app.keys("kf");
         assert_eq!(app.engine().message(), "too few arguments");
 
+        let factored = |n: &str| {
+            let mut app = App::new();
+            app.keys(&format!("{n}\nkf"));
+            assert_eq!(app.engine().message(), "", "{n}");
+            app.top_string().unwrap()
+        };
+        assert_eq!(factored("25030013"), "[25030013]");
+        assert_eq!(factored("25220483"), "[5021, 5023]");
+        assert_eq!(factored("25120063"), "[5003, 5021]");
+        assert_eq!(factored("43920492304"), "[2, 2, 2, 2, 13, 5903, 35771]");
+    }
+
+    #[test]
+    fn vectors_are_typed_like_numbers() {
+        assert_eq!(top("[1,2,3]\n"), "[1, 2, 3]");
+        assert_eq!(top("[1 2 3]\n"), "[1, 2, 3]");
+        assert_eq!(top("[]\n"), "[]");
+        assert_eq!(top("[1,[2,3]]\n"), "[1, [2, 3]]");
+        assert_eq!(top("[[1 2] [3]]\n"), "[[1, 2], [3]]");
+        assert_eq!(top("[(1,2),3]\n"), "[(1, 2), 3]");
+        assert_eq!(top("[3M7,2]\n"), "[3 mod 7, 2]");
+        assert_eq!(top("[1.5,2:3,1e3]\n"), "[1.5, 2:3, 1000.]");
+        assert_eq!(top("[16#FF,_2]\n"), "[255, -2]");
+        // `n` while typing is the sign of the element; after `]` it negates.
+        assert_eq!(top("[1,2n]\n"), "[1, -2]");
+        assert_eq!(top("[1,2]n"), "[-1, -2]");
+        // DEL takes back one character.
+        assert_eq!(top("[1,23\u{7f}]\n"), "[1, 2]");
+        // An operator right after `]` uses the vector.
+        assert_eq!(top("[1,2]\n[3,4]+"), "[4, 6]");
+        // A new value can follow a finished one without RET.
+        assert_eq!(top("[1,2][3,4]*"), "11");
+        assert_eq!(top("5[1,2]*"), "[5, 10]");
+
+        // Spaces separate elements, and each key acts on the element typed.
+        assert_eq!(top("[1 2n]\n"), "[1, -2]");
+        assert_eq!(top("[[1 2] [3 4n]]\n"), "[[1, 2], [3, -4]]");
+        assert_eq!(top("[1 -2]\n"), "[1, -2]");
+        assert_eq!(top("[16#FF 16#10]\n"), "[255, 16]");
+        assert_eq!(top("[3M7 4M7]\n"), "[3 mod 7, 4 mod 7]");
+        assert_eq!(top("[1 2M7]\n"), "[1, 2 mod 7]");
+        assert_eq!(top("[2#1 9]\n"), "[1, 9]");
+        // `n` after a finished inner vector negates it.
+        assert_eq!(top("[[1,2]n]\n"), "[[-1, -2]]");
+        // A second `M` takes the modulus typed earlier in the entry, or the
+        // last one entered, inside a vector too.
+        assert_eq!(top("[3M7,4MM]\n"), "[3 mod 7, 4 mod 7]");
+        assert_eq!(top("[3M7]\n2MM\n"), "2 mod 7");
+        for (keys, expected) in [
+            ("[1 2 n]", "[1, -2]"),
+            ("[[1 2] [3 4n]]", "[[1, 2], [3, -4]]"),
+            ("[16#FF 16#10]", "[255, 16]"),
+            ("[3M7 4M7]", "[3 mod 7, 4 mod 7]"),
+            ("[1 -2]", "[1, -2]"),
+        ] {
+            assert_eq!(eval(keys).as_deref(), Ok(expected), "{keys}");
+        }
+
+        // Nesting stops at `MAX_DEPTH`, so nothing recurses without bound.
+        let deep = "[".repeat(3000) + &"]".repeat(3000);
+        assert!(eval(&deep).is_err());
+        let ok = "[".repeat(100) + &"]".repeat(100);
+        assert!(eval(&ok).is_ok());
         let mut app = App::new();
-        app.keys("25030013\nkf");
-        assert_eq!(app.engine().stack_lines(), ["25030013"]);
+        app.keys("1");
+        for _ in 0..100 {
+            app.keys("\n1vp");
+        }
         assert_eq!(app.engine().message(), "");
+        app.keys("\n1vp");
+        assert_eq!(app.engine().message(), "vectors nest too deep");
 
         let mut app = App::new();
-        app.keys("25220483\nkf");
-        assert_eq!(app.engine().stack_lines(), ["5021", "5023"]);
-        assert_eq!(app.engine().message(), "");
+        app.keys("[1,2\n");
+        assert_eq!(app.engine().message(), "bad entry: [1,2");
+        assert_eq!(app.composer_text(), "[1,2");
+        app.keys("]\n");
+        assert_eq!(app.engine().stack_lines(), ["[1, 2]"]);
 
-        let mut app = App::new();
-        app.keys("25120063\nkf");
-        assert_eq!(app.engine().stack_lines(), ["5003", "5021"]);
-        assert_eq!(app.engine().message(), "");
+        assert_eq!(eval("[1, 2, 3]").as_deref(), Ok("[1, 2, 3]"));
+        assert_eq!(eval("[1 2 3]").as_deref(), Ok("[1, 2, 3]"));
+        assert_eq!(eval("[[1 2] [3]]").as_deref(), Ok("[[1, 2], [3]]"));
+    }
 
-        let mut app = App::new();
-        app.keys("43920492304\nkf");
+    #[test]
+    fn vectors_follow_calc() {
+        // Element by element where Calc is.
+        assert_eq!(eval("[1,2] [3,4] +").as_deref(), Ok("[4, 6]"));
+        assert_eq!(eval("[1,2,3] 10 +").as_deref(), Ok("[11, 12, 13]"));
+        assert_eq!(eval("3 [1,2] -").as_deref(), Ok("[2, 1]"));
+        assert_eq!(eval("[1,2] 2 /").as_deref(), Ok("[0.5, 1]"));
+        assert_eq!(eval("[1,2,3] 2 *").as_deref(), Ok("[2, 4, 6]"));
+        assert_eq!(eval("[[1,2],[3,4]] 1 +").as_deref(), Ok("[[2, 3], [4, 5]]"));
+        assert_eq!(eval("[3M7, 2M7] 2 *").as_deref(), Ok("[6 mod 7, 4 mod 7]"));
+        // The products Calc defines on whole vectors.
+        assert_eq!(eval("[1,2] [3,4] *").as_deref(), Ok("11"));
+        assert_eq!(eval("[1,2,3] 2 ^").as_deref(), Ok("14"));
+        assert_eq!(eval("[1,2,3] 3 ^").as_deref(), Ok("[14, 28, 42]"));
+        assert_eq!(eval("[1,2] I Q").as_deref(), Ok("5"));
+        assert_eq!(eval("[3,4] A").as_deref(), Ok("5"));
+        assert_eq!(eval("[3,4] f A").as_deref(), Ok("25"));
+        // Element by element where Calc leaves the vector unevaluated.
         assert_eq!(
-            app.engine().stack_lines(),
-            ["2", "2", "2", "2", "13", "5903", "35771"]
+            eval("3M7 [1,2,3,4,5,6] ^").as_deref(),
+            Ok("[3 mod 7, 2 mod 7, 6 mod 7, 4 mod 7, 5 mod 7, 1 mod 7]")
         );
-        assert_eq!(app.engine().message(), "");
+        assert_eq!(eval("[4,9] Q").as_deref(), Ok("[2, 3]"));
+        assert_eq!(eval("[3,4] !").as_deref(), Ok("[6, 24]"));
+        assert_eq!(eval("[2,4,7] k p").as_deref(), Ok("[1, 0, 1]"));
+        assert_eq!(eval("[10,20] [3,7] \\").as_deref(), Ok("[3, 2]"));
+        assert_eq!(eval("[6,8] k t").as_deref(), Ok("[2, 4]"));
+        assert_eq!(eval("_8 [3, 1] I ^").as_deref(), Ok("[-2, -8]"));
+        // `V M` and `V R`.
+        assert_eq!(eval("[1,2] [3,4] V M *").as_deref(), Ok("[3, 8]"));
+        assert_eq!(eval("[1,2,3] 2 V M ^").as_deref(), Ok("[1, 4, 9]"));
+        assert_eq!(eval("[1,2] V M &").as_deref(), Ok("[1, 0.5]"));
+        assert_eq!(eval("[3,_4] V M A").as_deref(), Ok("[3, 4]"));
+        assert_eq!(eval("[1,2,3,4] V R +").as_deref(), Ok("10"));
+        // A matrix folds over all its elements, as Calc's `reduce`.
+        assert_eq!(eval("[[1,2],[3,4]] V R +").as_deref(), Ok("10"));
+        assert_eq!(eval("[[1,2],[3,4]] V R *").as_deref(), Ok("24"));
+        assert_eq!(eval("[1,[2,3]] V R +").as_deref(), Ok("[3, 4]"));
+        assert_eq!(eval("[] V R +").as_deref(), Ok("0"));
+        assert_eq!(eval("[] V R *").as_deref(), Ok("1"));
+        assert_eq!(eval("[8,3] V R I ^").as_deref(), Ok("2"));
+        // Only an exact positive integer power is Calc's product.
+        assert_eq!(eval("[1,2,3] 2. ^").as_deref(), Ok("[1., 4., 9.]"));
+        assert_eq!(eval("[4,9] 0.5 ^").as_deref(), Ok("[2, 3]"));
+        assert_eq!(eval("[1,2] 0 ^").as_deref(), Ok("[1, 1]"));
+        assert_eq!(eval("[1,2,3] 1 ^").as_deref(), Ok("[1, 2, 3]"));
+        // `v p`, `v u`, `v x`, `v l`.
+        assert_eq!(eval("1 2 3 3 v p").as_deref(), Ok("[1, 2, 3]"));
+        assert_eq!(eval("0 v p").as_deref(), Ok("[]"));
+        assert_eq!(eval("[1,2,3] v u").as_deref(), Ok("3"));
+        assert_eq!(eval("6 v x").as_deref(), Ok("[1, 2, 3, 4, 5, 6]"));
+        assert_eq!(eval("[1,[2,3]] v l").as_deref(), Ok("2"));
+        assert_eq!(eval("[] v l").as_deref(), Ok("0"));
+
+        for (keys, message) in [
+            ("2 [1,2] /", "not for vectors"),
+            ("[1,2] &", "not for vectors"),
+            ("[1,2] [1,2,3] +", "vectors need the same length"),
+            (
+                "[[1,2],[3,4]] [[1,2],[3,4]] *",
+                "matrices are not supported",
+            ),
+            ("[1,2] _1 ^", "a vector has no negative power"),
+            ("[1,2] [1,2] ^", "not for vectors"),
+            ("[1,2] V R Q", "V R needs a binary operation"),
+            ("5 V R +", "V R needs a vector"),
+            ("[] V R /", "V R of an empty vector"),
+            ("[[1,2],[3,4]] v x", "index needs a nonnegative integer"),
+            ("[3M7] S", "not for modulo forms"),
+            ("5 v u", "unpack needs a vector"),
+            ("5 v l", "length needs a vector"),
+            ("1 5 v p", "too few arguments"),
+            ("10001 v x", "overflow"),
+        ] {
+            let got = eval(keys).map_err(|err| err.to_string());
+            assert_eq!(got, Err(message.to_string()), "{keys}");
+        }
+
+        // A failed operation leaves the stack.
+        let mut app = App::new();
+        app.keys("[1,2]\n[1,2,3]\n+");
+        assert_eq!(app.engine().stack_lines(), ["[1, 2]", "[1, 2, 3]"]);
+    }
+
+    #[test]
+    fn map_and_reduce_are_one_shot() {
+        let mut app = App::new();
+        app.keys("[1,2]\n[3,4]\nV");
+        assert!(app.mode_line().contains(&"v-".to_string()));
+        app.keys("M");
+        assert!(app.mode_line().contains(&"map".to_string()));
+        app.keys("*");
+        assert_eq!(app.top_string().as_deref(), Some("[3, 8]"));
+        assert!(!app.mode_line().contains(&"map".to_string()));
+        assert_eq!(app.engine().trail().back().unwrap().label, "V M *");
+        app.keys("[1,2]\n*");
+        assert_eq!(app.top_string().as_deref(), Some("19"), "dot product again");
+
+        let mut app = App::new();
+        app.keys("[1,2,3]\nvR");
+        assert!(app.mode_line().contains(&"reduce".to_string()));
+        app.press(Key::Esc);
+        assert!(!app.mode_line().contains(&"reduce".to_string()));
+        app.keys("VR+");
+        assert_eq!(app.top_string().as_deref(), Some("6"));
+        app.keys("u");
+        assert_eq!(app.top_string().as_deref(), Some("[1, 2, 3]"));
     }
 
     #[test]
@@ -2472,7 +2718,7 @@ mod tests {
             ("3M7\nS", "not for modulo forms"),
             ("3M7\n2%", "not for modulo forms"),
             ("3M7\ncf", "not for modulo forms"),
-            ("3M7\nkp", "prime test needs an integer"),
+            ("3M7\nkp", "not for modulo forms"),
         ] {
             let mut app = App::new();
             app.keys(keys);
@@ -2760,17 +3006,14 @@ mod tests {
         let mut app = App::new();
         app.keys("2023kf 12ss x\nsr x\nr3 PHP L K0 1 ME");
         let rows = trail_rows(&app);
-        assert_eq!(
-            &rows[1..4],
-            &[row("k f", "7"), row("k f", "17"), row("k f", "17")]
-        );
-        assert_eq!(rows[5], row("rcl x", "12"));
-        assert_eq!(rows[6].0, "P");
-        assert_eq!(rows[7].0, "H P");
-        assert_eq!(rows[8].0, "L");
-        assert_eq!(rows[9], row("K c", "299792458"));
+        assert_eq!(rows[1], row("k f", "[7, 17, 17]"));
+        assert_eq!(rows[3], row("rcl x", "12"));
+        assert_eq!(rows[4].0, "P");
+        assert_eq!(rows[5].0, "H P");
+        assert_eq!(rows[6].0, "L");
+        assert_eq!(rows[7], row("K c", "299792458"));
         // `r3` on an empty register fails and records nothing.
-        assert_eq!(rows.len(), 12);
+        assert_eq!(rows.len(), 10);
 
         // Undo leaves the trail.
         let mut app = App::new();
@@ -2875,7 +3118,9 @@ mod tests {
         assert_eq!(eval("10 3 \\").as_deref(), Ok("3"));
         assert_eq!(eval("3 n b w 8 O d 6").as_deref(), Ok("16##FD"));
         assert_eq!(eval("255 d r 16").as_deref(), Ok("16#FF"));
-        assert_eq!(eval("5 k p").as_deref(), Ok("5"));
+        assert_eq!(eval("5 k p").as_deref(), Ok("1"));
+        assert_eq!(eval("7 k p").as_deref(), Ok("1"));
+        assert_eq!(eval("8 k p").as_deref(), Ok("0"));
         assert_eq!(eval("5 s s a s r a").as_deref(), Ok("5"));
         assert_eq!(eval("5 s s a s l a").as_deref(), Ok("5"));
 

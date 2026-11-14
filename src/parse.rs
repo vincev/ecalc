@@ -17,6 +17,7 @@ use crate::error::CalcError;
 use crate::float::DecFloat;
 use crate::radix::{self, MAX_RADIX, MIN_RADIX};
 use crate::value::{self, Mode, Real, Value};
+use crate::vector::MAX_DEPTH;
 use num_bigint::BigInt;
 use num_integer::Integer;
 use num_rational::BigRational;
@@ -32,17 +33,109 @@ pub fn parse_value(input: &str, mode: &Mode) -> Result<Value, CalcError> {
     if s.is_empty() {
         return Err(bad("empty"));
     }
+    if s.starts_with('[') {
+        return parse_vector(s, mode);
+    }
     if let Some((residue, modulus)) = s.split_once(MOD_SEPARATOR) {
         return parse_mod(residue, modulus, mode);
     }
     if let Some((negative, rest)) = sign_before_complex(s) {
-        let v = parse_complex(rest, mode)?;
+        let v = if rest.starts_with('[') {
+            parse_vector(rest, mode)?
+        } else {
+            parse_complex(rest, mode)?
+        };
         return Ok(if negative { value::neg(&v) } else { v });
     }
     if s.starts_with('(') {
         return parse_complex(s, mode);
     }
     Ok(Value::real(parse_real(s, mode)?))
+}
+
+/// `[a, b, c]`. An element is any value, a vector included.
+fn parse_vector(s: &str, mode: &Mode) -> Result<Value, CalcError> {
+    let Some(inner) = s.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) else {
+        return Err(bad(s));
+    };
+    if inner.trim().is_empty() {
+        return Ok(Value::Vector(Vec::new()));
+    }
+    if nesting(inner) >= MAX_DEPTH {
+        return Err(crate::vector::TOO_DEEP);
+    }
+    let commas = top_level_splits(inner, |c| c == ',');
+    if commas.len() > 1 {
+        return commas
+            .into_iter()
+            .map(|text| parse_element(text, s, mode))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Vector);
+    }
+    // Without commas, spaces separate the elements, as in Calc: `[1 2 3]`.
+    // ` mod ` keeps its two sides together.
+    let words: Vec<&str> = top_level_splits(inner, char::is_whitespace)
+        .into_iter()
+        .filter(|word| !word.is_empty())
+        .collect();
+    let mut items = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        if words.get(i + 1) == Some(&"mod") {
+            let Some(modulus) = words.get(i + 2) else {
+                return Err(bad(s));
+            };
+            items.push(parse_value(&format!("{} mod {modulus}", words[i]), mode)?);
+            i += 3;
+        } else {
+            items.push(parse_element(words[i], s, mode)?);
+            i += 1;
+        }
+    }
+    Ok(Value::Vector(items))
+}
+
+/// How deep the `[…]` inside `text` go.
+fn nesting(text: &str) -> usize {
+    let (mut depth, mut deepest) = (0usize, 0usize);
+    for c in text.chars() {
+        match c {
+            '[' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            ']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
+}
+
+/// Pieces of `inner` between separators outside any `(…)` or `[…]`.
+fn top_level_splits(inner: &str, is_separator: impl Fn(char) -> bool) -> Vec<&str> {
+    let mut pieces = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0usize;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            c if depth == 0 && is_separator(c) => {
+                pieces.push(&inner[start..i]);
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    pieces.push(&inner[start..]);
+    pieces
+}
+
+fn parse_element(text: &str, whole: &str, mode: &Mode) -> Result<Value, CalcError> {
+    if text.trim().is_empty() {
+        return Err(bad(whole));
+    }
+    parse_value(text, mode)
 }
 
 /// `a mod m`. Each side is any integer literal, so `16#FF mod 16#100` works.
@@ -60,7 +153,7 @@ fn sign_before_complex(s: &str) -> Option<(bool, &str)> {
         _ => return None,
     };
     let rest = rest.trim_start();
-    rest.starts_with('(').then_some((negative, rest))
+    (rest.starts_with('(') || rest.starts_with('[')).then_some((negative, rest))
 }
 
 fn parse_complex(s: &str, mode: &Mode) -> Result<Value, CalcError> {
@@ -274,7 +367,9 @@ fn parse_radix_fraction(
     }
     Ok(match Value::from_rational(BigRational::new(numer, denom)) {
         Value::Real(real) => real,
-        Value::Complex(_, _) | Value::Mod(_, _) => unreachable!("a rational is real"),
+        Value::Complex(_, _) | Value::Mod(_, _) | Value::Vector(_) => {
+            unreachable!("a rational is real")
+        }
     })
 }
 
@@ -374,7 +469,9 @@ fn parse_fraction(body: &str, negative: bool) -> Result<Real, CalcError> {
     let ratio = BigRational::new(numer, denom);
     Ok(match Value::from_rational(ratio) {
         Value::Real(real) => real,
-        Value::Complex(_, _) | Value::Mod(_, _) => unreachable!("a rational is real"),
+        Value::Complex(_, _) | Value::Mod(_, _) | Value::Vector(_) => {
+            unreachable!("a rational is real")
+        }
     })
 }
 
@@ -465,17 +562,100 @@ fn bad(s: &str) -> CalcError {
 /// The number being typed.
 ///
 /// `push` keeps a key when it belongs to this number. `n` toggles a leading
-/// `_`. Space stays only inside an unparsed `(…)`. An unclosed parenthesis
-/// is incomplete, so a script word leaves it open.
+/// `_`. Space stays only inside an unparsed `(…)` or `[…]`. An unclosed
+/// parenthesis or bracket is incomplete, so a script word leaves it open.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     text: String,
+    /// Bracket and element state of `text`, kept up to date key by key so
+    /// typing a long vector does not rescan it.
+    scan: Scan,
+}
+
+/// Where `Entry::text` stands: open `(` and `[`, where each open vector's
+/// current element starts, and whether a space has just ended an element.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Scan {
+    parens: i32,
+    brackets: usize,
+    /// One start per open `[`, innermost last. The first is the entry itself.
+    starts: Vec<usize>,
+    /// A space at the top of an open vector. The next key starts an element.
+    spaced: bool,
+}
+
+impl Scan {
+    fn new() -> Self {
+        Self {
+            parens: 0,
+            brackets: 0,
+            starts: vec![0],
+            spaced: false,
+        }
+    }
+
+    /// `c` arrives at byte `at`. `after_mod` says the text so far ends with
+    /// ` mod `, so a digit continues that form instead of starting an element.
+    fn step(&mut self, at: usize, c: char, after_mod: bool) {
+        let top = self.parens == 0 && self.brackets > 0;
+        if c.is_whitespace() {
+            if top && !after_mod {
+                self.spaced = true;
+            }
+            return;
+        }
+        if self.spaced
+            && top
+            && !matches!(c, ']' | ',')
+            && let Some(start) = self.starts.last_mut()
+        {
+            *start = at;
+        }
+        self.spaced = false;
+        match c {
+            '(' => self.parens += 1,
+            ')' => self.parens -= 1,
+            '[' if self.parens == 0 => {
+                self.brackets += 1;
+                self.starts.push(at + 1);
+            }
+            ']' if self.parens == 0 && self.brackets > 0 => {
+                self.brackets -= 1;
+                self.starts.pop();
+            }
+            ',' if top => {
+                if let Some(start) = self.starts.last_mut() {
+                    *start = at + 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The state of the whole of `text`. ` mod ` is one piece.
+    fn of(text: &str) -> Self {
+        let mut scan = Self::new();
+        let mut rest = text;
+        let mut at = 0;
+        while let Some(c) = rest.chars().next() {
+            if rest.starts_with(MOD_SEPARATOR) {
+                at += MOD_SEPARATOR.len();
+                rest = &rest[MOD_SEPARATOR.len()..];
+                continue;
+            }
+            scan.step(at, c, text[..at].ends_with(MOD_SEPARATOR));
+            at += c.len_utf8();
+            rest = &rest[c.len_utf8()..];
+        }
+        scan
+    }
 }
 
 impl Entry {
     pub fn new() -> Self {
         Self {
             text: String::new(),
+            scan: Scan::new(),
         }
     }
 
@@ -489,6 +669,11 @@ impl Entry {
 
     pub fn clear(&mut self) {
         self.text.clear();
+        self.scan = Scan::new();
+    }
+
+    fn rescan(&mut self) {
+        self.scan = Scan::of(&self.text);
     }
 
     /// ` mod ` goes as one piece, back to the residue.
@@ -498,20 +683,51 @@ impl Entry {
         } else {
             self.text.pop();
         }
+        self.rescan();
+    }
+
+    fn is_vector(&self) -> bool {
+        self.text.starts_with('[')
+    }
+
+    /// An open `[` is still waiting for its `]`.
+    fn open_vector(&self) -> bool {
+        self.scan.brackets > 0
+    }
+
+    fn element_start(&self) -> usize {
+        if !self.is_vector() {
+            return 0;
+        }
+        self.scan.starts.last().copied().unwrap_or(self.text.len())
+    }
+
+    /// The value being typed: the whole entry, or inside an open vector the
+    /// element after the last `[`, `,`, or space. A finished inner vector is
+    /// one element.
+    pub fn element(&self) -> &str {
+        &self.text[self.element_start()..]
     }
 
     /// `M` after an integer starts the modulus. The caller tries it after
     /// [`Self::push`], so `M` stays a digit of a radix literal above 22.
     pub fn start_mod(&mut self, mode: &Mode) -> bool {
-        let integer = !self.text.contains(MOD_SEPARATOR)
-            && !self.text.contains('(')
-            && parse_value(&self.text, mode).is_ok_and(|v| {
+        if self.is_vector() && (!self.open_vector() || self.scan.spaced) {
+            return false;
+        }
+        let element = self.element().trim();
+        let integer = !element.is_empty()
+            && !element.contains(MOD_SEPARATOR)
+            && !element.contains('(')
+            && !element.contains('[')
+            && parse_value(element, mode).is_ok_and(|v| {
                 // A whole number too large to expand still starts a form, so
                 // RET reports the overflow.
                 matches!(value::mod_integer(&v), Ok(_) | Err(CalcError::Overflow))
             });
         if integer {
             self.text.push_str(MOD_SEPARATOR);
+            self.rescan();
         }
         integer
     }
@@ -525,13 +741,29 @@ impl Entry {
     pub fn fill_modulus(&mut self, modulus: &str) {
         if self.awaits_modulus() {
             self.text.push_str(modulus);
+            self.rescan();
         }
+    }
+
+    /// The modulus of a form typed earlier in this entry, for a second `M`
+    /// inside a vector: `[3M7, 4MM` fills in `7`.
+    pub fn typed_modulus(&self) -> Option<&str> {
+        let before = self.text.strip_suffix(MOD_SEPARATOR)?;
+        let at = before.rfind(MOD_SEPARATOR)?;
+        let rest = &before[at + MOD_SEPARATOR.len()..];
+        let end = rest
+            .find(|c: char| c == ',' || c == ']' || c.is_whitespace())
+            .unwrap_or(rest.len());
+        let modulus = &rest[..end];
+        (!modulus.is_empty()).then_some(modulus)
     }
 
     /// `q` is a digit of a radix literal above 20, so it must not quit.
     pub fn accepts(&self, c: char, radix: u32) -> bool {
         if self.text.is_empty() {
             is_entry_start(c)
+        } else if self.is_vector() {
+            self.vector_accepts(c, radix)
         } else {
             is_entry_continuation(c, &self.text, radix)
         }
@@ -540,14 +772,20 @@ impl Entry {
     /// Keep `c` when [`Self::accepts`] says it belongs to the number.
     pub fn push(&mut self, c: char, radix: u32) -> bool {
         if self.accepts(c, radix) {
-            self.text.push(c);
+            self.push_char(c);
             true
         } else {
             false
         }
     }
 
-    /// Space inside an unparsed `(…` stays in the entry.
+    fn push_char(&mut self, c: char) {
+        let after_mod = self.awaits_modulus();
+        self.scan.step(self.text.len(), c, after_mod);
+        self.text.push(c);
+    }
+
+    /// Space inside an unparsed `(…` or an open `[…` stays in the entry.
     /// A finished number, and an empty entry, leave the space for the caller.
     pub fn push_space(&mut self, mode: &Mode) -> bool {
         if self.text.is_empty() {
@@ -557,10 +795,17 @@ impl Entry {
         if self.awaits_modulus() {
             return true;
         }
+        if self.is_vector() {
+            if !self.open_vector() {
+                return false;
+            }
+            self.push_char(' ');
+            return true;
+        }
         let open = self.text.contains('(');
         let parsed = parse_value(&self.text, mode).is_ok();
         if open && !parsed {
-            self.text.push(' ');
+            self.push_char(' ');
             true
         } else {
             false
@@ -571,24 +816,71 @@ impl Entry {
         parse_value(&self.text, mode)
     }
 
-    /// More `(` than `)`, or a modulus still to type. The next script word
-    /// can finish the value.
+    /// More `(` than `)` or `[` than `]`, or a modulus still to type. The
+    /// next script word can finish the value.
     pub fn is_incomplete(&self) -> bool {
-        unclosed_paren(&self.text) || self.awaits_modulus()
+        self.scan.parens > 0 || self.open_vector() || self.awaits_modulus()
     }
 
-    /// `n` while typing toggles a leading `_` and does not commit.
+    /// `n` can change the sign of what is being typed. A finished vector
+    /// is negated as a value instead.
+    pub fn can_toggle_sign(&self) -> bool {
+        !self.is_vector() || self.open_vector()
+    }
+
+    /// `n` while typing toggles a leading `_` and does not commit. Inside a
+    /// vector it is the sign of the element being typed, which may be a
+    /// finished inner vector: `[[1,2]n]` is `[[-1, -2]]`.
     pub fn toggle_sign(&mut self) {
-        if let Some(rest) = self
-            .text
+        let start = self.element_start();
+        let lead = self.text[start..].len() - self.text[start..].trim_start().len();
+        let at = start + lead;
+        let element = &self.text[at..];
+        if let Some(rest) = element
             .strip_prefix('_')
-            .or_else(|| self.text.strip_prefix('-'))
+            .or_else(|| element.strip_prefix('-'))
         {
-            self.text = rest.to_string();
-        } else if let Some(rest) = self.text.strip_prefix('+') {
-            self.text = format!("_{rest}");
+            let rest = rest.to_string();
+            self.text.truncate(at);
+            self.text.push_str(&rest);
+        } else if let Some(rest) = element.strip_prefix('+') {
+            let rest = format!("_{rest}");
+            self.text.truncate(at);
+            self.text.push_str(&rest);
         } else {
-            self.text.insert(0, '_');
+            self.text.insert(at, '_');
+        }
+        self.rescan();
+    }
+
+    /// Keys inside an open `[…]`. Each element follows the rules for a
+    /// number typed on its own; `[`, `]`, `,`, and a space build the vector
+    /// around them.
+    fn vector_accepts(&self, c: char, radix: u32) -> bool {
+        if !self.open_vector() {
+            return false;
+        }
+        let element = self.element();
+        let typed = element.trim();
+        let in_complex = self.scan.parens > 0;
+        let awaiting = self.awaits_modulus();
+        // A space after a finished element starts the next one: `[1 2]`.
+        let fresh = typed.is_empty() || self.scan.spaced;
+        match c {
+            '[' => fresh && self.scan.brackets < MAX_DEPTH,
+            ']' => {
+                if typed.is_empty() {
+                    self.text.trim_end().ends_with('[')
+                } else {
+                    !in_complex && !awaiting
+                }
+            }
+            ',' if in_complex => true,
+            ',' => !typed.is_empty() && !awaiting,
+            '+' | '-' if fresh => true,
+            _ if fresh => is_entry_start(c),
+            _ if typed.ends_with(']') => false,
+            _ => is_entry_continuation(c, element, radix),
         }
     }
 }
@@ -600,7 +892,7 @@ impl Default for Entry {
 }
 
 fn is_entry_start(c: char) -> bool {
-    c.is_ascii_digit() || matches!(c, '.' | '_' | '(' | '#')
+    c.is_ascii_digit() || matches!(c, '.' | '_' | '(' | '#' | '[')
 }
 
 /// `+` and `-` stay in the entry only as an exponent sign, or inside `(…)`.

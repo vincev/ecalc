@@ -38,6 +38,10 @@ pub(crate) fn format_value(value: &Value, mode: &Mode) -> String {
             format_real(&Real::Int(a.clone()), mode),
             format_real(&Real::Int(m.clone()), mode)
         ),
+        Value::Vector(items) => {
+            let parts: Vec<String> = items.iter().map(|item| format_value(item, mode)).collect();
+            format!("[{}]", parts.join(", "))
+        }
     }
 }
 

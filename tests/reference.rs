@@ -232,6 +232,8 @@ fn exact_case(rng: &mut Rng) -> ExactCase {
         "prev",
         "nth",
         "factor",
+        "prime",
+        "dot",
         "stirling1",
         "stirling2",
         "idiv",
@@ -342,12 +344,43 @@ fn exact_case(rng: &mut Rng) -> ExactCase {
         }
         "factor" => {
             let top = rng.pick(&[6u32, 14, 22]);
-            let n = rng.range(2, 10i128.pow(top));
-            // The largest factor is the one left on top.
+            let n = rng.range(-10i128.pow(top), 10i128.pow(top));
+            // Each prime as often as it divides, as Calc's `prfac` lists them.
+            let pari = format!(
+                "if({n}==0 || {n}==1, [{n}], my(f=factor({n})); concat(vector(#f~, i, vector(f[i,2], j, f[i,1]))))"
+            );
+            // Calc factors by trial division and gives up on a large prime.
+            let calc = (n.abs() < 10_000_000).then(|| format!("prfac({n})"));
+            case(format!("{} k f", keys(n)), Some(pari), calc)
+        }
+        "prime" => {
+            let n = if rng.chance(0.3) {
+                rng.range(-10, 200)
+            } else {
+                positive(rng)
+            };
             case(
-                format!("{n} k f"),
-                Some(format!("vecmax(factor({n})[,1])")),
-                None,
+                format!("{} k p", keys(n)),
+                Some(format!("isprime({n})")),
+                Some(format!("prime({n})")),
+            )
+        }
+        "dot" => {
+            let len = rng.range(0, 6) as usize;
+            let x: Vec<i128> = (0..len).map(|_| any_integer(rng)).collect();
+            let y: Vec<i128> = (0..len).map(|_| any_integer(rng)).collect();
+            let list = |v: &[i128]| {
+                v.iter()
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let (x, y) = (list(&x), list(&y));
+            let program = format!("[{}] [{}] *", typed_vec(&x), typed_vec(&y));
+            case(
+                program,
+                Some(format!("[{x}] * [{y}]~")),
+                (len > 0).then(|| format!("[{x}] * [{y}]")),
             )
         }
         "stirling1" | "stirling2" => {
@@ -525,8 +558,17 @@ fn exact_case(rng: &mut Rng) -> ExactCase {
     }
 }
 
-/// Same number, allowing for how each program writes it.
+/// A vector typed for `ec -e`: `_` for a minus sign.
+fn typed_vec(list: &str) -> String {
+    list.replace('-', "_")
+}
+
+/// Same number, allowing for how each program writes it. A vector compares
+/// without its spaces.
 fn same_exact(ec: &str, reference: &str) -> bool {
+    if ec.starts_with('[') {
+        return ec.replace(' ', "") == reference.replace(' ', "");
+    }
     // A modulo form prints as `a mod m`. PARI's `lift` gives `a`.
     let ec = ec.split(" mod ").next().unwrap_or(ec);
     let reference = reference.replace('/', ":").replace(' ', "");

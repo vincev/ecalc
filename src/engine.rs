@@ -11,14 +11,23 @@
 //! `unary` and `binop` reject a modulo form. The operations Calc defines on
 //! one (`+ - * / ^`, negate, reciprocal, square) use `unary_mod` and
 //! `binop_mod`, so a new operation cannot take one by accident.
+//!
+//! All four go element by element through a vector (`vector::map1` and
+//! `vector::map2`), so a new operation works on vectors without more code.
+//! The few that mean something else for a whole vector (`*`, `/`, `^`, `A`,
+//! `I Q`, `f A`, `&`) use `unary_whole` and `binop_whole` and the functions
+//! in `vector.rs`. `V M` makes those go element by element too, and `V R`
+//! folds a binary operation over the top vector.
 
 use crate::comb;
 use crate::error::CalcError;
 use crate::float::{MAX_PRECISION, MIN_PRECISION};
 use crate::radix::{self, MAX_RADIX, MAX_WORD_SIZE, MIN_RADIX, MIN_WORD_SIZE};
 use crate::value::{self, AngleMode, Mode, NOT_FOR_MOD, Value};
+use crate::vector;
 use num_bigint::BigInt;
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::{BTreeMap, VecDeque};
 
 /// What the prompt's message slot is showing.
@@ -29,6 +38,20 @@ pub enum Status {
     Error(CalcError),
     UnknownKey,
 }
+
+/// `V M` and `V R`: how the next operation treats a vector. The key map
+/// sets it before the command and clears it after.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VectorMode {
+    /// Element by element, even for `*`, `/`, `^`, `A`, `I Q`, `f A`, `&`.
+    Map,
+    /// Fold a binary operation over the elements of the top vector.
+    Reduce,
+}
+
+const REDUCE_NEEDS_BINARY: CalcError = CalcError::Domain("V R needs a binary operation");
+const REDUCE_NEEDS_VECTOR: CalcError = CalcError::Domain("V R needs a vector");
+const REDUCE_EMPTY: CalcError = CalcError::Domain("V R of an empty vector");
 
 const UNDO_CAP: usize = 100;
 pub(crate) const MAX_VAR_LEN: usize = 32;
@@ -65,6 +88,11 @@ pub struct Engine {
     trail_bytes: usize,
     /// Label for the next trail entries. The key map sets it per command.
     label: String,
+    /// `V M` or `V R` for the command now running.
+    vector_mode: Option<VectorMode>,
+    /// What `V R` of an empty vector gives for the operation now running:
+    /// `0` for `+` and `-`, `1` for `*`, as in Calc. Other operations have none.
+    reduce_identity: Option<i64>,
 }
 
 impl Default for Engine {
@@ -85,6 +113,8 @@ impl Engine {
             trail: VecDeque::new(),
             trail_bytes: 0,
             label: String::new(),
+            vector_mode: None,
+            reduce_identity: None,
         }
     }
 
@@ -157,6 +187,15 @@ impl Engine {
     /// typed number.
     pub fn set_label(&mut self, label: impl Into<String>) {
         self.label = label.into();
+    }
+
+    /// `V M` or `V R` for the next command. The key map clears it after.
+    pub fn set_vector_mode(&mut self, mode: Option<VectorMode>) {
+        self.vector_mode = mode;
+    }
+
+    fn mapping(&self) -> bool {
+        self.vector_mode == Some(VectorMode::Map)
     }
 
     /// Oldest first.
@@ -331,19 +370,38 @@ impl Engine {
     }
 
     pub fn add(&mut self) {
+        self.reduce_identity = Some(0);
         self.binop_mod(value::add);
+        self.reduce_identity = None;
     }
 
     pub fn sub(&mut self) {
+        self.reduce_identity = Some(0);
         self.binop_mod(value::sub);
+        self.reduce_identity = None;
     }
 
+    /// Two vectors give the dot product. `V M *` multiplies element by element.
     pub fn mul(&mut self) {
-        self.binop_mod(value::mul);
+        self.reduce_identity = Some(1);
+        self.mul_inner();
+        self.reduce_identity = None;
+    }
+
+    fn mul_inner(&mut self) {
+        if self.mapping() {
+            self.binop_mod(value::mul);
+        } else {
+            self.binop_whole(vector::mul);
+        }
     }
 
     pub fn div(&mut self) {
-        self.binop_mod(value::div);
+        if self.mapping() {
+            self.binop_mod(value::div);
+        } else {
+            self.binop_whole(vector::div);
+        }
     }
 
     pub fn div_fraction(&mut self) {
@@ -418,13 +476,32 @@ impl Engine {
         self.unary(comb::factorial);
     }
 
-    /// Report whether the top integer is prime. The stack stays as it is.
+    /// `k p`. Replace the top integer with `1` if it is prime and `0` if not,
+    /// as Calc's `prime` function. The message says `prime`, `not prime`, or
+    /// `probably prime`. A vector is tested element by element.
     pub fn prime_test(&mut self) {
-        let outcome = self.top().map(comb::prime_message);
-        match outcome {
-            None => self.fail(CalcError::StackUnderflow),
-            Some(Ok(message)) => self.show(message),
-            Some(Err(err)) => self.fail(err),
+        let unproven = Cell::new(false);
+        let vector = matches!(self.top(), Some(Value::Vector(_)));
+        let verdict = Cell::new("");
+        self.unary(|v, _| {
+            let (prime, proven) = comb::prime_test(v)?;
+            if prime && !proven {
+                unproven.set(true);
+            }
+            verdict.set(match (prime, proven) {
+                (false, _) => "not prime",
+                (true, true) => "prime",
+                (true, false) => "probably prime",
+            });
+            Ok(Value::from_int(u8::from(prime)))
+        });
+        if self.is_error() {
+            return;
+        }
+        if !vector {
+            self.show(verdict.get());
+        } else if unproven.get() {
+            self.show("some are only probably prime");
         }
     }
 
@@ -451,72 +528,128 @@ impl Engine {
     /// Replace the top with a prime found from it. An unproven prime still
     /// replaces the top, with the message `probably prime`.
     fn prime_search(&mut self, op: fn(&Value) -> Result<(BigInt, bool), CalcError>) {
-        let outcome = match self.top() {
-            None => Err(CalcError::StackUnderflow),
-            Some(top) if top.is_mod() => Err(NOT_FOR_MOD),
-            Some(top) => op(top),
-        };
-        match outcome {
-            Ok((prime, proven)) => {
-                self.checkpoint();
-                self.stack.pop();
-                let value = Value::from_int(prime);
-                self.record(&value);
-                self.stack.push(value);
-                if proven {
-                    self.succeed();
-                } else {
-                    self.show("probably prime");
-                }
+        let unproven = Cell::new(false);
+        self.unary(|v, _| {
+            let (prime, proven) = op(v)?;
+            if !proven {
+                unproven.set(true);
             }
-            Err(err) => self.fail(err),
+            Ok(Value::from_int(prime))
+        });
+        if !self.is_error() && unproven.get() {
+            self.show("probably prime");
         }
     }
 
-    /// `k f`. Replace the top integer with its prime factors, smallest first.
-    /// `2023` becomes `7`, `17`, `17`, with `17` on top.
+    /// `k f`. Replace the top integer with the vector of its prime factors,
+    /// smallest first, as Calc's `prfac`: `2023` becomes `[7, 17, 17]`. A
+    /// vector of integers gives a vector of factor lists.
     pub fn prime_factors(&mut self) {
-        let Some(top) = self.top() else {
+        let incomplete = Cell::new(false);
+        self.unary(|v, _| {
+            let (factors, complete) = comb::prime_factors(v)?;
+            if !complete {
+                incomplete.set(true);
+            }
+            Ok(Value::Vector(
+                factors.into_iter().map(Value::from_int).collect(),
+            ))
+        });
+        if !self.is_error() && incomplete.get() {
+            self.show("may not be fully factored");
+        }
+    }
+
+    /// `v p`. Pop a count, then pack that many values into one vector, the
+    /// deepest first. `1 2 3 3 v p` is `[1, 2, 3]`.
+    pub fn pack(&mut self) {
+        let Some(top) = self.stack.last() else {
             self.fail(CalcError::StackUnderflow);
             return;
         };
-        match comb::prime_factors(top) {
-            Ok((factors, complete)) => {
-                self.checkpoint();
-                self.stack.pop();
-                for value in factors.into_iter().map(Value::from_int) {
-                    self.record(&value);
-                    self.stack.push(value);
-                }
-                if complete {
-                    self.succeed();
-                } else {
-                    self.show("may not be fully factored");
-                }
-            }
-            Err(err) => self.fail(err),
+        let Some(n) = value::exact_int(top).and_then(|n| usize::try_from(n).ok()) else {
+            self.fail(CalcError::Domain("pack needs a count"));
+            return;
+        };
+        let len = self.stack.len();
+        if n > len - 1 {
+            self.fail(CalcError::StackUnderflow);
+            return;
         }
+        let deepest = self.stack[len - 1 - n..len - 1]
+            .iter()
+            .map(Value::depth)
+            .max()
+            .unwrap_or(0);
+        if deepest >= vector::MAX_DEPTH {
+            self.fail(vector::TOO_DEEP);
+            return;
+        }
+        self.checkpoint();
+        self.stack.pop();
+        let items = self.stack.split_off(len - 1 - n);
+        let packed = Value::Vector(items);
+        self.record(&packed);
+        self.stack.push(packed);
+        self.succeed();
+    }
+
+    /// `v u`. Replace the top vector with its elements, the last on top.
+    pub fn unpack(&mut self) {
+        let Some(top) = self.stack.last() else {
+            self.fail(CalcError::StackUnderflow);
+            return;
+        };
+        let Value::Vector(items) = top.clone() else {
+            self.fail(CalcError::Domain("unpack needs a vector"));
+            return;
+        };
+        self.checkpoint();
+        self.stack.pop();
+        self.stack.extend(items);
+        self.succeed();
+    }
+
+    /// `v x`. Replace a count `n` with `[1, 2, ..., n]`, as Calc's `index`.
+    /// It does not map over a vector: `[n, m] v x` would build up to
+    /// `MAX_INDEX` elements per element and get round the cap.
+    pub fn index(&mut self) {
+        self.unary_whole(|v, _| {
+            let n = value::exact_int(v)
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or(CalcError::Domain("index needs a nonnegative integer"))?;
+            if n > vector::MAX_INDEX {
+                return Err(CalcError::Overflow);
+            }
+            Ok(Value::Vector((1..=n).map(Value::from_int).collect()))
+        });
+    }
+
+    /// `v l`. Replace the top vector with its number of elements.
+    pub fn length(&mut self) {
+        self.unary_whole(|v, _| match v {
+            Value::Vector(items) => Ok(Value::from_int(items.len())),
+            _ => Err(CalcError::Domain("length needs a vector")),
+        });
     }
 
     pub fn power(&mut self) {
-        self.binop_mod(value::pow);
+        if self.mapping() {
+            self.binop_mod(value::pow);
+        } else {
+            self.binop_whole(vector::pow);
+        }
     }
 
     /// Degree on top. An integer degree uses an exact root when there is one.
     pub fn nth_root(&mut self) {
-        if self.stack.len() < 2 {
-            self.fail(CalcError::StackUnderflow);
-            return;
-        }
-        let degree = value::exact_int(self.stack.last().unwrap());
-        if let Some(n) = degree {
-            self.binop(move |base, _, mode| value::nth_root(base, &n, mode));
-        } else {
-            self.binop(|base, degree, mode| {
+        self.binop(|base, degree, mode| match value::exact_int(degree) {
+            Some(n) => value::nth_root(base, &n, mode),
+            None => {
                 let inv = value::recip(degree, mode)?;
                 value::pow(base, &inv, mode)
-            });
-        }
+            }
+        });
     }
 
     pub fn sqrt(&mut self) {
@@ -524,7 +657,11 @@ impl Engine {
     }
 
     pub fn square(&mut self) {
-        self.unary_mod(value::square);
+        if self.mapping() {
+            self.unary_mod(value::square);
+        } else {
+            self.unary_whole(vector::square);
+        }
     }
 
     pub fn negate(&mut self) {
@@ -532,11 +669,20 @@ impl Engine {
     }
 
     pub fn reciprocal(&mut self) {
-        self.unary_mod(value::recip);
+        if self.mapping() {
+            self.unary_mod(value::recip);
+        } else {
+            self.unary_whole(vector::recip);
+        }
     }
 
+    /// A vector gives its length, as Calc's `abs`: `[3, 4]` is `5`.
     pub fn abs(&mut self) {
-        self.unary(value::abs);
+        if self.mapping() {
+            self.unary(value::abs);
+        } else {
+            self.unary_whole(vector::abs);
+        }
     }
 
     pub fn floor(&mut self) {
@@ -630,7 +776,11 @@ impl Engine {
     }
 
     pub fn abssqr(&mut self) {
-        self.unary(value::abssqr);
+        if self.mapping() {
+            self.unary(value::abssqr);
+        } else {
+            self.unary_whole(vector::abssqr);
+        }
     }
 
     pub fn sign(&mut self) {
@@ -809,16 +959,38 @@ impl Engine {
         self.redo.clear();
     }
 
-    fn unary(&mut self, op: impl FnOnce(&Value, &Mode) -> Result<Value, CalcError>) {
-        if self.stack.last().is_some_and(Value::is_mod) {
-            self.fail(NOT_FOR_MOD);
-            return;
-        }
-        self.unary_mod(op);
+    /// A one-argument operation on each element. A modulo form is an error.
+    fn unary(&mut self, op: impl Fn(&Value, &Mode) -> Result<Value, CalcError>) {
+        self.unary_leaf(false, op);
     }
 
     /// [`Self::unary`] for an operation that takes a modulo form.
-    fn unary_mod(&mut self, op: impl FnOnce(&Value, &Mode) -> Result<Value, CalcError>) {
+    fn unary_mod(&mut self, op: impl Fn(&Value, &Mode) -> Result<Value, CalcError>) {
+        self.unary_leaf(true, op);
+    }
+
+    fn unary_leaf(
+        &mut self,
+        allow_mod: bool,
+        op: impl Fn(&Value, &Mode) -> Result<Value, CalcError>,
+    ) {
+        self.unary_whole(|v, mode| {
+            vector::map1(v, &|x| {
+                if !allow_mod && x.is_mod() {
+                    Err(NOT_FOR_MOD)
+                } else {
+                    op(x, mode)
+                }
+            })
+        });
+    }
+
+    /// Replace the top with `op` of it. `op` sees a vector whole.
+    fn unary_whole(&mut self, op: impl Fn(&Value, &Mode) -> Result<Value, CalcError>) {
+        if self.vector_mode == Some(VectorMode::Reduce) {
+            self.fail(REDUCE_NEEDS_BINARY);
+            return;
+        }
         let result = if let Some(top) = self.stack.last() {
             op(top, &self.mode).and_then(value::in_range)
         } else {
@@ -837,17 +1009,40 @@ impl Engine {
         }
     }
 
-    fn binop(&mut self, op: impl FnOnce(&Value, &Value, &Mode) -> Result<Value, CalcError>) {
-        let n = self.stack.len();
-        if n >= 2 && self.stack[n - 2..].iter().any(Value::is_mod) {
-            self.fail(NOT_FOR_MOD);
-            return;
-        }
-        self.binop_mod(op);
+    /// A two-argument operation, element by element through vectors. A
+    /// modulo form is an error.
+    fn binop(&mut self, op: impl Fn(&Value, &Value, &Mode) -> Result<Value, CalcError>) {
+        self.binop_leaf(false, op);
     }
 
     /// [`Self::binop`] for an operation that takes a modulo form.
-    fn binop_mod(&mut self, op: impl FnOnce(&Value, &Value, &Mode) -> Result<Value, CalcError>) {
+    fn binop_mod(&mut self, op: impl Fn(&Value, &Value, &Mode) -> Result<Value, CalcError>) {
+        self.binop_leaf(true, op);
+    }
+
+    fn binop_leaf(
+        &mut self,
+        allow_mod: bool,
+        op: impl Fn(&Value, &Value, &Mode) -> Result<Value, CalcError>,
+    ) {
+        self.binop_whole(|a, b, mode| {
+            vector::map2(a, b, &|x, y| {
+                if !allow_mod && (x.is_mod() || y.is_mod()) {
+                    Err(NOT_FOR_MOD)
+                } else {
+                    op(x, y, mode)
+                }
+            })
+        });
+    }
+
+    /// Replace the top two with `op` of them, the deeper one first. `op`
+    /// sees a vector whole. Under `V R` it folds over the top vector instead.
+    fn binop_whole(&mut self, op: impl Fn(&Value, &Value, &Mode) -> Result<Value, CalcError>) {
+        if self.vector_mode == Some(VectorMode::Reduce) {
+            self.reduce(op);
+            return;
+        }
         let result = if self.stack.len() >= 2 {
             let n = self.stack.len();
             op(&self.stack[n - 2], &self.stack[n - 1], &self.mode).and_then(value::in_range)
@@ -867,6 +1062,74 @@ impl Engine {
             Err(err) => self.fail(err),
         }
     }
+
+    /// `V R`. `[a, b, c]` becomes `op(op(a, b), c)`. A matrix, a vector of
+    /// vectors of one length, folds over all its elements, as in Calc:
+    /// `[[1, 2], [3, 4]] V R +` is `10`. An empty vector gives the identity
+    /// of `+`, `-`, or `*`.
+    fn reduce(&mut self, op: impl Fn(&Value, &Value, &Mode) -> Result<Value, CalcError>) {
+        let Some(top) = self.stack.last() else {
+            self.fail(CalcError::StackUnderflow);
+            return;
+        };
+        let Value::Vector(items) = top else {
+            self.fail(REDUCE_NEEDS_VECTOR);
+            return;
+        };
+        let cells: Vec<&Value> = match matrix_cells(items) {
+            Some(cells) => cells,
+            None => items.iter().collect(),
+        };
+        let Some((first, rest)) = cells.split_first() else {
+            match self.reduce_identity {
+                Some(identity) => {
+                    let value = Value::from_int(identity);
+                    self.checkpoint();
+                    self.stack.pop();
+                    self.record(&value);
+                    self.stack.push(value);
+                    self.succeed();
+                }
+                None => self.fail(REDUCE_EMPTY),
+            }
+            return;
+        };
+        let mut acc = (*first).clone();
+        for item in rest {
+            match op(&acc, item, &self.mode).and_then(value::in_range) {
+                Ok(next) => acc = next,
+                Err(err) => {
+                    self.fail(err);
+                    return;
+                }
+            }
+        }
+        self.checkpoint();
+        self.stack.pop();
+        self.record(&acc);
+        self.stack.push(acc);
+        self.succeed();
+    }
+}
+
+/// The elements of a matrix row by row: every element a vector of numbers,
+/// all of one length. `None` for anything else.
+fn matrix_cells(rows: &[Value]) -> Option<Vec<&Value>> {
+    let mut width = None;
+    let mut cells = Vec::new();
+    for row in rows {
+        let Value::Vector(row) = row else {
+            return None;
+        };
+        if row.iter().any(|cell| matches!(cell, Value::Vector(_))) {
+            return None;
+        }
+        if *width.get_or_insert(row.len()) != row.len() {
+            return None;
+        }
+        cells.extend(row);
+    }
+    width.map(|_| cells)
 }
 
 pub(crate) fn valid_var(name: &str) -> bool {

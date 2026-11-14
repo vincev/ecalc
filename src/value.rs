@@ -70,10 +70,14 @@ pub enum Value {
     Complex(Real, Real),
     /// `a mod m`, always reduced: `m > 0` and `0 <= a < m`.
     Mod(BigInt, BigInt),
+    /// `[a, b, c]`. Elements may be vectors themselves, of any length.
+    Vector(Vec<Value>),
 }
 
 /// The error for an operation that does not take a modulo form.
 pub(crate) const NOT_FOR_MOD: CalcError = CalcError::Domain("not for modulo forms");
+/// The error for an operation that does not take a vector as a whole.
+pub(crate) const NOT_FOR_VECTOR: CalcError = CalcError::Domain("not for vectors");
 const MOD_NEEDS_INTEGERS: CalcError = CalcError::Domain("modulo forms need integers");
 
 fn int_bytes(n: &BigInt) -> usize {
@@ -95,6 +99,9 @@ impl Value {
             Value::Real(r) => real_bytes(r),
             Value::Complex(re, im) => real_bytes(re).saturating_add(real_bytes(im)),
             Value::Mod(a, m) => int_bytes(a).saturating_add(int_bytes(m)),
+            Value::Vector(items) => items
+                .iter()
+                .fold(0usize, |sum, item| sum.saturating_add(item.approx_bytes())),
         }
     }
 
@@ -127,6 +134,14 @@ impl Value {
         Ok(Self::Mod(a.mod_floor(&m), m))
     }
 
+    /// How many vectors deep: `0` for a number, `1` for `[1, 2]`.
+    pub(crate) fn depth(&self) -> usize {
+        match self {
+            Value::Vector(items) => 1 + items.iter().map(Value::depth).max().unwrap_or(0),
+            _ => 0,
+        }
+    }
+
     pub fn is_mod(&self) -> bool {
         matches!(self, Self::Mod(_, _))
     }
@@ -136,6 +151,7 @@ impl Value {
             Self::Real(r) => r.is_zero(),
             Self::Complex(re, im) => re.is_zero() && im.is_zero(),
             Self::Mod(a, _) => a.is_zero(),
+            Self::Vector(items) => items.iter().all(Value::is_zero),
         }
     }
 
@@ -146,7 +162,9 @@ impl Value {
         match self {
             Self::Real(r) => (r.clone(), Real::Int(BigInt::zero())),
             Self::Complex(re, im) => (re.clone(), im.clone()),
-            Self::Mod(_, _) => unreachable!("modulo forms are handled before parts"),
+            Self::Mod(_, _) | Self::Vector(_) => {
+                unreachable!("modulo forms and vectors are handled before parts")
+            }
         }
     }
 
@@ -243,6 +261,16 @@ impl fmt::Display for Value {
             Self::Real(r) => write!(f, "{r}"),
             Self::Complex(re, im) => write!(f, "({re}, {im})"),
             Self::Mod(a, m) => write!(f, "{a} mod {m}"),
+            Self::Vector(items) => {
+                write!(f, "[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{item}")?;
+                }
+                write!(f, "]")
+            }
         }
     }
 }
@@ -275,7 +303,7 @@ fn real_from_rational(r: BigRational) -> Real {
 pub(crate) fn exact_int(value: &Value) -> Option<BigInt> {
     match value {
         Value::Real(real) => exact_real(real),
-        Value::Complex(_, _) | Value::Mod(_, _) => None,
+        Value::Complex(_, _) | Value::Mod(_, _) | Value::Vector(_) => None,
     }
 }
 
@@ -337,14 +365,34 @@ fn mod_pow(b: &BigInt, e: &BigInt, m: &BigInt) -> Result<Value, CalcError> {
     Value::make_mod(base.modpow(&e.abs(), m), m.clone())
 }
 
+fn elements_in_range(v: Value) -> Result<Value, CalcError> {
+    match v {
+        Value::Vector(items) => items
+            .into_iter()
+            .map(elements_in_range)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Vector),
+        other => in_range(other),
+    }
+}
+
 /// A result whose float exponent ran away is an overflow. `DecFloat`
 /// saturates its exponent, so this is where a runaway power is reported.
+/// A vector is checked element by element, and may not nest deeper than
+/// `vector::MAX_DEPTH`.
 pub(crate) fn in_range(v: Value) -> Result<Value, CalcError> {
+    if let Value::Vector(_) = &v {
+        if v.depth() > crate::vector::MAX_DEPTH {
+            return Err(crate::vector::TOO_DEEP);
+        }
+        return elements_in_range(v);
+    }
     let ok = |r: &Real| !matches!(r, Real::Float(f) if !f.in_range());
     let fits = match &v {
         Value::Real(r) => ok(r),
         Value::Complex(re, im) => ok(re) && ok(im),
         Value::Mod(_, _) => true,
+        Value::Vector(_) => true,
     };
     if fits {
         Ok(v)
@@ -506,6 +554,7 @@ pub fn neg(v: &Value) -> Value {
         Value::Real(r) => Value::Real(r.neg()),
         Value::Complex(re, im) => Value::complex(re.neg(), im.neg()),
         Value::Mod(a, m) => Value::Mod((-a).mod_floor(m), m.clone()),
+        Value::Vector(items) => Value::Vector(items.iter().map(neg).collect()),
     }
 }
 
@@ -1163,7 +1212,7 @@ fn value_order(v: &Value) -> i64 {
     let best = match v {
         Value::Real(r) => order(r),
         Value::Complex(re, im) => order(re).max(order(im)),
-        Value::Mod(_, _) => i64::MIN,
+        Value::Mod(_, _) | Value::Vector(_) => i64::MIN,
     };
     if best == i64::MIN { 0 } else { best }
 }
@@ -1171,6 +1220,7 @@ fn value_order(v: &Value) -> i64 {
 pub fn sqrt(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
         Value::Mod(_, _) => Err(NOT_FOR_MOD),
+        Value::Vector(_) => Err(NOT_FOR_VECTOR),
         Value::Real(r) if r.is_negative() => {
             let mag = sqrt(&Value::Real(r.abs()), mode)?;
             let Value::Real(im) = mag else {
@@ -1211,6 +1261,7 @@ pub fn sqrt(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 pub fn abs(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
         Value::Mod(_, _) => Err(NOT_FOR_MOD),
+        Value::Vector(_) => Err(NOT_FOR_VECTOR),
         Value::Real(r) => Ok(Value::Real(r.abs())),
         Value::Complex(re, im) => Ok(Value::Real(hypot_real(re, im, mode)?)),
     }
@@ -1219,6 +1270,7 @@ pub fn abs(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 pub fn abssqr(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
         Value::Mod(_, _) => Err(NOT_FOR_MOD),
+        Value::Vector(_) => Err(NOT_FOR_VECTOR),
         Value::Real(_) => square(v, mode),
         Value::Complex(re, im) => {
             let a = mul_real(re, re, mode)?;
@@ -1231,6 +1283,7 @@ pub fn abssqr(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 pub fn sign(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
         Value::Mod(_, _) => Err(NOT_FOR_MOD),
+        Value::Vector(_) => Err(NOT_FOR_VECTOR),
         Value::Real(r) if r.is_zero() => Ok(Value::from_int(0)),
         Value::Real(r) if r.is_negative() => Ok(Value::from_int(-1)),
         Value::Real(_) => Ok(Value::from_int(1)),
@@ -1330,6 +1383,7 @@ pub fn isqrt(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 pub fn conj(v: &Value) -> Value {
     match v {
         Value::Mod(_, _) => v.clone(),
+        Value::Vector(items) => Value::Vector(items.iter().map(conj).collect()),
         Value::Real(_) => v.clone(),
         Value::Complex(re, im) => Value::complex(re.clone(), im.neg()),
     }
@@ -1346,6 +1400,7 @@ pub fn arg(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 pub fn ln(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
         Value::Mod(_, _) => Err(NOT_FOR_MOD),
+        Value::Vector(_) => Err(NOT_FOR_VECTOR),
         Value::Real(r) if r.is_one() => Ok(Value::from_int(0)),
         Value::Real(r) if r.is_zero() => Err(CalcError::Domain("logarithm of zero")),
         Value::Real(r) if r.is_positive() => Ok(polish(
@@ -1384,6 +1439,7 @@ fn ln_keep(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 pub fn exp_value(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
         Value::Mod(_, _) => Err(NOT_FOR_MOD),
+        Value::Vector(_) => Err(NOT_FOR_VECTOR),
         Value::Real(r) if r.is_zero() => Ok(Value::from_int(1)),
         Value::Real(r) => Ok(polish(
             Value::Real(Real::Float(r.operand(mode.prec)?.exp(mode.prec)?)),
@@ -1406,6 +1462,7 @@ pub fn exp_value(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 pub fn expm1(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
         Value::Mod(_, _) => Err(NOT_FOR_MOD),
+        Value::Vector(_) => Err(NOT_FOR_VECTOR),
         Value::Real(r) if r.is_zero() => Ok(Value::from_int(0)),
         // One rounding. `exp(x) - 1` at the display precision is a digit
         // short whenever `exp(x)` has one more integer digit.
@@ -1421,6 +1478,7 @@ pub fn expm1(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 pub fn lnp1(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
         Value::Mod(_, _) => Err(NOT_FOR_MOD),
+        Value::Vector(_) => Err(NOT_FOR_VECTOR),
         Value::Real(r) => {
             let f = r.operand(mode.prec)?;
             let wide = mode.prec.saturating_mul(2).saturating_add(4);
@@ -1713,6 +1771,7 @@ fn to_radians(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     if mode.angle == AngleMode::Radians {
         return match v {
             Value::Mod(_, _) => Err(NOT_FOR_MOD),
+            Value::Vector(_) => Err(NOT_FOR_VECTOR),
             Value::Real(r) => Ok(Value::Real(Real::Float(high_float(r, mode)?))),
             Value::Complex(re, im) => Ok(Value::complex(
                 Real::Float(high_float(re, mode)?),
@@ -2274,6 +2333,7 @@ pub fn e_const(mode: &Mode) -> Value {
 pub fn to_float(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
         Value::Mod(_, _) => Err(NOT_FOR_MOD),
+        Value::Vector(_) => Err(NOT_FOR_VECTOR),
         Value::Real(r) => Ok(Value::Real(Real::Float(r.to_float(mode.prec)?))),
         Value::Complex(re, im) => Ok(Value::complex(
             Real::Float(re.to_float(mode.prec)?),
@@ -2285,6 +2345,7 @@ pub fn to_float(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
 pub fn to_fraction(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
     match v {
         Value::Mod(_, _) => Err(NOT_FOR_MOD),
+        Value::Vector(_) => Err(NOT_FOR_VECTOR),
         Value::Real(r) => Ok(Value::Real(real_to_fraction(r, mode.prec)?)),
         Value::Complex(re, im) => Ok(Value::complex(
             real_to_fraction(re, mode.prec)?,
