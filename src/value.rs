@@ -291,7 +291,7 @@ impl fmt::Display for Real {
     }
 }
 
-fn real_from_rational(r: BigRational) -> Real {
+pub(crate) fn real_from_rational(r: BigRational) -> Real {
     if r.denom().is_one() {
         Real::Int(r.into_raw().0)
     } else {
@@ -1038,7 +1038,8 @@ fn log2_abs(n: &BigInt) -> f64 {
     shift as f64 + (top as f64).log2()
 }
 
-fn round_floats(v: Value, prec: u32) -> Value {
+/// Round the float parts of a number to `prec` digits.
+pub(crate) fn round_floats(v: Value, prec: u32) -> Value {
     let round = |r: Real| match r {
         Real::Float(f) => Real::Float(f.round_to(prec)),
         other => other,

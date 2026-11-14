@@ -251,6 +251,20 @@ fn exact_case(rng: &mut Rng) -> ExactCase {
         "ipow",
         "rpow",
         "egcd",
+        "matmul",
+        "matvec",
+        "matdet",
+        "matinv",
+        "matinvc",
+        "matsolve",
+        "matpow",
+        "mattrace",
+        "mattrn",
+        "matident",
+        "matabssqr",
+        "matctrn",
+        "matmod",
+        "cross",
     ];
     let name = rng.pick(OPS);
     let case = |program: String, pari: Option<String>, calc: Option<String>| ExactCase {
@@ -551,23 +565,431 @@ fn exact_case(rng: &mut Rng) -> ExactCase {
         }
         "egcd" => {
             let (a, b) = (positive(rng), positive(rng));
-            // The gcd is the one left on top.
-            case(format!("{a} {b} k E"), Some(format!("gcd({a},{b})")), None)
+            // `[g, a, b]`, as Calc's `egcd`. PARI's `gcdext` may pick other
+            // coefficients, so Calc is the reference.
+            case(format!("{a} {b} k E"), None, Some(format!("egcd({a},{b})")))
+        }
+        "matmul" => {
+            let (r, k, c) = (size(rng, 4), size(rng, 4), size(rng, 4));
+            let fractions = rng.chance(0.3);
+            let (a, b) = (
+                exact_matrix(rng, r, k, fractions),
+                exact_matrix(rng, k, c, fractions),
+            );
+            case(
+                format!("{} {} *", a.keys, b.keys),
+                Some(format!("rows({}*{})", a.pari, b.pari)),
+                Some(format!("{} * {}", a.calc(), b.calc())),
+            )
+        }
+        // A flat vector is a column on the right and a row on the left. A
+        // one-column matrix is left out: with a flat vector Calc takes the
+        // outer product.
+        "matvec" => {
+            let (r, k) = (size(rng, 4), size(rng, 3) + 1);
+            let fractions = rng.chance(0.3);
+            let a = exact_matrix(rng, r, k, fractions);
+            if rng.chance(0.5) {
+                let v = exact_vector(rng, k, fractions);
+                case(
+                    format!("{} {} *", a.keys, v.keys),
+                    Some(format!("Vec({}*{}~)", a.pari, v.pari)),
+                    Some(format!("{} * {}", a.calc(), v.calc())),
+                )
+            } else {
+                let v = exact_vector(rng, r, fractions);
+                case(
+                    format!("{} {} *", v.keys, a.keys),
+                    Some(format!("Vec({}*{})", v.pari, a.pari)),
+                    Some(format!("{} * {}", v.calc(), a.calc())),
+                )
+            }
+        }
+        "matdet" => {
+            let n = size(rng, 5);
+            let fractions = rng.chance(0.3);
+            let a = exact_matrix(rng, n, n, fractions);
+            // Past 3 by 3 Calc eliminates in floats.
+            let calc = (n <= 3).then(|| format!("det({})", a.calc()));
+            case(
+                format!("{} V D", a.keys),
+                Some(format!("matdet({})", a.pari)),
+                calc,
+            )
+        }
+        // Fraction mode keeps the inverse exact, as PARI/GP has it.
+        "matinv" => {
+            let n = size(rng, 4);
+            let fractions = rng.chance(0.3);
+            let a = exact_matrix(rng, n, n, fractions);
+            case(
+                format!("m f {} &", a.keys),
+                Some(format!(
+                    "if(matdet({0})==0, \"none\", rows({0}^-1))",
+                    a.pari
+                )),
+                None,
+            )
+        }
+        // With fraction mode off a fraction is a float, as in Calc, which
+        // divides the adjugate by the determinant up to 3 by 3. Its 1 by 1
+        // inverse is a plain number.
+        "matinvc" => {
+            let n = size(rng, 2) + 1;
+            let a = exact_matrix(rng, n, n, false);
+            case(
+                format!("{} &", a.keys),
+                None,
+                Some(format!("inv({})", a.calc())),
+            )
+        }
+        "matsolve" => {
+            let n = size(rng, 4);
+            let fractions = rng.chance(0.3);
+            let a = exact_matrix(rng, n, n, fractions);
+            let solved = |x: String| format!("if(matdet({})==0, \"none\", {x})", a.pari);
+            match rng.range(0, 2) {
+                0 => {
+                    let b = exact_vector(rng, n, fractions);
+                    case(
+                        format!("m f {} {} /", b.keys, a.keys),
+                        Some(solved(format!("Vec(matsolve({},{}~))", a.pari, b.pari))),
+                        None,
+                    )
+                }
+                1 => {
+                    let cols = size(rng, 4);
+                    let b = exact_matrix(rng, n, cols, fractions);
+                    case(
+                        format!("m f {} {} /", b.keys, a.keys),
+                        Some(solved(format!("rows({}^-1*{})", a.pari, b.pari))),
+                        None,
+                    )
+                }
+                // Rows that do not fit and columns that do: `B A^-1`.
+                _ => {
+                    let rows = match size(rng, 4) {
+                        r if r == n => n + 1,
+                        r => r,
+                    };
+                    let b = exact_matrix(rng, rows, n, fractions);
+                    case(
+                        format!("m f {} {} /", b.keys, a.keys),
+                        Some(solved(format!("rows({}*{}^-1)", b.pari, a.pari))),
+                        None,
+                    )
+                }
+            }
+        }
+        "matpow" => {
+            let n = size(rng, 4);
+            let fractions = rng.chance(0.3);
+            let a = exact_matrix(rng, n, n, fractions);
+            if rng.chance(0.7) {
+                let k = rng.range(0, 8);
+                case(
+                    format!("{} {k} ^", a.keys),
+                    Some(format!("rows({}^{k})", a.pari)),
+                    Some(format!("{}^{k}", a.calc())),
+                )
+            } else {
+                let k = rng.range(1, 4);
+                case(
+                    format!("m f {} _{k} ^", a.keys),
+                    Some(format!(
+                        "if(matdet({0})==0, \"none\", rows({0}^(-{k})))",
+                        a.pari
+                    )),
+                    None,
+                )
+            }
+        }
+        "mattrace" => {
+            let n = size(rng, 5);
+            let fractions = rng.chance(0.3);
+            let a = exact_matrix(rng, n, n, fractions);
+            case(
+                format!("{} V T", a.keys),
+                Some(format!("trace({})", a.pari)),
+                Some(format!("tr({})", a.calc())),
+            )
+        }
+        "mattrn" => {
+            let (rows, cols) = (size(rng, 4), size(rng, 4));
+            let fractions = rng.chance(0.3);
+            let a = exact_matrix(rng, rows, cols, fractions);
+            case(
+                format!("{} v t", a.keys),
+                Some(format!("rows({}~)", a.pari)),
+                Some(format!("trn({})", a.calc())),
+            )
+        }
+        "matident" => {
+            let n = size(rng, 6);
+            case(
+                format!("{n} v i"),
+                Some(format!("rows(matid({n}))")),
+                Some(format!("idn(1,{n})")),
+            )
+        }
+        // `f A` is the sum of the squared elements, PARI's `norml2`.
+        "matabssqr" => {
+            let (rows, cols) = (size(rng, 4), size(rng, 4));
+            let fractions = rng.chance(0.3);
+            let a = exact_matrix(rng, rows, cols, fractions);
+            case(
+                format!("{} f A", a.keys),
+                Some(format!("norml2({})", a.pari)),
+                Some(format!("abssqr({})", a.calc())),
+            )
+        }
+        // Gaussian integers. PARI writes `1 - 2*I` where the calculator and
+        // Calc write `(1, -2)`, so Calc is the reference here; the float
+        // cases check `V J` against PARI.
+        "matctrn" => {
+            let (rows, cols) = (size(rng, 4), size(rng, 4));
+            let cells: Vec<Vec<Cell>> = (0..rows)
+                .map(|_| {
+                    (0..cols)
+                        .map(|_| {
+                            let (re, im) = (rng.range(-9, 9), rng.range(-9, 9));
+                            (
+                                format!("({},{})", keys(re), keys(im)),
+                                format!("({re}+{im}*I)"),
+                            )
+                        })
+                        .collect()
+                })
+                .collect();
+            let a = Matrix::new(&cells);
+            case(
+                format!("{} V J", a.keys),
+                None,
+                Some(format!("ctrn({})", a.calc())),
+            )
+        }
+        // A composite modulus too: the inverse exists when the determinant
+        // is a unit.
+        "matmod" => {
+            let m = rng.range(2, 60);
+            let n = size(rng, 4);
+            let cells: Vec<Vec<Cell>> = (0..n)
+                .map(|_| {
+                    (0..n)
+                        .map(|_| {
+                            let a = rng.range(0, m - 1);
+                            (format!("{a}M{m}"), a.to_string())
+                        })
+                        .collect()
+                })
+                .collect();
+            let a = Matrix::new(&cells);
+            match rng.range(0, 2) {
+                0 => case(
+                    format!("{} V D", a.keys),
+                    Some(format!("lift(Mod(matdet({}),{m}))", a.pari)),
+                    None,
+                ),
+                1 => case(
+                    format!("{} &", a.keys),
+                    Some(format!("minv({},{m})", a.pari)),
+                    None,
+                ),
+                _ => {
+                    let k = rng.range(0, 10i128.pow(20));
+                    case(
+                        format!("{} {k} ^", a.keys),
+                        Some(format!("rows(lift(Mod({},{m})^{k}))", a.pari)),
+                        None,
+                    )
+                }
+            }
+        }
+        "cross" => {
+            let (a, b) = (exact_vector(rng, 3, false), exact_vector(rng, 3, false));
+            case(
+                format!("{} {} V C", a.keys, b.keys),
+                Some(format!("crs({},{})", a.pari, b.pari)),
+                Some(format!("cross({}, {})", a.calc(), b.calc())),
+            )
         }
         other => unreachable!("no generator for {other}"),
     }
 }
+
+/// A number as `ec -e` types it and as PARI/GP reads it.
+type Cell = (String, String);
+
+/// A matrix or a flat vector, written for each program.
+struct Matrix {
+    /// `[[1,_2],[3:4,5]]`
+    keys: String,
+    /// `[(1),(-2);(3/4),(5)]`, or `Mat([...])` for a single row.
+    pari: String,
+}
+
+impl Matrix {
+    fn new(rows: &[Vec<Cell>]) -> Self {
+        let list = |row: &[Cell], pick: fn(&Cell) -> &String| {
+            row.iter()
+                .map(|cell| pick(cell).as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let keys: Vec<String> = rows
+            .iter()
+            .map(|row| format!("[{}]", list(row, |cell| &cell.0)))
+            .collect();
+        let pari: Vec<String> = rows.iter().map(|row| list(row, |cell| &cell.1)).collect();
+        Self {
+            keys: format!("[{}]", keys.join(",")),
+            // `[1,2]` is a row vector to PARI/GP, so one row is spelled out.
+            pari: match pari.as_slice() {
+                [row] => format!("Mat([{row}])"),
+                rows => format!("[{}]", rows.join(";")),
+            },
+        }
+    }
+
+    fn flat(cells: &[Cell]) -> Self {
+        let list = |pick: fn(&Cell) -> &String| {
+            cells
+                .iter()
+                .map(|cell| pick(cell).as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        Self {
+            keys: format!("[{}]", list(|cell| &cell.0)),
+            pari: format!("[{}]", list(|cell| &cell.1)),
+        }
+    }
+
+    /// Calc reads the keys, with its own minus sign. Exact entries only.
+    fn calc(&self) -> String {
+        self.keys.replace('_', "-")
+    }
+}
+
+/// From 1 through `most`.
+fn size(rng: &mut Rng, most: i128) -> usize {
+    rng.range(1, most) as usize
+}
+
+/// A small integer or, when asked, a small fraction some of the time.
+/// Small numbers make a singular matrix turn up now and then.
+fn exact_cell(rng: &mut Rng, fractions: bool) -> Cell {
+    if fractions && rng.chance(0.5) {
+        loop {
+            let (n, d) = (rng.range(-20, 20), rng.range(2, 9));
+            if n != 0 && gcd(n.abs(), d) == 1 {
+                return (format!("{}:{d}", keys(n)), format!("({n}/{d})"));
+            }
+        }
+    }
+    let n = rng.range(-9, 9);
+    (keys(n), format!("({n})"))
+}
+
+fn exact_matrix(rng: &mut Rng, rows: usize, cols: usize, fractions: bool) -> Matrix {
+    let cells: Vec<Vec<Cell>> = (0..rows)
+        .map(|_| (0..cols).map(|_| exact_cell(rng, fractions)).collect())
+        .collect();
+    Matrix::new(&cells)
+}
+
+fn exact_vector(rng: &mut Rng, len: usize, fractions: bool) -> Matrix {
+    let cells: Vec<Cell> = (0..len).map(|_| exact_cell(rng, fractions)).collect();
+    Matrix::flat(&cells)
+}
+
+/// PARI/GP helpers for vectors and matrices. `rows` writes a matrix as a
+/// vector of rows, which is how the calculator shows one. `minv` is the
+/// inverse modulo `m`, by the adjugate, so a composite modulus works.
+/// `chkm` is `chk` for every element of a vector or matrix: each part is
+/// judged on its own, and an exact `0` has to be `0`.
+const MATRIX_PRELUDE: &str = "\
+rows(M) = vector(matsize(M)[1], i, M[i,]);
+minv(A,m) = { my(d=Mod(matdet(A),m)); if(gcd(lift(d),m)!=1, \"none\", rows(lift(matadjoint(A)*d^-1))) };
+crs(a,b) = [a[2]*b[3]-a[3]*b[2], a[3]*b[1]-a[1]*b[3], a[1]*b[2]-a[2]*b[1]];
+flat(x) = { my(t=type(x)); if(t==\"t_MAT\", x=rows(x); t=\"t_VEC\"); if(t==\"t_VEC\"||t==\"t_COL\", if(#x==0, [], concat(apply(flat, Vec(x)))), [x]) };
+outer(x) = { my(t=type(x)); if(t==\"t_MAT\", matsize(x)[1], if(t==\"t_VEC\"||t==\"t_COL\", #x, -1)) };
+nest(x) = { my(t=type(x)); if(t==\"t_MAT\", 2, if(t==\"t_VEC\"||t==\"t_COL\", 1 + if(#x, nest(x[1]), 0), 0)) };
+p1(v,r,p) = if(r==0, if(v==0, 0, 10^6), abs(v-r)/10.^(floor(log(abs(r))/log(10)) - p + 1));
+chkm(id,V,R,p) = { my(a=flat(V), b=flat(R), w=0); if(#a!=#b || outer(V)!=outer(R) || nest(V)!=nest(R), print(id, \" shape\"); return);
+  for(i=1,#a, w=max(w, max(p1(real(a[i]),real(b[i]),p), p1(imag(a[i]),imag(b[i]),p)))); print(id, \" ulp \", round(1000*w)); };
+";
 
 /// A vector typed for `ec -e`: `_` for a minus sign.
 fn typed_vec(list: &str) -> String {
     list.replace('-', "_")
 }
 
-/// Same number, allowing for how each program writes it. A vector compares
-/// without its spaces.
+/// `[5 mod 7, 6 mod 7]` as `[5, 6]`, which is how PARI/GP's `lift` has it.
+fn without_moduli(shown: &str) -> String {
+    let mut out = String::new();
+    let mut rest = shown;
+    while let Some(at) = rest.find(" mod ") {
+        out.push_str(&rest[..at]);
+        rest = rest[at + 5..].trim_start_matches(|c: char| c.is_ascii_digit());
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Brackets, commas, and the numbers between them.
+fn pieces(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (at, c) in text.char_indices() {
+        if matches!(c, '[' | ']' | ',' | '(' | ')') {
+            if start < at {
+                out.push(&text[start..at]);
+            }
+            out.push(&text[at..at + 1]);
+            start = at + 1;
+        }
+    }
+    if start < text.len() {
+        out.push(&text[start..]);
+    }
+    out
+}
+
+/// Two vectors, element by element. An exact element has to be written the
+/// same way. A float may differ past the ninth digit: Emacs Calc inverts a
+/// small matrix by multiplying with a rounded `1 / det`, so
+/// `inv([[4, -9], [-9, -7]])` has `0.0825688073395` where `9 / 109` is
+/// `0.0825688073394`.
+fn same_elements(ec: &str, reference: &str) -> bool {
+    // The brackets and commas must match too, so a flat vector is not taken
+    // for a one-column matrix with the same numbers.
+    let skeleton =
+        |text: &str| -> String { text.chars().filter(|c| "[],;".contains(*c)).collect() };
+    if skeleton(ec) != skeleton(reference) {
+        return false;
+    }
+    let (ec, reference) = (pieces(ec), pieces(reference));
+    let float = |text: &str| text.contains(['.', 'e']);
+    ec.len() == reference.len()
+        && ec.iter().zip(&reference).all(|(a, b)| {
+            a == b
+                || (float(a)
+                    && float(b)
+                    && matches!(
+                        (a.parse::<f64>(), b.parse::<f64>()),
+                        (Ok(x), Ok(y)) if (x - y).abs() <= 1e-9 * y.abs().max(1e-300)
+                    ))
+        })
+}
+
+/// Same number, allowing for how each program writes it. A vector or a
+/// matrix compares without its spaces and moduli, with `/` for a fraction.
 fn same_exact(ec: &str, reference: &str) -> bool {
     if ec.starts_with('[') {
-        return ec.replace(' ', "") == reference.replace(' ', "");
+        let plain = |text: &str| text.replace(' ', "").replace(':', "/");
+        let (ec, reference) = (plain(&without_moduli(ec)), plain(reference));
+        return ec == reference || same_elements(&ec, &reference);
     }
     // A modulo form prints as `a mod m`. PARI's `lift` gives `a`.
     let ec = ec.split(" mod ").next().unwrap_or(ec);
@@ -591,6 +1013,7 @@ fn exact_results_match_pari_and_calc() {
     let results = run_ec(&programs);
 
     let mut script = String::from("default(parisizemax, \"1G\");\n");
+    script.push_str(MATRIX_PRELUDE);
     for (index, case) in cases.iter().enumerate() {
         if let Some(pari) = &case.pari {
             writeln!(
@@ -811,6 +1234,8 @@ struct FloatCase {
     name: &'static str,
     program: String,
     pari: String,
+    /// A vector or matrix result, judged element by element by `chkm`.
+    matrix: bool,
 }
 
 /// `(name, keys, PARI template, angle goes in, angle comes out)`.
@@ -854,12 +1279,173 @@ const BINARY: &[(&str, &str, &str)] = &[
     ("root", "I ^", "nrt(X,Y)"),
 ];
 
+/// Matrix operations on floats. The determinant, the inverse, and `/` are
+/// exact before the one rounding, so an ill-conditioned matrix is held to
+/// the same 0.75 ulp as everything else. PARI/GP gets the entries as exact
+/// rationals, so its answer is exact too.
+const MATRIX: &[&str] = &[
+    "matmul",
+    "matvec",
+    "matdet",
+    "matinv",
+    "matsolve",
+    "matpow",
+    "mattrace",
+    "cross",
+    "matctrn",
+    "matnorm",
+    "matabssqr",
+    "matbig",
+];
+
+fn float_matrix(numbers: &mut Numbers, rows: usize, cols: usize) -> Matrix {
+    let cells: Vec<Vec<Cell>> = (0..rows)
+        .map(|_| (0..cols).map(|_| numbers.argument(true, false)).collect())
+        .collect();
+    Matrix::new(&cells)
+}
+
+fn float_vector(numbers: &mut Numbers, len: usize) -> Matrix {
+    let cells: Vec<Cell> = (0..len).map(|_| numbers.argument(true, false)).collect();
+    Matrix::flat(&cells)
+}
+
+fn matrix_case(numbers: &mut Numbers, name: &'static str) -> FloatCase {
+    let prec = numbers.prec;
+    let (program, pari) = match name {
+        "matmul" => {
+            let (r, k, c) = (
+                size(numbers.rng, 4),
+                size(numbers.rng, 4),
+                size(numbers.rng, 4),
+            );
+            let (a, b) = (float_matrix(numbers, r, k), float_matrix(numbers, k, c));
+            (
+                format!("{} {} *", a.keys, b.keys),
+                format!("{}*{}", a.pari, b.pari),
+            )
+        }
+        "matvec" => {
+            let (r, k) = (size(numbers.rng, 4), size(numbers.rng, 3) + 1);
+            let a = float_matrix(numbers, r, k);
+            if numbers.rng.chance(0.5) {
+                let v = float_vector(numbers, k);
+                (
+                    format!("{} {} *", a.keys, v.keys),
+                    format!("{}*{}~", a.pari, v.pari),
+                )
+            } else {
+                let v = float_vector(numbers, r);
+                (
+                    format!("{} {} *", v.keys, a.keys),
+                    format!("{}*{}", v.pari, a.pari),
+                )
+            }
+        }
+        "matdet" => {
+            let n = size(numbers.rng, 5);
+            let a = float_matrix(numbers, n, n);
+            (format!("{} V D", a.keys), format!("matdet({})", a.pari))
+        }
+        "matinv" => {
+            let n = size(numbers.rng, 4);
+            let a = float_matrix(numbers, n, n);
+            (format!("{} &", a.keys), format!("{}^(-1)", a.pari))
+        }
+        "matsolve" => {
+            let n = size(numbers.rng, 4);
+            let a = float_matrix(numbers, n, n);
+            if numbers.rng.chance(0.5) {
+                let b = float_vector(numbers, n);
+                (
+                    format!("{} {} /", b.keys, a.keys),
+                    format!("matsolve({},{}~)", a.pari, b.pari),
+                )
+            } else {
+                let cols = size(numbers.rng, 3);
+                let b = float_matrix(numbers, n, cols);
+                (
+                    format!("{} {} /", b.keys, a.keys),
+                    format!("{}^(-1)*{}", a.pari, b.pari),
+                )
+            }
+        }
+        "matpow" => {
+            let n = size(numbers.rng, 3);
+            let k = numbers.rng.range(-4, 9);
+            let a = float_matrix(numbers, n, n);
+            (
+                format!("{} {} ^", a.keys, keys(k)),
+                format!("{}^({k})", a.pari),
+            )
+        }
+        "mattrace" => {
+            let n = size(numbers.rng, 5);
+            let a = float_matrix(numbers, n, n);
+            (format!("{} V T", a.keys), format!("trace({})", a.pari))
+        }
+        "cross" => {
+            let (a, b) = (float_vector(numbers, 3), float_vector(numbers, 3));
+            (
+                format!("{} {} V C", a.keys, b.keys),
+                format!("crs({},{})", a.pari, b.pari),
+            )
+        }
+        "matctrn" => {
+            let (rows, cols) = (size(numbers.rng, 4), size(numbers.rng, 4));
+            let a = float_matrix(numbers, rows, cols);
+            (format!("{} V J", a.keys), format!("conj({}~)", a.pari))
+        }
+        "matnorm" => {
+            let (rows, cols) = (size(numbers.rng, 4), size(numbers.rng, 4));
+            let a = float_matrix(numbers, rows, cols);
+            (format!("{} A", a.keys), format!("sqrt(norml2({}))", a.pari))
+        }
+        "matabssqr" => {
+            let (rows, cols) = (size(numbers.rng, 4), size(numbers.rng, 4));
+            let a = float_matrix(numbers, rows, cols);
+            (format!("{} f A", a.keys), format!("norml2({})", a.pari))
+        }
+        // 6 by 6 to 9 by 9, past the 5 by 5 of the other cases, so the
+        // minors grow and a scaling slip would show. PARI/GP inverts these
+        // exactly, as rationals; 12 by 12 made the run take 25 s.
+        "matbig" => {
+            let n = numbers.rng.range(6, 9) as usize;
+            let a = float_matrix(numbers, n, n);
+            match numbers.rng.range(0, 2) {
+                0 => (format!("{} V D", a.keys), format!("matdet({})", a.pari)),
+                1 => (format!("{} &", a.keys), format!("{}^(-1)", a.pari)),
+                _ => {
+                    let b = float_vector(numbers, n);
+                    (
+                        format!("{} {} /", b.keys, a.keys),
+                        format!("matsolve({},{}~)", a.pari, b.pari),
+                    )
+                }
+            }
+        }
+        other => unreachable!("no matrix case for {other}"),
+    };
+    FloatCase {
+        name,
+        program: format!("{prec} p {program}"),
+        pari,
+        matrix: true,
+    }
+}
+
 fn float_case(numbers: &mut Numbers) -> FloatCase {
     let prec = numbers.prec;
     let degrees = numbers.rng.chance(0.4);
     let mode = if degrees { "" } else { "m r " };
-    let total = UNARY.len() + BINARY.len();
+    let total = UNARY.len() + BINARY.len() + MATRIX.len();
     let choice = numbers.rng.range(0, total as i128 - 1) as usize;
+    if let Some(name) = choice
+        .checked_sub(UNARY.len() + BINARY.len())
+        .and_then(|index| MATRIX.get(index))
+    {
+        return matrix_case(numbers, name);
+    }
 
     if let Some(&(name, key, template, angle_in, angle_out)) = UNARY.get(choice) {
         let (mut typed, mut pari) = numbers.argument(name != "fact", false);
@@ -883,6 +1469,7 @@ fn float_case(numbers: &mut Numbers) -> FloatCase {
             name,
             program: format!("{prec} p {mode}{typed} {key}"),
             pari: expected,
+            matrix: false,
         };
     }
 
@@ -938,20 +1525,25 @@ fn float_case(numbers: &mut Numbers) -> FloatCase {
         name,
         program: format!("{prec} p {mode}{x_keys} {y_keys} {key}"),
         pari: expected,
+        matrix: false,
     }
 }
 
-/// What the screen shows, as a PARI/GP literal.
+/// What the screen shows, as a PARI/GP literal. A matrix stays a vector of
+/// rows, and every `(re, im)` becomes `re + im*I`.
 fn as_pari(shown: &str) -> String {
     let shown = shown.replace(':', "/");
-    match shown
-        .strip_prefix('(')
-        .and_then(|rest| rest.strip_suffix(')'))
-        .and_then(|inner| inner.split_once(", "))
-    {
-        Some((re, im)) => format!("(({re})+({im})*I)"),
-        None => format!("({shown})"),
+    let mut out = String::new();
+    let mut rest = shown.as_str();
+    while let Some(open) = rest.find('(') {
+        let close = open + rest[open..].find(')').expect("a complex number is closed");
+        let (re, im) = rest[open + 1..close]
+            .split_once(", ")
+            .expect("a complex number has two parts");
+        write!(out, "{}(({re})+({im})*I)", &rest[..open]).unwrap();
+        rest = &rest[close + 1..];
     }
+    format!("({out}{rest})")
 }
 
 /// PARI/GP helpers. `chk` prints the error of a result in thousandths of a
@@ -1002,12 +1594,14 @@ fn float_run(
     let results = run_ec(&programs);
 
     let mut script = pari_prelude(prec);
+    script.push_str(MATRIX_PRELUDE);
     for (index, (case, result)) in cases.iter().zip(&results).enumerate() {
         let pari = &case.pari;
+        let check = if case.matrix { "chkm" } else { "chk" };
         match result {
             Ok(shown) => writeln!(
                 script,
-                "iferr(chk({index},{},{pari},{prec}), E, print({index}, \" refused\"));",
+                "iferr({check}({index},{},{pari},{prec}), E, print({index}, \" refused\"));",
                 as_pari(shown)
             ),
             Err(_) => writeln!(
@@ -1039,13 +1633,21 @@ fn float_run(
                 Verdict::Ulp(thousandths / 1000.0)
             }
             (Some("dropped"), _) => Verdict::Dropped,
+            (Some("shape"), _) => Verdict::Wrong("PARI/GP has another shape".to_owned()),
+            // PARI/GP refuses a singular matrix, and so must the calculator.
+            (Some("refused"), Ok(_)) if cases[index].matrix => {
+                Verdict::Wrong("PARI/GP refuses it".to_owned())
+            }
             (Some("refused"), _) => Verdict::Skipped,
             (Some("nonzero"), _) => Verdict::Wrong("PARI/GP has exactly 0".to_owned()),
             // The calculator refused and PARI/GP has a value. An exact
             // power that would not fit is an overflow by design, and an
             // exact 90 degrees has no tangent where PARI has round-off.
+            // Neither excuses a matrix.
             (Some("value"), Err(message))
-                if message.contains("overflow") || message.contains("tangent is undefined") =>
+                if !cases[index].matrix
+                    && (message.contains("overflow")
+                        || message.contains("tangent is undefined")) =>
             {
                 Verdict::Skipped
             }
@@ -1075,6 +1677,7 @@ fn float_results_match_pari() {
     let mut rng = Rng::new(seed());
     let mut failures = Vec::new();
     let (mut checked, mut dropped, mut skipped, mut worst) = (0usize, 0usize, 0usize, 0.0f64);
+    let (mut matrices, mut worst_matrix) = (0usize, 0.0f64);
     for (prec, count, complex) in runs {
         let (cases, verdicts) = float_run(prec, scaled(count), complex, &mut rng);
         for (case, verdict) in cases.iter().zip(verdicts) {
@@ -1082,6 +1685,10 @@ fn float_results_match_pari() {
                 Verdict::Ulp(error) => {
                     checked += 1;
                     worst = worst.max(error);
+                    if case.matrix {
+                        matrices += 1;
+                        worst_matrix = worst_matrix.max(error);
+                    }
                     if error > MAX_ULP {
                         failures.push(format!(
                             "{}: `{}` is {error:.3} ulp from PARI/GP `{}`",
@@ -1101,6 +1708,7 @@ fn float_results_match_pari() {
         "float: {checked} results checked, worst {worst:.3} ulp, {dropped} with a tiny part \
          dropped, {skipped} refused by PARI/GP or too large"
     );
+    println!("float: {matrices} of them vectors and matrices, worst {worst_matrix:.3} ulp");
     assert!(checked > 1000, "PARI/GP answered too little");
     report("float results differ", &failures);
 }

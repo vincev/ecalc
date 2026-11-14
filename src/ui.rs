@@ -810,7 +810,8 @@ fn draw_help(buf: &mut Buffer, window: Rect, above: Rect, app: &App, palette: Pa
         return;
     }
     let columns = app.help_grid();
-    let grid_rows = columns.iter().map(|column| column.len()).max().unwrap_or(0) as u16;
+    // Every page gets the box of the fullest one.
+    let grid_rows = app.help_grid_rows() as u16;
     let Some(dialog) = Dialog::open(buf, area, grid_rows, width, palette) else {
         return;
     };
@@ -2121,7 +2122,7 @@ mod tests {
         let buffer = render(&mut app, 80, 40);
         let rows = lines(&buffer);
         assert!(rows.iter().any(|row| row.contains("conj")));
-        assert!(rows.iter().any(|row| row.contains("totient")));
+        assert!(rows.iter().any(|row| row.contains("antilog")));
         assert!(rows.iter().any(|row| row.contains("Shortcuts")));
         assert!(rows.iter().any(|row| row.contains("esc close")));
         let frame_y = rows
@@ -2268,29 +2269,42 @@ mod tests {
     }
 
     #[test]
+    fn shortcut_box_keeps_its_size_on_every_page() {
+        // The top and bottom border rows and the box's columns, per page.
+        let frame = |app: &mut App, width: u16, height: u16| {
+            let rows = lines(&render(app, width, height));
+            let top = rows
+                .iter()
+                .position(|row| row.contains("Shortcuts"))
+                .unwrap();
+            let bottom = rows.iter().rposition(|row| row.contains('┘')).unwrap();
+            let left = rows[top].chars().position(|c| c == '┌').unwrap();
+            let right = rows[top].chars().position(|c| c == '┐').unwrap();
+            (top, bottom, left, right)
+        };
+        for (width, height) in [(90, 40), (80, 24)] {
+            let mut app = App::new();
+            app.keys("?");
+            let first = frame(&mut app, width, height);
+            for _ in 1..app.help_pages() {
+                app.press(Key::Tab);
+                assert_eq!(frame(&mut app, width, height), first, "{width}x{height}");
+            }
+        }
+    }
+
+    #[test]
     fn shortcut_list_pages_in_three_columns() {
         let mut app = App::new();
         app.keys("?");
         let rows = lines(&render(&mut app, 90, 40));
-        assert!(rows.iter().any(|row| row.contains("1/2")));
+        assert!(rows.iter().any(|row| row.contains("1/3")));
         assert!(
-            rows.iter()
-                .any(|row| { row.contains("ret") && row.contains("sqrt") && row.contains("fact") }),
+            rows.iter().any(|row| {
+                row.contains("ret") && row.contains("inverse") && row.contains("pi")
+            }),
             "three columns share the first row"
         );
-        let stirling1 = rows
-            .iter()
-            .position(|row| row.contains("stirling1"))
-            .unwrap();
-        let stirling2 = rows
-            .iter()
-            .position(|row| row.contains("stirling2"))
-            .unwrap();
-        assert_eq!(stirling2, stirling1 + 1, "Stirling numbers stay together");
-        let stirling = rows.iter().find(|row| row.contains("stirling2")).unwrap();
-        let label_end = stirling.find("stirling2").unwrap() + "stirling2".len();
-        let border = stirling.rfind('│').unwrap();
-        assert_eq!(&stirling[label_end..border], "  ");
         assert!(rows.iter().any(|row| row.contains("tab next")));
         let footer = rows.iter().find(|row| row.contains("esc close")).unwrap();
         assert!(!footer.contains("quit"));
@@ -2300,18 +2314,40 @@ mod tests {
         app.press(Key::Tab);
         assert!(app.help_open());
         let rows = lines(&render(&mut app, 90, 40));
-        assert!(rows.iter().any(|row| row.contains("2/2")));
-        assert!(rows.iter().any(|row| row.contains("antilog")));
-        assert!(rows.iter().any(|row| row.contains("fractions")));
+        assert!(rows.iter().any(|row| row.contains("2/3")));
+        let stirling1 = rows
+            .iter()
+            .position(|row| row.contains("stirling1"))
+            .unwrap();
+        let stirling2 = rows
+            .iter()
+            .position(|row| row.contains("stirling2"))
+            .unwrap();
+        assert_eq!(stirling2, stirling1 + 1, "Stirling numbers stay together");
+        // The longest label of the last column is not cut at the border.
+        let row = rows.iter().find(|row| row.contains("transpose")).unwrap();
+        let label_end = row.find("transpose").unwrap() + "transpose".len();
+        let border = row.rfind('│').unwrap();
+        assert!(row[label_end..border].chars().all(|c| c == ' '));
+        assert!(rows.iter().any(|row| row.contains("identity")));
+        assert!(rows.iter().any(|row| row.contains("shuffle")));
+
+        // The third page: modes and display.
+        app.press(Key::Tab);
+        let text = screen(&mut app, 90, 40);
+        assert!(text.contains("3/3"));
+        assert!(text.contains("fractions"));
+        assert!(text.contains("radix"));
 
         app.press(Key::ShiftTab);
+        app.press(Key::ShiftTab);
         let text = screen(&mut app, 90, 40);
-        assert!(text.contains("1/2"));
+        assert!(text.contains("1/3"));
         assert!(text.contains("undo"));
 
         app.press(Key::ShiftTab);
         let text = screen(&mut app, 90, 40);
-        assert!(text.contains("2/2"));
+        assert!(text.contains("3/3"));
 
         app.press(Key::Char('x'));
         assert!(!app.help_open());

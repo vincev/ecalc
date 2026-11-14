@@ -725,9 +725,10 @@ impl Entry {
                 // RET reports the overflow.
                 matches!(value::mod_integer(&v), Ok(_) | Err(CalcError::Overflow))
             });
+        // ` mod ` changes no bracket, paren, or element, so the scan
+        // stands. A rescan here made typing a matrix of forms quadratic.
         if integer {
             self.text.push_str(MOD_SEPARATOR);
-            self.rescan();
         }
         integer
     }
@@ -741,7 +742,6 @@ impl Entry {
     pub fn fill_modulus(&mut self, modulus: &str) {
         if self.awaits_modulus() {
             self.text.push_str(modulus);
-            self.rescan();
         }
     }
 

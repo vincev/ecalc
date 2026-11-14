@@ -14,15 +14,17 @@
 //!
 //! All four go element by element through a vector (`vector::map1` and
 //! `vector::map2`), so a new operation works on vectors without more code.
-//! The few that mean something else for a whole vector (`*`, `/`, `^`, `A`,
-//! `I Q`, `f A`, `&`) use `unary_whole` and `binop_whole` and the functions
-//! in `vector.rs`. `V M` makes those go element by element too, and `V R`
-//! folds a binary operation over the top vector.
+//! The few that mean something else for a whole vector or matrix (`*`, `/`,
+//! `^`, `A`, `I Q`, `f A`, `&`) use `unary_whole` and `binop_whole` and the
+//! functions in `vector.rs` and `matrix.rs`. `V M` makes those go element by
+//! element too, and `V R` folds a binary operation over the top vector.
 
 use crate::comb;
 use crate::error::CalcError;
 use crate::float::{MAX_PRECISION, MIN_PRECISION};
+use crate::matrix;
 use crate::radix::{self, MAX_RADIX, MAX_WORD_SIZE, MIN_RADIX, MIN_WORD_SIZE};
+use crate::random;
 use crate::value::{self, AngleMode, Mode, NOT_FOR_MOD, Value};
 use crate::vector;
 use num_bigint::BigInt;
@@ -90,6 +92,8 @@ pub struct Engine {
     label: String,
     /// `V M` or `V R` for the command now running.
     vector_mode: Option<VectorMode>,
+    /// The last limit `k r` or `k h` used. `k a` draws from it again.
+    random_limit: Option<Value>,
     /// What `V R` of an empty vector gives for the operation now running:
     /// `0` for `+` and `-`, `1` for `*`, as in Calc. Other operations have none.
     reduce_identity: Option<i64>,
@@ -114,6 +118,7 @@ impl Engine {
             trail_bytes: 0,
             label: String::new(),
             vector_mode: None,
+            random_limit: None,
             reduce_identity: None,
         }
     }
@@ -381,7 +386,8 @@ impl Engine {
         self.reduce_identity = None;
     }
 
-    /// Two vectors give the dot product. `V M *` multiplies element by element.
+    /// Two vectors give the dot product, and matrices the matrix product.
+    /// `V M *` multiplies element by element.
     pub fn mul(&mut self) {
         self.reduce_identity = Some(1);
         self.mul_inner();
@@ -449,26 +455,54 @@ impl Engine {
         self.binop(comb::stirling_second);
     }
 
-    /// `y` is on top and `x` is under it. Push `a`, `b`, and `g` so `g` is on top and `a*x + b*y = g`.
+    /// `k E`. `y` is on top and `x` is under it. The result is `[g, a, b]`
+    /// with `a*x + b*y = g`, as Calc's `egcd`: `35 15 k E` is `[5, 1, -2]`.
     pub fn egcd(&mut self) {
-        let n = self.stack.len();
-        if n < 2 {
-            self.fail(CalcError::StackUnderflow);
-            return;
+        self.binop(|x, y, _| {
+            let (a, b, g) = comb::extended_gcd(x, y)?;
+            Ok(Value::Vector([g, a, b].map(Value::from_int).to_vec()))
+        });
+    }
+
+    /// `k r`. A random number below the limit on top, as Calc's `random`:
+    /// an integer of `[0, m)`, a float of `[0, x)`, a normal sample for `0`,
+    /// or an element of a vector.
+    pub fn random(&mut self) {
+        let limit = self.top().cloned();
+        self.unary_whole(random::random);
+        if !self.is_error() {
+            self.random_limit = limit;
         }
-        let outcome = comb::extended_gcd(&self.stack[n - 2], &self.stack[n - 1]);
-        match outcome {
-            Ok((a, b, g)) => {
+    }
+
+    /// `k a`. Another random number from the last limit, pushed. Before any
+    /// `k r` the limit is `1.`, as in Calc.
+    pub fn random_again(&mut self) {
+        let limit = self.random_limit.clone().unwrap_or_else(|| {
+            Value::real(crate::value::Real::Float(crate::float::DecFloat::one(
+                self.mode.prec,
+            )))
+        });
+        match random::random(&limit, &self.mode) {
+            Ok(value) => {
                 self.checkpoint();
-                self.stack.pop();
-                self.stack.pop();
-                for value in [a, b, g].map(Value::from_int) {
-                    self.record(&value);
-                    self.stack.push(value);
-                }
+                self.record(&value);
+                self.stack.push(value);
                 self.succeed();
             }
             Err(err) => self.fail(err),
+        }
+    }
+
+    /// `k h`. The count on top, the limit under it: that many values of
+    /// the limit without repeats, in random order, as Calc's `shuffle`.
+    /// `10 10 k h` is a random order of `0` to `9`.
+    pub fn shuffle(&mut self) {
+        let n = self.stack.len();
+        let limit = (n >= 2).then(|| self.stack[n - 2].clone());
+        self.binop_whole(random::shuffle);
+        if !self.is_error() {
+            self.random_limit = limit;
         }
     }
 
@@ -623,6 +657,44 @@ impl Engine {
             }
             Ok(Value::Vector((1..=n).map(Value::from_int).collect()))
         });
+    }
+
+    /// `v t`. Transpose the matrix on top. A flat vector becomes a column.
+    pub fn transpose(&mut self) {
+        self.unary_whole(|v, _| matrix::transpose(v));
+    }
+
+    /// `V J`. Transpose and conjugate every element.
+    pub fn conj_transpose(&mut self) {
+        self.unary_whole(|v, _| {
+            vector::map1(&matrix::transpose(v)?, &|x| {
+                if x.is_mod() {
+                    Err(NOT_FOR_MOD)
+                } else {
+                    Ok(value::conj(x))
+                }
+            })
+        });
+    }
+
+    /// `V D`. Replace the square matrix on top with its determinant.
+    pub fn determinant(&mut self) {
+        self.unary_whole(matrix::det);
+    }
+
+    /// `V T`. Replace the square matrix on top with the sum of its diagonal.
+    pub fn trace(&mut self) {
+        self.unary_whole(matrix::trace);
+    }
+
+    /// `v i`. Replace a count `n` with the identity matrix of that order.
+    pub fn identity(&mut self) {
+        self.unary_whole(|v, _| matrix::identity(v));
+    }
+
+    /// `V C`. The cross product of two vectors of three numbers.
+    pub fn cross(&mut self) {
+        self.binop_whole(matrix::cross);
     }
 
     /// `v l`. Replace the top vector with its number of elements.

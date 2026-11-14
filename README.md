@@ -37,7 +37,7 @@ A value wider than the screen stays on one row, as in Emacs: `$` marks
 digits hidden on either side. Left and Right scroll it, and `C-a` and `C-e`
 (or Home and End) jump to the start and the end.
 
-### Vectors
+### Vectors and matrices
 
 `[` starts a vector and `]` ends it. Commas or spaces separate the
 elements, which can be any number, a complex, a modulo form, or another
@@ -67,7 +67,49 @@ Two one-shot prefixes change the next key:
 
 `v p` packs values from the stack into a vector (`1 2 3 3 v p` is
 `[1, 2, 3]`), `v u` unpacks one, `v x` builds `[1, 2, ..., n]`, and `v l`
-is the length. Matrices are not supported.
+is the length.
+
+A vector of rows of one length is a matrix, and `* / ^ &` take it whole, as
+in Calc:
+
+```
+[[1, 2], [3, 4]] [[5, 6], [7, 8]] *   -> [[19, 22], [43, 50]]
+[[1, 2], [3, 4]] [5, 6] *             -> [17, 39]
+[[1, 2], [3, 4]] &                    -> [[-2, 1], [1.5, -0.5]]
+[5, 6] [[1, 2], [3, 4]] /             -> [-4, 4.5]
+[[1, 2], [3, 4]] 10 ^                 -> [[4783807, 6972050], [10458075, 15241882]]
+[[1, 2], [3, 4]] V D                  -> -2
+[[2M7, 3M7], [1M7, 4M7]] &            -> [[5 mod 7, 5 mod 7], [4 mod 7, 6 mod 7]]
+```
+
+`b A /` solves `A x = b`. `V D` is the determinant, `V T` the trace, `v t`
+the transpose, `V J` the conjugate transpose, `v i` the identity matrix
+(`3 v i`), and `V C` the cross product of two 3-vectors. `V M` still maps:
+`[[1, 2], [3, 4]] 2 V M ^` is `[[1, 4], [9, 16]]`.
+
+The determinant, the inverse, and `/` are worked out exactly and rounded
+once, floats included, so an ill-conditioned matrix loses no digits and a
+matrix is singular only when its determinant is exactly zero. As with `/`,
+a result that is not whole is a float unless fraction mode is on: `m f`
+first makes the inverse above `[[-2, 1], [3:2, -1:2]]`. These keys take
+matrices up to 100 by 100; past what a few seconds can do, the answer is
+`overflow`.
+
+### Random numbers
+
+`k r` replaces a limit with a random number below it, as Calc's `random`:
+
+```
+6 k r           -> an integer from 0 to 5
+2.5 k r         -> a float of [0, 2.5), every digit random
+0 k r           -> a normal sample, mean 0 and spread 1
+[7, 8, 9] k r   -> one of the elements
+```
+
+`k a` draws again from the last limit, and `k h` picks without repeats:
+`49 6 k h` is six numbers of 0 to 48 in random order, and `10 10 k h` is a
+random order of 0 to 9. The numbers come from a cryptographic generator
+seeded by the system, and every integer of a range is exactly as likely.
 
 ### Shell
 
@@ -97,16 +139,22 @@ prints the message on stderr and exits 1.
   inverses stay reduced.
 - Vectors, nested up to 100 deep, with element-by-element arithmetic, the dot
   product, map (`V M`), and reduce (`V R`).
+- Matrices of integers, fractions, floats, complex numbers, or modulo
+  forms: product, inverse, integer powers, linear systems, determinant,
+  trace, transpose, and the cross product.
 - Precision in significant digits, 12 by default.
 - Powers, roots, floor, integer division, and remainder. `12 \ 12:7` is `7`.
 - Sine, cosine, and tangent, with inverses and hyperbolic forms. Angles
   start in degrees.
 - Logarithms, exponentials, factorial, combinations, permutations, and
   Stirling numbers of the first and second kind.
-- Gcd, lcm, the extended gcd, a modular inverse, a prime test (`1` or `0`,
+- Gcd, lcm, the extended gcd (`35 15 k E` is `[5, 1, -2]`, as Calc's
+  `egcd`), a modular inverse, a prime test (`1` or `0`,
   as Calc's `prime`), prime factors as a vector (`2023 k f` is
   `[7, 17, 17]`), and Euler's totient. The next and previous prime, and the nth
   prime (`1000000 H k n` is `15485863`).
+- Random numbers: integers of a range, floats, normal samples, a random
+  element, and picks without repeats.
 - Stored variables, and the HP 35s physics constants, plus Earth, the Moon,
   the Sun, and the astronomical unit.
 - Display and entry in any radix from 2 to 36, with two's complement for a

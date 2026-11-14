@@ -886,7 +886,7 @@ const POW10_CACHED: usize = 4096;
 
 /// `10^n`. Every rounding asks for a few of these, and raising 10 afresh
 /// each time was most of the cost of a 1000-digit `exp`.
-fn pow10(n: u32) -> BigInt {
+pub(crate) fn pow10(n: u32) -> BigInt {
     thread_local! {
         static TABLE: std::cell::RefCell<Vec<BigInt>> =
             std::cell::RefCell::new(vec![BigInt::one()]);

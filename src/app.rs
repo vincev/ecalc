@@ -312,6 +312,17 @@ impl App {
             .max(1)
     }
 
+    /// Rows the shortcut box holds on every page: those of the first,
+    /// which is the fullest, so turning to a short last page does not
+    /// shrink the box.
+    pub(crate) fn help_grid_rows(&self) -> usize {
+        crate::docs::help_columns(0, self.help_cols, self.help_rows)
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0)
+    }
+
     pub(crate) fn help_grid(&self) -> Vec<Vec<(&'static str, &'static str)>> {
         crate::docs::help_columns(self.help_page(), self.help_cols, self.help_rows)
     }
@@ -1118,10 +1129,20 @@ impl App {
                 self.run(|engine| engine.store(&format!("q{d}"), false));
             }
             (Prefix::T, 'y') => self.open_trail(),
+            (Prefix::K, 'r') => self.run(Engine::random),
+            (Prefix::K, 'a') => self.run(Engine::random_again),
+            (Prefix::K, 'h') => self.run(Engine::shuffle),
             (Prefix::V, 'p') => self.run(Engine::pack),
             (Prefix::V, 'u') => self.run(Engine::unpack),
             (Prefix::V, 'x') => self.run(Engine::index),
             (Prefix::V, 'l') => self.run(Engine::length),
+            (Prefix::V, 't') => self.run(Engine::transpose),
+            (Prefix::V, 'J') => self.run(Engine::conj_transpose),
+            (Prefix::V, 'D') => self.run(Engine::determinant),
+            (Prefix::V, 'T') => self.run(Engine::trace),
+            (Prefix::V, 'i') => self.run(Engine::identity),
+            (Prefix::V, 'C') => self.run(Engine::cross),
+            (Prefix::V, '&') => self.run(Engine::reciprocal),
             (Prefix::V, 'M') => {
                 self.vector_mode = Some(VectorMode::Map);
                 self.engine.clear_message();
@@ -1945,7 +1966,8 @@ mod tests {
 
         let mut app = App::new();
         app.keys("35\n15\nkE");
-        assert_eq!(app.engine().stack_lines(), ["1", "-2", "5"]);
+        // As Calc's `egcd`: `[g, a, b]` with `a*35 + b*15 = g`.
+        assert_eq!(app.engine().stack_lines(), ["[5, 1, -2]"]);
         app.keys("u");
         assert_eq!(app.engine().stack_lines(), ["35", "15"]);
 
@@ -2249,10 +2271,8 @@ mod tests {
             ("2 [1,2] /", "not for vectors"),
             ("[1,2] &", "not for vectors"),
             ("[1,2] [1,2,3] +", "vectors need the same length"),
-            (
-                "[[1,2],[3,4]] [[1,2],[3,4]] *",
-                "matrices are not supported",
-            ),
+            ("[[1,2],[3]] [1,2] *", "not a matrix"),
+            ("[1,[2,3]] 2 ^", "not a matrix"),
             ("[1,2] _1 ^", "a vector has no negative power"),
             ("[1,2] [1,2] ^", "not for vectors"),
             ("[1,2] V R Q", "V R needs a binary operation"),
@@ -2273,6 +2293,590 @@ mod tests {
         let mut app = App::new();
         app.keys("[1,2]\n[1,2,3]\n+");
         assert_eq!(app.engine().stack_lines(), ["[1, 2]", "[1, 2, 3]"]);
+    }
+
+    /// `(keys, top of the stack)` for `ec -e`.
+    fn check(cases: &[(&str, &str)]) {
+        for (keys, expected) in cases {
+            assert_eq!(eval(keys).as_deref(), Ok(*expected), "{keys}");
+        }
+    }
+
+    /// `(keys, message)` for `ec -e`.
+    fn check_errors(cases: &[(&str, &str)]) {
+        for (keys, message) in cases {
+            let got = eval(keys).map_err(|err| err.to_string());
+            assert_eq!(got, Err(message.to_string()), "{keys}");
+        }
+    }
+
+    #[test]
+    fn matrix_products_follow_calc() {
+        check(&[
+            ("[[1,2],[3,4]] [[5,6],[7,8]] *", "[[19, 22], [43, 50]]"),
+            (
+                "[[1,2,3],[4,5,6]] [[1,2],[3,4],[5,6]] *",
+                "[[22, 28], [49, 64]]",
+            ),
+            ("[[1,2],[3,4]] [[1,2]] v t *", "[[5], [11]]"),
+            // A flat vector is a column on the right and a row on the left.
+            ("[[1,2],[3,4]] [5,6] *", "[17, 39]"),
+            ("[5,6] [[1,2],[3,4]] *", "[23, 34]"),
+            ("[[1,2]] [3,4] *", "[11]"),
+            ("[3,4] [[1],[2]] *", "[11]"),
+            ("[3] [[1,2]] *", "[3, 6]"),
+            // Calc: a one-column matrix times a flat vector is the outer product.
+            ("[[1],[2]] [3,4] *", "[[3, 4], [6, 8]]"),
+            ("[[2]] [3] *", "[[6]]"),
+            // A number still scales, and `+ -` still go element by element.
+            ("[[1,2],[3,4]] 2 *", "[[2, 4], [6, 8]]"),
+            ("2 [[1,2],[3,4]] *", "[[2, 4], [6, 8]]"),
+            ("[[1,2],[3,4]] 2 v i -", "[[0, 2], [3, 3]]"),
+            ("[[1,2],[3,4]] I Q", "[[7, 10], [15, 22]]"),
+            // Fractions, floats, complex numbers, and modulo forms.
+            (
+                "[[1:2,1:3],[1:4,1:5]] [[2,0],[0,3]] *",
+                "[[1, 1], [1:2, 3:5]]",
+            ),
+            ("[[0.5,1.5],[2,4]] [[2,0],[1,1]] *", "[[2.5, 1.5], [8, 4]]"),
+            (
+                "[[(0,1),1],[1,(0,1)]] [[(0,1),1],[1,(0,1)]] *",
+                "[[0, (0, 2)], [(0, 2), 0]]",
+            ),
+            (
+                "[[3M7,4M7],[5M7,6M7]] [[1,2],[3,4]] *",
+                "[[1 mod 7, 1 mod 7], [2 mod 7, 6 mod 7]]",
+            ),
+            // The products are kept in full and each sum is rounded once.
+            ("[1e10, 1, _1e10] [1e10, 1.5, 1e10] *", "1.5"),
+            ("[[1e10, 1, _1e10]] [1e10, 1.5, 1e10] *", "[1.5]"),
+            // The norm over all the elements, as Calc's `abssqr`.
+            ("[[1,2],[3,4]] f A", "30"),
+            ("[[3,0],[0,4]] A", "5"),
+            ("[[1,2],[3,(4,5)]] f A", "55"),
+        ]);
+        check_errors(&[
+            ("[[1,2],[3,4]] [1,2,3] *", "dimensions do not match"),
+            ("[1,2,3] [[1,2],[3,4]] *", "dimensions do not match"),
+            (
+                "[[1,2,3],[4,5,6]] [[1,2],[3,4]] *",
+                "dimensions do not match",
+            ),
+            // Calc tries the other order here. A mismatch is an error.
+            ("[[1,2,3],[4,5,6]] [1,2] *", "dimensions do not match"),
+            ("[[1],[2]] [3] *", "dimensions do not match"),
+            ("[[1,2,3],[4,5,6]] I Q", "dimensions do not match"),
+            ("[[1,2],[3]] [[1,2],[3,4]] *", "not a matrix"),
+            ("[[1,[2]],[3,4]] [1,2] *", "not a matrix"),
+            ("[[1,2],[3]] A", "not a matrix"),
+            (
+                "[[3M7,1],[1,1]] [[3M8,1],[1,1]] *",
+                "modulo forms need the same modulus",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn matrix_inverse_and_division_are_exact() {
+        check(&[
+            // A fraction is a float unless fraction mode is on, like `/`.
+            ("[[1,2],[3,4]] &", "[[-2, 1], [1.5, -0.5]]"),
+            ("[[1,2],[3,4]] v &", "[[-2, 1], [1.5, -0.5]]"),
+            ("m f [[1,2],[3,4]] &", "[[-2, 1], [3:2, -1:2]]"),
+            ("[[2,1],[1,1]] &", "[[1, -1], [-1, 2]]"),
+            ("[[0,1],[1,0]] &", "[[0, 1], [1, 0]]"),
+            ("[[1:2,1:3],[1:4,1:5]] &", "[[12, -20], [-15, 30]]"),
+            (
+                "[[1,2,3],[4,5,6],[7,8,10]] &",
+                "[[-0.666666666667, -1.33333333333, 1], [-0.666666666667, 3.66666666667, -2], [1, -2, 1]]",
+            ),
+            (
+                "m f [[0,2,1],[1,0,3],[4,5,0]] &",
+                "[[-15:29, 5:29, 6:29], [12:29, -4:29, 1:29], [5:29, 8:29, -2:29]]",
+            ),
+            // Calc gives the number 0.5 for a 1 by 1 matrix.
+            ("[[2]] &", "[[0.5]]"),
+            // `B / A` solves `A X = B`, as in Calc.
+            ("[5,6] [[1,2],[3,4]] /", "[-4, 4.5]"),
+            ("[[5,6],[7,8]] [[1,2],[3,4]] /", "[[-3, -4], [4, 5]]"),
+            ("[[5],[6]] [[1,2],[3,4]] /", "[[-4], [4.5]]"),
+            (
+                "[[1,2,3],[4,5,6]] [[1,2],[3,4]] /",
+                "[[2, 1, 0], [-0.5, 0.5, 1.5]]",
+            ),
+            // Rows that do not fit but columns that do: `B A^-1`.
+            (
+                "[[1,2],[3,4],[5,6]] [[1,2],[3,4]] /",
+                "[[1, 0], [0, 1], [-1, 2]]",
+            ),
+            ("2 [[1,2],[3,4]] /", "[[-4, 2], [3, -1]]"),
+            ("[1,2] [[2,1],[1,3]] /", "[0.2, 0.6]"),
+            ("m f [1,2] [[2,1],[1,3]] /", "[1:5, 3:5]"),
+            // A matrix divided by a number still goes element by element.
+            ("[[1,2],[3,4]] 2 /", "[[0.5, 1], [1.5, 2]]"),
+            // Complex entries.
+            (
+                "m f [[(0,1),2],[3,(1,1)]] &",
+                "[[(-3:25, -4:25), (7:25, 1:25)], [(21:50, 3:50), (1:50, -7:50)]]",
+            ),
+            ("[[(0,1),0],[0,(0,2)]] &", "[[(0, -1), 0], [0, (0, -0.5)]]"),
+            // Modulo forms: a prime modulus, and a composite one whose
+            // determinant is a unit, where no entry is.
+            (
+                "[[2M7,3M7],[1M7,4M7]] &",
+                "[[5 mod 7, 5 mod 7], [4 mod 7, 6 mod 7]]",
+            ),
+            (
+                "[[2M6,3M6],[3M6,2M6]] &",
+                "[[2 mod 6, 3 mod 6], [3 mod 6, 2 mod 6]]",
+            ),
+            ("[3,4] [[2M7,3M7],[1M7,4M7]] /", "[0 mod 7, 1 mod 7]"),
+            (
+                "[[2M7,3],[1,4]] &",
+                "[[5 mod 7, 5 mod 7], [4 mod 7, 6 mod 7]]",
+            ),
+            // Powers of ten come out of the rows and columns first.
+            (
+                "[[1e-200000, 2e-200000],[3e-200000, 5e-200000]] &",
+                "[[-5e200000, 2e200000], [3e200000, -1e200000]]",
+            ),
+            (
+                "[[1e-200000, 2],[3e-200000, 5]] &",
+                "[[-5e200000, 2e200000], [3., -1.]]",
+            ),
+        ]);
+        check_errors(&[
+            ("[[1,2],[2,4]] &", "singular matrix"),
+            // Exactly singular as decimals, so not a matter of round-off.
+            ("[[1.5,2],[3,4]] &", "singular matrix"),
+            ("[[0.1,0.2],[0.3,0.6]] &", "singular matrix"),
+            ("[[0,0],[0,0]] &", "singular matrix"),
+            ("[1,2] [[1,2],[2,4]] /", "singular matrix"),
+            ("[[1,2,3],[4,5,6]] &", "needs a square matrix"),
+            ("[1,2] [[1,2,3],[4,5,6]] /", "needs a square matrix"),
+            ("[1,2] &", "not for vectors"),
+            ("[[1,2],[3,4]] [1,2] /", "not for vectors"),
+            ("[[1,2],[3]] &", "not a matrix"),
+            ("2 [[1,2],[3]] /", "not a matrix"),
+            ("[[1,2],[3]] [[1,2],[3,4]] /", "not a matrix"),
+            ("[1,2,3] [[1,2],[3,4]] /", "dimensions do not match"),
+            ("[[1,2,3]] [[1,2],[3,4]] /", "dimensions do not match"),
+            ("[[4M6,2M6],[2M6,4M6]] &", "singular matrix"),
+            ("[[3M6,0],[0,3M6]] &", "no modular inverse"),
+            (
+                "[[2M7,3M9],[1M7,4M7]] &",
+                "modulo forms need the same modulus",
+            ),
+            ("[[2M7,3.5],[1M7,4M7]] &", "modulo forms need integers"),
+            ("[[2M7,(1,2)],[1M7,4M7]] &", "modulo forms need integers"),
+            // Exponents more than 100000 orders apart would be that many digits.
+            ("[[1e200000, 2],[3, 5]] &", "overflow"),
+        ]);
+    }
+
+    #[test]
+    fn matrix_powers_follow_calc() {
+        check(&[
+            ("[[1,2],[3,4]] 2 ^", "[[7, 10], [15, 22]]"),
+            ("[[1,2],[3,4]] 3 ^", "[[37, 54], [81, 118]]"),
+            (
+                "[[1,2],[3,4]] 10 ^",
+                "[[4783807, 6972050], [10458075, 15241882]]",
+            ),
+            ("[[1,2],[3,4]] 1 ^", "[[1, 2], [3, 4]]"),
+            ("[[1,2],[3,4]] 0 ^", "[[1, 0], [0, 1]]"),
+            ("[[1.5,2],[3,4]] 0 ^", "[[1, 0], [0, 1]]"),
+            ("[[1,2],[3,4]] _1 ^", "[[-2, 1], [1.5, -0.5]]"),
+            ("[[1,2],[3,4]] _2 ^", "[[5.5, -2.5], [-3.75, 1.75]]"),
+            ("m f [[1,2],[3,4]] _2 ^", "[[11:2, -5:2], [-15:4, 7:4]]"),
+            ("[[3,1],[1,2]] _5 ^", "[[0.056, -0.088], [-0.088, 0.144]]"),
+            ("[[1:2,1:3],[1:4,1:5]] 2 ^", "[[1:3, 7:30], [7:40, 37:300]]"),
+            ("[[1:2,1:3],[1:4,1:5]] _2 ^", "[[444, -840], [-630, 1200]]"),
+            ("[[2]] 3 ^", "[[8]]"),
+            (
+                "[[1,1],[1,0]] 100 ^",
+                "[[573147844013817084101, 354224848179261915075], [354224848179261915075, 218922995834555169026]]",
+            ),
+            ("[[(0,1),0],[0,1]] 3 ^", "[[(0, -1), 0], [0, 1]]"),
+            // Modulo forms take any exponent.
+            (
+                "[[2M7,3M7],[1M7,4M7]] 1000000000000000000000000000000 ^",
+                "[[3 mod 7, 6 mod 7], [2 mod 7, 0 mod 7]]",
+            ),
+            (
+                "[[2M7,3M7],[1M7,4M7]] _3 ^",
+                "[[4 mod 7, 2 mod 7], [3 mod 7, 3 mod 7]]",
+            ),
+            (
+                "[[2M7,3M7],[1M7,4M7]] 0 ^",
+                "[[1 mod 7, 0 mod 7], [0 mod 7, 1 mod 7]]",
+            ),
+            // Anything but an exact integer goes element by element, as a
+            // vector does: Calc leaves these unevaluated.
+            ("[[1,2],[3,4]] 2. ^", "[[1., 4.], [9., 16.]]"),
+            ("[[1,4],[9,16]] 0.5 ^", "[[1, 2], [3, 4]]"),
+            ("2 [[1,2],[3,4]] ^", "[[2, 4], [8, 16]]"),
+            // A flat vector keeps its own rule.
+            ("[1,2,3] 2 ^", "14"),
+            ("[1,2] 0 ^", "[1, 1]"),
+        ]);
+        check_errors(&[
+            ("[[1,2,3],[4,5,6]] 2 ^", "needs a square matrix"),
+            ("[[1,2,3],[4,5,6]] 0 ^", "needs a square matrix"),
+            ("[[1,2],[2,4]] _1 ^", "singular matrix"),
+            ("[[1,2],[2,4]] _3 ^", "singular matrix"),
+            ("[[1,2],[3,4]] [[1,2],[3,4]] ^", "not for vectors"),
+            ("[1,2] _1 ^", "a vector has no negative power"),
+        ]);
+    }
+
+    #[test]
+    fn matrix_functions_follow_calc() {
+        check(&[
+            ("[[1,2],[3,4]] V D", "-2"),
+            ("[[1,2],[3,4]] v D", "-2"),
+            ("[[5]] V D", "5"),
+            ("[[0,1],[1,0]] V D", "-1"),
+            ("[[0,2,1],[1,0,3],[4,5,0]] V D", "29"),
+            ("[[1,2],[2,4]] V D", "0"),
+            ("[[1:2,1:3],[1:4,1:5]] V D", "1:60"),
+            ("[[1.5,2],[3,4]] V D", "0."),
+            ("[[0.5,0.25],[0.125,2]] V D", "0.96875"),
+            ("[[(1,2),3],[4,(5,6)]] V D", "(-19, 16)"),
+            ("[[2M7,3M7],[1M7,4M7]] V D", "5 mod 7"),
+            ("[[4M6,2M6],[2M6,4M6]] V D", "0 mod 6"),
+            ("[[1e-200000, 2],[3e-200000, 5]] V D", "-1e-200000"),
+            ("6 v i 3 * V D", "729"),
+            ("[[1,2],[3,4]] V T", "5"),
+            ("[[1.5,2],[3,4.25]] V T", "5.75"),
+            ("[[1:2,2],[3,1:3]] V T", "5:6"),
+            ("[[3M7,2],[3,6M7]] V T", "2 mod 7"),
+            ("[[1,2,3],[4,5,6]] v t", "[[1, 4], [2, 5], [3, 6]]"),
+            ("[1,2,3] v t", "[[1], [2], [3]]"),
+            ("[[1,2,3]] v t", "[[1], [2], [3]]"),
+            ("[[1],[2],[3]] v t", "[[1, 2, 3]]"),
+            ("[] v t", "[]"),
+            ("5 v t", "5"),
+            ("[[(1,2),3],[4,(5,6)]] V J", "[[(1, -2), 4], [3, (5, -6)]]"),
+            ("[1,(2,3)] V J", "[[1], [(2, -3)]]"),
+            ("3 v i", "[[1, 0, 0], [0, 1, 0], [0, 0, 1]]"),
+            ("1 v i", "[[1]]"),
+            ("0 v i", "[]"),
+            ("2. v i", "[[1, 0], [0, 1]]"),
+            ("[1,2,3] [4,5,6] V C", "[-3, 6, -3]"),
+            ("[1,2,3] [4,5,6.5] V C", "[-2., 5.5, -3]"),
+            ("[1,0,0] [0,1,0] v C", "[0, 0, 1]"),
+            ("[1M7,2M7,3M7] [4,5,6] V C", "[4 mod 7, 6 mod 7, 4 mod 7]"),
+            // Every function still goes element by element through a matrix.
+            ("[[1,4],[9,16]] Q", "[[1, 2], [3, 4]]"),
+            ("[[1,2],[3,4]] n", "[[-1, -2], [-3, -4]]"),
+            ("[[1,2],[3,4]] 2 v i +", "[[2, 2], [3, 5]]"),
+        ]);
+        check_errors(&[
+            ("[[1,2,3],[4,5,6]] V D", "needs a square matrix"),
+            ("[1,2] V D", "needs a square matrix"),
+            ("5 V D", "needs a square matrix"),
+            ("[[1,2],[3]] V D", "needs a square matrix"),
+            ("[[1,2,3],[4,5,6]] V T", "needs a square matrix"),
+            ("[1,2] V T", "needs a square matrix"),
+            ("[[1,2],[3]] v t", "not a matrix"),
+            ("[[2M7,3M7],[1M7,4M7]] V J", "not for modulo forms"),
+            ("_1 v i", "identity needs a nonnegative integer"),
+            ("1.5 v i", "identity needs a nonnegative integer"),
+            ("[2] v i", "identity needs a nonnegative integer"),
+            ("101 v i", "overflow"),
+            ("[1,2] [3,4] V C", "cross needs two 3-vectors"),
+            ("[1,2,3] [4,5] V C", "cross needs two 3-vectors"),
+            ("[[1,2,3]] [4,5,6] V C", "cross needs two 3-vectors"),
+            ("1 [4,5,6] V C", "cross needs two 3-vectors"),
+            ("[[1,2],[3,4]] V R V D", "V R needs a binary operation"),
+            ("V D", "too few arguments"),
+            ("[1,2,3] V C", "too few arguments"),
+        ]);
+    }
+
+    #[test]
+    fn matrix_map_reduce_undo_and_trail() {
+        // `V M` forces element by element where a matrix means something else.
+        check(&[
+            ("[[1,2],[3,4]] [[5,6],[7,8]] V M *", "[[5, 12], [21, 32]]"),
+            ("[[1,2],[3,4]] 2 V M ^", "[[1, 4], [9, 16]]"),
+            ("[[1,2],[4,8]] V M &", "[[1, 0.5], [0.25, 0.125]]"),
+            ("[[5,6],[7,8]] [[1,2],[7,4]] V M /", "[[5, 3], [1, 2]]"),
+            ("[[1,2],[3,4]] V M I Q", "[[1, 4], [9, 16]]"),
+            ("[[3,_4],[_5,12]] V M A", "[[3, 4], [5, 12]]"),
+            // `V R` folds over all the elements of a matrix, as before, and
+            // over the matrices of a vector of them.
+            ("[[1,2],[3,4]] V R +", "10"),
+            ("[[1,2],[3,4]] V R *", "24"),
+            ("[[[1,2],[3,4]],[[0,1],[1,0]]] V R *", "[[2, 1], [4, 3]]"),
+        ]);
+
+        let mut app = App::new();
+        app.keys("[[1,2],[3,4]]\n&");
+        assert_eq!(app.top_string().as_deref(), Some("[[-2, 1], [1.5, -0.5]]"));
+        assert_eq!(app.engine().trail().back().unwrap().label, "&");
+        app.keys("u");
+        assert_eq!(app.engine().stack_lines(), ["[[1, 2], [3, 4]]"]);
+        app.press(Key::Ctrl('r'));
+        assert_eq!(app.top_string().as_deref(), Some("[[-2, 1], [1.5, -0.5]]"));
+        app.keys("u");
+        app.keys("VD");
+        assert_eq!(app.top_string().as_deref(), Some("-2"));
+        assert_eq!(app.engine().trail().back().unwrap().label, "V D");
+        app.keys("u");
+        app.keys("vt");
+        assert_eq!(app.top_string().as_deref(), Some("[[1, 3], [2, 4]]"));
+        assert_eq!(app.engine().trail().back().unwrap().label, "V t");
+
+        // A failed operation leaves the stack and says why.
+        let mut app = App::new();
+        app.keys("[5,6]\n[[1,2],[2,4]]\n/");
+        assert_eq!(app.engine().message(), "singular matrix");
+        assert_eq!(app.engine().stack_lines(), ["[5, 6]", "[[1, 2], [2, 4]]"]);
+        app.keys("&");
+        assert_eq!(app.engine().message(), "singular matrix");
+        assert_eq!(app.engine().stack_lines(), ["[5, 6]", "[[1, 2], [2, 4]]"]);
+
+        // `v` then a matrix key shows the prefix until the key arrives.
+        let mut app = App::new();
+        app.keys("3v");
+        assert!(app.mode_line().contains(&"v-".to_string()));
+        app.keys("i");
+        assert!(!app.mode_line().contains(&"v-".to_string()));
+        assert_eq!(
+            app.top_string().as_deref(),
+            Some("[[1, 0, 0], [0, 1, 0], [0, 0, 1]]")
+        );
+    }
+
+    #[test]
+    fn matrix_limits_are_overflows() {
+        check_errors(&[
+            // An exact power stops at about a megabyte of digits.
+            ("2 4200000 ^ 1 2 v p [1,1] 2 v p 2 ^", "overflow"),
+            // A product stops at 10000 elements.
+            ("200 v x v t 200 v x *", "overflow"),
+            // A matrix past 100 by 100 has no determinant, inverse, or power.
+            ("101 v x v t 101 v x * V D", "overflow"),
+            ("101 v x v t 101 v x * 2 ^", "overflow"),
+            ("101 v x v t 101 v x * &", "overflow"),
+            // Elimination is cubic, so large numbers lower the size it takes.
+            ("100 v i 12345678901234567890123 * &", "overflow"),
+        ]);
+        check(&[
+            ("100 v x v t 100 v x * v l", "100"),
+            ("30 v i 7 * & V T", "4.28571428571"),
+            ("m f 30 v i 7 * & V T", "30:7"),
+            ("40 v i 2 * 100 ^ V D 2 4000 ^ -", "0"),
+        ]);
+
+        // A product of long fractions is judged before it runs, and one
+        // that shares its denominators stays cheap.
+        let fractions = |numer: &str, denom: &str| {
+            let row = vec![format!("{numer}:{denom}"); 100].join(",");
+            let matrix = vec![format!("[{row}]"); 100].join(",");
+            format!("[{matrix}]")
+        };
+        let long = fractions("12345678901234567890", "98765432109876543211");
+        let started = std::time::Instant::now();
+        assert_eq!(
+            eval(&format!("{long} {long} *")).map_err(|err| err.to_string()),
+            Err("overflow".to_string())
+        );
+        assert!(started.elapsed().as_secs() < 30);
+        let thirds = fractions("1", "3");
+        assert_eq!(
+            eval(&format!("{thirds} {thirds} * V T")).as_deref(),
+            Ok("10000:9")
+        );
+    }
+
+    /// Values of `keys` run `times` times, each on a fresh calculator.
+    fn draws(keys: &str, times: usize) -> Vec<String> {
+        (0..times)
+            .map(|_| eval(keys).expect("a random value"))
+            .collect()
+    }
+
+    #[test]
+    fn random_integers_cover_their_range() {
+        let seen: std::collections::BTreeSet<String> = draws("10 k r", 500).into_iter().collect();
+        let all: std::collections::BTreeSet<String> = (0..10).map(|n| n.to_string()).collect();
+        assert_eq!(seen, all, "every value of 0..9 turns up, and nothing else");
+        let negative: std::collections::BTreeSet<String> =
+            draws("_5 k r", 300).into_iter().collect();
+        assert_eq!(
+            negative,
+            ["-1", "-2", "-3", "-4", "0"].map(String::from).into()
+        );
+        // A limit past 64 bits: below it, and the top digit varies.
+        let big = draws("10 50 ^ k r", 40);
+        assert!(big.iter().all(|n| n.len() <= 50 && !n.starts_with('-')));
+        assert!(big.iter().any(|n| n.len() == 50 && n.as_bytes()[0] >= b'5'));
+        let picked: std::collections::BTreeSet<String> =
+            draws("[7,8,9] k r", 200).into_iter().collect();
+        assert_eq!(picked, ["7", "8", "9"].map(String::from).into());
+    }
+
+    #[test]
+    fn random_floats_and_normal_samples() {
+        for x in draws("2.5 k r", 200) {
+            let x: f64 = x.parse().unwrap();
+            assert!((0.0..2.5).contains(&x), "{x}");
+        }
+        // Every digit of the precision is random, not just a machine float.
+        let long = draws("30 p 1. k r", 20);
+        assert!(
+            long.iter().filter(|x| x.len() > 25).count() >= 15,
+            "{long:?}"
+        );
+        // `0` is a standard normal sample: mean near 0, spread near 1.
+        let z: Vec<f64> = draws("0 k r", 2000)
+            .iter()
+            .map(|x| x.parse().unwrap())
+            .collect();
+        let mean = z.iter().sum::<f64>() / z.len() as f64;
+        let var = z.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / z.len() as f64;
+        assert!(mean.abs() < 0.15, "mean {mean}");
+        assert!((0.8..1.2).contains(&var), "variance {var}");
+        check_errors(&[
+            ("(1,2) k r", "random needs a real number or a vector"),
+            ("3M7 k r", "random needs a real number or a vector"),
+            ("[] k r", "random of an empty vector"),
+        ]);
+    }
+
+    #[test]
+    fn random_again_and_shuffle() {
+        // `k a` uses the last limit, and `1.` before any.
+        for x in draws("6 k r k a", 50) {
+            assert!(
+                matches!(x.as_str(), "0" | "1" | "2" | "3" | "4" | "5"),
+                "{x}"
+            );
+        }
+        let x: f64 = eval("k a").unwrap().parse().unwrap();
+        assert!((0.0..1.0).contains(&x));
+        let sorted = |v: &str| {
+            let mut items: Vec<String> = v
+                .trim_matches(['[', ']'])
+                .split(", ")
+                .map(String::from)
+                .collect();
+            items.sort();
+            items
+        };
+        for order in draws("10 10 k h", 20) {
+            let mut want: Vec<String> = (0..10).map(|n| n.to_string()).collect();
+            want.sort();
+            assert_eq!(sorted(&order), want);
+        }
+        let orders: std::collections::BTreeSet<String> =
+            draws("4 4 k h", 200).into_iter().collect();
+        assert_eq!(orders.len(), 24, "every order of four turns up");
+        for picks in draws("10 3 k h", 50) {
+            let items = sorted(&picks);
+            assert_eq!(items.len(), 3);
+            assert!(items.windows(2).all(|w| w[0] != w[1]), "{picks}");
+        }
+        assert_eq!(
+            sorted(&eval("_5 5 k h").unwrap()),
+            ["-1", "-2", "-3", "-4", "0"]
+        );
+        assert_eq!(sorted(&eval("[1,2,3] 3 k h").unwrap()), ["1", "2", "3"]);
+        assert_eq!(eval("10 50 ^ 5 k h v l").as_deref(), Ok("5"));
+        check_errors(&[
+            ("5 6 k h", "shuffle asks for more values than there are"),
+            ("5 _1 k h", "shuffle needs a nonnegative integer count"),
+            ("5 10001 k h", "overflow"),
+        ]);
+        // Undo takes a draw back.
+        let mut app = App::new();
+        app.keys("10\nkr");
+        app.keys("u");
+        assert_eq!(app.engine().stack_lines(), ["10"]);
+    }
+
+    #[test]
+    fn matrix_floats_round_once() {
+        // Rounding the numerator and the denominator, then the quotient,
+        // took a value just below a tie past it.
+        check(&[
+            (
+                "30 p [[3.0000000000149999999999]] 12 p V D",
+                "3.00000000001",
+            ),
+            (
+                "30 p [[3.0000000000149999999999]] 12 p V T",
+                "3.00000000001",
+            ),
+            ("30 p [3.0000000000149999999999] [[3]] 12 p /", "[1.]"),
+            // `f A` and `A` sum the squares exactly, like a dot product.
+            ("[(1,2),3] f A", "14"),
+            ("30 p [1.000000000000001, 1e-20] f A", "1.000000000000002"),
+            ("[3,4] A", "5"),
+            // The root takes the sum with its guard digits; rounding the
+            // sum first gave `4.14191314453` (PARI/GP: 4.141913144521…).
+            ("12 p [[(_105e-2,6670589e-9),23e-2,_4]] A", "4.14191314452"),
+        ]);
+        check_errors(&[("[3M7] f A", "not for modulo forms")]);
+    }
+
+    #[test]
+    fn matrix_results_match_pari() {
+        // PARI/GP at 30 digits, with the entries as exact decimals.
+        check(&[
+            (
+                "[[0.5,0.25],[0.125,2]] &",
+                "[[2.06451612903, -0.258064516129], [-0.129032258065, 0.516129032258]]",
+            ),
+            // Nearly a Hilbert matrix: the condition number is about 500.
+            (
+                "[[1,0.5,0.333333333333],[0.5,0.333333333333,0.25],[0.333333333333,0.25,0.2]] &",
+                "[[9.00000000061, -36.0000000032, 30.000000003], [-36.0000000032, 192.000000017, -180.000000015], [30.000000003, -180.000000015, 180.000000014]]",
+            ),
+            (
+                "[[1,0.5,0.333333333333],[0.5,0.333333333333,0.25],[0.333333333333,0.25,0.2]] V D",
+                "4.62962962924e-4",
+            ),
+            (
+                "[1,2,3] [[1,0.5,0.333333333333],[0.5,0.333333333333,0.25],[0.333333333333,0.25,0.2]] /",
+                "[27.0000000032, -192.000000016, 210.000000015]",
+            ),
+            (
+                "[[1.2,3.45],[_0.7,0.01]] 7 ^",
+                "[[1.04063877165, 50.2814516713], [-10.2020336724, -16.3028184715]]",
+            ),
+            (
+                "[[1.2,3.45],[_0.7,0.01]] _3 ^",
+                "[[-0.206095016004, 0.232375829351], [-0.0471487189988, -0.286247838302]]",
+            ),
+            (
+                "[[1.2,3.45],[_0.7,0.01]] I Q",
+                "[[-0.975, 4.1745], [-0.847, -2.4149]]",
+            ),
+            (
+                "[[(1,2),3],[4,(5,6)]] &",
+                "[[(1.62074554295e-3, -0.314424635332), (0.0923824959481, 0.0777957860616)], [(0.123176661264, 0.103727714749), (0.0210696920583, -0.0875202593193)]]",
+            ),
+            (
+                "[[(1.5,0.5),2],[3,4]] &",
+                "[[(0., -2.), (0., 1.)], [(0., 1.5), (0.25, -0.75)]]",
+            ),
+            ("[[0.1,0.2],[0.3,0.4]] &", "[[-20., 10.], [15., -5.]]"),
+            // The inverse has entries far larger than its square, so the
+            // power is run again with more digits until two runs agree.
+            // With guard digits alone this was 179 ulp off.
+            (
+                "30 p [[56940637750399743439e-20,39364533471806602897528e-47,(_18,16336720585668849930192e-17)],[_74e2,(9999999991e-10,6241189907552e-51),_999999999999999992e-18],[_50444e-8,148:147,_99999999999999999999999995e-26]] _2 ^ v u v u",
+                "(-1.42069911707067336276832851315e-13, -1.28942018968604785631957713132e-9)",
+            ),
+            (
+                "20 p [[1,2,3],[4,5,6],[7,8,10]] &",
+                "[[-0.66666666666666666667, -1.3333333333333333333, 1], [-0.66666666666666666667, 3.6666666666666666667, -2], [1, -2, 1]]",
+            ),
+        ]);
     }
 
     #[test]

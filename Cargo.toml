@@ -30,6 +30,7 @@ num-bigint = "0.4.8"
 num-integer = "0.1.47"
 num-rational = "0.4.2"
 num-traits = "0.2.19"
+rand = "0.10.3"
 ratatui = "0.30.2"
 
 [dev-dependencies]
