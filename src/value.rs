@@ -1335,35 +1335,118 @@ fn float_hypot(a: &DecFloat, b: &DecFloat, prec: u32) -> Result<DecFloat, CalcEr
     Ok(sum.sqrt(work)?.mul(&scale, prec).polished(prec))
 }
 
+/// How `F`, `I F`, `R`, and `I R` pick an integer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Rounding {
+    /// Toward minus infinity: `-45.3` is `-46`.
+    Floor,
+    /// Toward plus infinity: `-45.3` is `-45`.
+    Ceil,
+    /// Toward zero: `-45.7` is `-45`.
+    Trunc,
+    /// To the nearest, a half away from zero, as Calc's `round`:
+    /// `2.5` is `3` and `-2.5` is `-3`. (PARI/GP's `round(-2.5)` is `-2`.)
+    Round,
+}
+
+impl Rounding {
+    fn real_needed(self) -> &'static str {
+        match self {
+            Self::Floor => "floor needs a real number",
+            Self::Ceil => "ceiling needs a real number",
+            Self::Trunc => "truncate needs a real number",
+            Self::Round => "round needs a real number",
+        }
+    }
+}
+
 /// Integer toward minus infinity. An integer stays that integer.
 /// `45.3` is `45` and `-45.3` is `-46`.
-pub fn floor(v: &Value, _mode: &Mode) -> Result<Value, CalcError> {
+pub fn floor(v: &Value, mode: &Mode) -> Result<Value, CalcError> {
+    round_to_integer(v, Rounding::Floor, false, mode)
+}
+
+/// `F`, `I F`, `R`, `I R`, and with `H` (`float`) their float forms, as
+/// Calc's `floor`, `ceil`, `round`, `trunc`, `ffloor`, `fceil`, `fround`,
+/// and `ftrunc`. The integer is found exactly, then a float form rounds it
+/// to the precision. A float form leaves a float that is already whole, so
+/// `1e200000 H F` is itself rather than an integer too long to hold.
+pub(crate) fn round_to_integer(
+    v: &Value,
+    how: Rounding,
+    float: bool,
+    mode: &Mode,
+) -> Result<Value, CalcError> {
     let Value::Real(real) = v else {
-        return Err(CalcError::Domain("floor needs a real number"));
+        return Err(CalcError::Domain(how.real_needed()));
     };
-    Ok(Value::from_int(floor_real(real)?))
+    if float
+        && let Real::Float(f) = real
+        && f.is_whole()
+    {
+        return Ok(v.clone());
+    }
+    let n = round_real(real, how)?;
+    Ok(if float {
+        Value::Real(Real::Float(DecFloat::from_bigint(&n, mode.prec)))
+    } else {
+        Value::from_int(n)
+    })
 }
 
 pub(crate) fn floor_real(real: &Real) -> Result<BigInt, CalcError> {
-    match real {
-        Real::Int(n) => Ok(n.clone()),
-        Real::Rat(r) => Ok(floor_rat(r)),
-        Real::Float(f) => floor_float(f),
-    }
+    round_real(real, Rounding::Floor)
 }
 
 fn floor_float(f: &DecFloat) -> Result<BigInt, CalcError> {
-    if f.is_zero() || (!f.is_negative() && f.order() < 0) {
-        return Ok(BigInt::zero());
-    }
-    if f.order() < 0 {
-        return Ok(BigInt::from(-1));
-    }
-    // Same size bound as an exact integer conversion.
-    if f.order() > i64::from(float::MAX_INTEGER_EXPONENT) {
-        return Err(CalcError::Overflow);
-    }
-    f.floor_to_bigint()
+    round_real(&Real::Float(f.clone()), Rounding::Floor)
+}
+
+/// The integer `how` picks for `real`, worked out exactly. The value is
+/// split into a whole part and a fraction of its magnitude, and only how the
+/// fraction compares with a half matters.
+pub(crate) fn round_real(real: &Real, how: Rounding) -> Result<BigInt, CalcError> {
+    let (negative, whole, part) = match real {
+        Real::Int(n) => return Ok(n.clone()),
+        Real::Rat(r) => {
+            let (q, rem) = r.numer().abs().div_rem(r.denom());
+            let part = if rem.is_zero() {
+                None
+            } else {
+                Some((&rem * 2u32).cmp(r.denom()))
+            };
+            (r.is_negative(), q, part)
+        }
+        Real::Float(f) => {
+            if f.is_zero() {
+                return Ok(BigInt::zero());
+            }
+            if f.order() < -1 {
+                // Below 0.1 in size: the whole part is 0 and the fraction
+                // is short of a half, without forming 10^order.
+                (f.is_negative(), BigInt::zero(), Some(Ordering::Less))
+            } else if f.order() > i64::from(float::MAX_INTEGER_EXPONENT) {
+                // Same size bound as an exact integer conversion.
+                return Err(CalcError::Overflow);
+            } else {
+                let (q, rem, d) = f.split_abs()?;
+                let part = if rem.is_zero() {
+                    None
+                } else {
+                    Some((&rem * 2u32).cmp(&d))
+                };
+                (f.is_negative(), q, part)
+            }
+        }
+    };
+    let up = match how {
+        Rounding::Trunc => false,
+        Rounding::Round => part.is_some_and(|p| p != Ordering::Less),
+        Rounding::Floor => negative && part.is_some(),
+        Rounding::Ceil => !negative && part.is_some(),
+    };
+    let magnitude = if up { whole + 1 } else { whole };
+    Ok(if negative { -magnitude } else { magnitude })
 }
 
 pub fn isqrt(v: &Value, mode: &Mode) -> Result<Value, CalcError> {

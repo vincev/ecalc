@@ -1333,7 +1333,8 @@ impl App {
                 }
             }
             'A' => self.run(Engine::abs),
-            'F' => self.run(Engine::floor),
+            'F' => self.trig(Engine::floor, Engine::ceil, Engine::ffloor, Engine::fceil),
+            'R' => self.trig(Engine::round, Engine::trunc, Engine::fround, Engine::ftrunc),
             'S' => self.trig(Engine::sin, Engine::asin, Engine::sinh, Engine::asinh),
             'C' => self.trig(Engine::cos, Engine::acos, Engine::cosh, Engine::acosh),
             'T' => self.trig(Engine::tan, Engine::atan, Engine::tanh, Engine::atanh),
@@ -1802,6 +1803,68 @@ mod tests {
         let mut app = App::new();
         app.keys("F");
         assert_eq!(app.engine().message(), "too few arguments");
+    }
+
+    #[test]
+    fn ceiling_round_and_truncate_follow_calc() {
+        let top = |keys: &str| {
+            let mut app = App::new();
+            app.keys(keys);
+            app.top_string()
+                .unwrap_or_else(|| panic!("{keys}: {}", app.engine().message()))
+        };
+        // The answers Emacs Calc gives for ceil, round, trunc, and the
+        // float forms fceil, fround, ffloor, and ftrunc.
+        for (keys, want) in [
+            ("45.3IF", "46"),
+            ("_45.3IF", "-45"),
+            ("5IF", "5"),
+            ("1e-30IF", "1"),
+            ("_1e-30IF", "0"),
+            ("2.5R", "3"),
+            ("_2.5R", "-3"),
+            ("0.5R", "1"),
+            ("_0.5R", "-1"),
+            ("0.49R", "0"),
+            ("3:2R", "2"),
+            ("_3:2R", "-2"),
+            ("5:3R", "2"),
+            ("_45.7IR", "-45"),
+            ("45.7IR", "45"),
+            ("_7:2IR", "-3"),
+            ("4.02e26R", "402000000000000000000000000"),
+            ("45.3HF", "45."),
+            ("_45.3HIF", "-45."),
+            ("2.5HR", "3."),
+            ("_2.7HIR", "-2."),
+            ("5HF", "5."),
+            ("5:2HR", "3."),
+            ("123456789012345.6HIR", "1.23456789012e14"),
+            ("[1.5,_2.5,7:2]R", "[2, -3, 4]"),
+            // A float form keeps a whole float, however large.
+            ("1e200000HF", "1e200000"),
+            // The digits past the precision count: Calc would read this
+            // as 0.5 at 12 digits, but the value on the stack is below.
+            ("30p0.499999999999999999999999 12p R", "0"),
+            ("1e-999999IF", "1"),
+            ("_1e-999999R", "0"),
+            ("36#R ", "27"),
+        ] {
+            assert_eq!(top(keys), want, "{keys}");
+        }
+
+        let mut app = App::new();
+        app.keys("1e200000R");
+        assert_eq!(app.engine().message(), "overflow");
+        let mut app = App::new();
+        app.keys("(1.5, 2)R");
+        assert_eq!(app.engine().message(), "round needs a real number");
+        let mut app = App::new();
+        app.keys("(1.5, 2)IF");
+        assert_eq!(app.engine().message(), "ceiling needs a real number");
+        let mut app = App::new();
+        app.keys("3M7R");
+        assert_eq!(app.engine().message(), "not for modulo forms");
     }
 
     #[test]

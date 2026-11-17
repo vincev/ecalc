@@ -25,7 +25,7 @@ use crate::float::{MAX_PRECISION, MIN_PRECISION};
 use crate::matrix;
 use crate::radix::{self, MAX_RADIX, MAX_WORD_SIZE, MIN_RADIX, MIN_WORD_SIZE};
 use crate::random;
-use crate::value::{self, AngleMode, Mode, NOT_FOR_MOD, Value};
+use crate::value::{self, AngleMode, Mode, NOT_FOR_MOD, Rounding, Value};
 use crate::vector;
 use num_bigint::BigInt;
 use std::borrow::Cow;
@@ -758,7 +758,40 @@ impl Engine {
     }
 
     pub fn floor(&mut self) {
-        self.unary(value::floor);
+        self.rounding(Rounding::Floor, false);
+    }
+
+    pub fn ceil(&mut self) {
+        self.rounding(Rounding::Ceil, false);
+    }
+
+    pub fn round(&mut self) {
+        self.rounding(Rounding::Round, false);
+    }
+
+    pub fn trunc(&mut self) {
+        self.rounding(Rounding::Trunc, false);
+    }
+
+    pub fn ffloor(&mut self) {
+        self.rounding(Rounding::Floor, true);
+    }
+
+    pub fn fceil(&mut self) {
+        self.rounding(Rounding::Ceil, true);
+    }
+
+    pub fn fround(&mut self) {
+        self.rounding(Rounding::Round, true);
+    }
+
+    pub fn ftrunc(&mut self) {
+        self.rounding(Rounding::Trunc, true);
+    }
+
+    /// `F`, `R`, and their `I` and `H` forms.
+    fn rounding(&mut self, how: Rounding, float: bool) {
+        self.unary(move |v: &Value, mode: &Mode| value::round_to_integer(v, how, float, mode));
     }
 
     pub fn sin(&mut self) {

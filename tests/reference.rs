@@ -245,6 +245,9 @@ fn exact_case(rng: &mut Rng) -> ExactCase {
         "inverse",
         "modpow",
         "floor",
+        "ceil",
+        "round",
+        "trunc",
         "isqrt",
         "ilog",
         "fractions",
@@ -493,20 +496,37 @@ fn exact_case(rng: &mut Rng) -> ExactCase {
                 None,
             )
         }
-        "floor" => {
+        "floor" | "ceil" | "round" | "trunc" => {
+            let (keys_of, pari_of, calc_of): (&str, fn(&str) -> String, &str) = match name {
+                "floor" => ("F", |x| format!("floor({x})"), "floor"),
+                "ceil" => ("I F", |x| format!("ceil({x})"), "ceil"),
+                // Calc rounds a half away from zero; PARI's `round` takes
+                // it up, so `round(-5/2)` is -2 there.
+                "round" => ("R", |x| format!("sign({x})*floor(abs({x})+1/2)"), "round"),
+                _ => ("I R", |x| format!("truncate({x})"), "trunc"),
+            };
             if rng.chance(0.5) {
-                let (a, b) = fraction(rng);
+                // Halves often, so a tie is tested on both sides of zero.
+                let (a, b) = if rng.chance(0.3) {
+                    (2 * rng.range(-200, 200) + 1, 2)
+                } else {
+                    fraction(rng)
+                };
                 case(
-                    format!("{}:{b} F", keys(a)),
-                    Some(format!("floor({a}/{b})")),
-                    Some(format!("floor({a}:{b})")),
+                    format!("{}:{b} {keys_of}", keys(a)),
+                    Some(pari_of(&format!("({a}/{b})"))),
+                    Some(format!("{calc_of}({a}:{b})")),
                 )
             } else {
-                let a = rng.range(-1_000_000_000, 1_000_000_000);
+                let mut a = rng.range(-1_000_000_000, 1_000_000_000);
+                if rng.chance(0.3) {
+                    // A fraction of exactly .5 after the point.
+                    a = a / 10_000 * 10_000 + if a < 0 { -5000 } else { 5000 };
+                }
                 case(
-                    format!("{}e-4 F", keys(a)),
-                    Some(format!("floor({a}/10^4)")),
-                    Some(format!("floor({a}e-4)")),
+                    format!("{}e-4 {keys_of}", keys(a)),
+                    Some(pari_of(&format!("({a}/10^4)"))),
+                    Some(format!("{calc_of}({a}e-4)")),
                 )
             }
         }

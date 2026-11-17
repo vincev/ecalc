@@ -270,6 +270,39 @@ impl DecFloat {
         }
     }
 
+    /// Whether the value is a whole number, `0` included.
+    pub(crate) fn is_whole(&self) -> bool {
+        if self.mantissa.is_zero() || self.exponent >= 0 {
+            return true;
+        }
+        let shift = self.exponent.unsigned_abs();
+        shift <= digit_count(&self.mantissa) as u64
+            && (&self.mantissa % pow10(shift as u32)).is_zero()
+    }
+
+    /// `|x|` split at the point: `(q, r, d)` with `|x| = q + r / d` and
+    /// `0 <= r < d`, where `d` is a power of ten. The caller keeps the order
+    /// within `[-1, MAX_INTEGER_EXPONENT]`, so no power of ten is huge.
+    pub(crate) fn split_abs(&self) -> Result<(BigInt, BigInt, BigInt), CalcError> {
+        let mantissa = self.mantissa.abs();
+        if self.exponent >= 0 {
+            let exp = u32::try_from(self.exponent).map_err(|_| CalcError::Overflow)?;
+            if exp > MAX_INTEGER_EXPONENT {
+                return Err(CalcError::Overflow);
+            }
+            return Ok((mantissa * pow10(exp), BigInt::zero(), BigInt::one()));
+        }
+        let shift = self
+            .exponent
+            .checked_neg()
+            .and_then(|mag| u32::try_from(mag).ok())
+            .filter(|&shift| shift <= MAX_INTEGER_EXPONENT.saturating_add(self.prec.max(1)))
+            .ok_or(CalcError::Overflow)?;
+        let d = pow10(shift);
+        let (q, r) = mantissa.div_rem(&d);
+        Ok((q, r, d))
+    }
+
     /// Nearest integer, ties away from zero.
     pub fn round_half_away(&self) -> Result<BigInt, CalcError> {
         let half = Self::from_unnormalized(BigInt::from(5), -1, self.prec.max(4));

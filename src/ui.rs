@@ -2301,7 +2301,7 @@ mod tests {
         assert!(rows.iter().any(|row| row.contains("1/3")));
         assert!(
             rows.iter().any(|row| {
-                row.contains("ret") && row.contains("inverse") && row.contains("pi")
+                row.contains("ret") && row.contains("inverse") && row.contains("conj")
             }),
             "three columns share the first row"
         );
@@ -2331,12 +2331,14 @@ mod tests {
         assert!(row[label_end..border].chars().all(|c| c == ' '));
         assert!(rows.iter().any(|row| row.contains("identity")));
         assert!(rows.iter().any(|row| row.contains("shuffle")));
+        assert!(rows.iter().any(|row| row.contains("scroll")));
 
         // The third page: modes and display.
         app.press(Key::Tab);
         let text = screen(&mut app, 90, 40);
         assert!(text.contains("3/3"));
         assert!(text.contains("fractions"));
+        assert!(text.contains("prec"));
         assert!(text.contains("radix"));
 
         app.press(Key::ShiftTab);

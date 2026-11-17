@@ -143,7 +143,8 @@ prints the message on stderr and exits 1.
   forms: product, inverse, integer powers, linear systems, determinant,
   trace, transpose, and the cross product.
 - Precision in significant digits, 12 by default.
-- Powers, roots, floor, integer division, and remainder. `12 \ 12:7` is `7`.
+- Powers, roots, integer division, and remainder. `12 \ 12:7` is `7`.
+- Floor `F`, ceiling `I F`, round `R` (a half away from zero, as in Calc: `-2.5 R` is `-3`), and truncate `I R`, exact for every input; `H` gives the result as a float.
 - Sine, cosine, and tangent, with inverses and hyperbolic forms. Angles
   start in degrees.
 - Logarithms, exponentials, factorial, combinations, permutations, and
