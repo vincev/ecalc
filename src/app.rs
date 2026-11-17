@@ -306,29 +306,32 @@ impl App {
     }
 
     pub fn help_pages(&self) -> usize {
-        crate::docs::help_entries()
+        crate::docs::help_layout(self.help_cols, self.help_rows)
             .len()
-            .div_ceil(self.help_page_size())
             .max(1)
     }
 
-    /// Rows the shortcut box holds on every page: those of the first,
-    /// which is the fullest, so turning to a short last page does not
-    /// shrink the box.
+    /// Rows the shortcut box holds on every page: those of the fullest
+    /// page, so turning the page never resizes the box.
     pub(crate) fn help_grid_rows(&self) -> usize {
-        crate::docs::help_columns(0, self.help_cols, self.help_rows)
+        crate::docs::help_layout(self.help_cols, self.help_rows)
             .iter()
             .map(Vec::len)
             .max()
             .unwrap_or(0)
     }
 
-    pub(crate) fn help_grid(&self) -> Vec<Vec<(&'static str, &'static str)>> {
-        crate::docs::help_columns(self.help_page(), self.help_cols, self.help_rows)
+    /// The rows of the page on show.
+    pub(crate) fn help_grid(&self) -> Vec<crate::docs::HelpLine> {
+        crate::docs::help_layout(self.help_cols, self.help_rows)
+            .into_iter()
+            .nth(self.help_page())
+            .unwrap_or_default()
     }
 
-    fn help_page_size(&self) -> usize {
-        self.help_rows.max(1) * self.help_cols.max(1)
+    /// Keys to a row of the shortcut list.
+    pub(crate) fn help_cols(&self) -> usize {
+        self.help_cols
     }
 
     pub fn docs_open(&self) -> bool {

@@ -809,21 +809,18 @@ fn draw_help(buf: &mut Buffer, window: Rect, above: Rect, app: &App, palette: Pa
     if inner_w < 8 {
         return;
     }
-    let columns = app.help_grid();
+    let lines = app.help_grid();
     // Every page gets the box of the fullest one.
     let grid_rows = app.help_grid_rows() as u16;
     let Some(dialog) = Dialog::open(buf, area, grid_rows, width, palette) else {
         return;
     };
-    let col_w = if columns.is_empty() {
-        1
-    } else {
-        let gaps = columns.len().saturating_sub(1) * HELP_GAP;
-        (dialog.text_w as usize)
-            .saturating_sub(gaps)
-            .saturating_div(columns.len())
-            .max(1)
-    };
+    let cols = app.help_cols().max(1);
+    let gaps = (cols - 1) * HELP_GAP;
+    let col_w = (dialog.text_w as usize)
+        .saturating_sub(gaps)
+        .saturating_div(cols)
+        .max(1);
     dialog.title(buf, "Shortcuts");
     dialog.note_page(
         buf,
@@ -839,7 +836,7 @@ fn draw_help(buf: &mut Buffer, window: Rect, above: Rect, app: &App, palette: Pa
             width: dialog.text_w,
             height: dialog.content_h,
         };
-        draw_help_grid(buf, content, &columns, col_w, dialog.content_h, palette);
+        draw_help_grid(buf, content, &lines, col_w, dialog.content_h, palette);
     }
     let hints = help_footer(app);
     dialog.footer(buf, &hints);
@@ -1241,31 +1238,42 @@ fn help_layout(width: u16) -> (usize, usize) {
 fn draw_help_grid(
     buf: &mut Buffer,
     area: Rect,
-    columns: &[Vec<(&str, &str)>],
+    lines: &[crate::docs::HelpLine],
     col_w: usize,
     rows_fit: u16,
     palette: Palette,
 ) {
-    let show = rows_fit as usize;
     let key_style = Style::default()
         .fg(palette.fg_secondary)
         .bg(palette.bg)
         .add_modifier(Modifier::BOLD);
     let label_style = Style::default().fg(palette.gray).bg(palette.bg);
+    let heading_style = Style::default()
+        .fg(palette.prompt_border)
+        .bg(palette.bg)
+        .add_modifier(Modifier::BOLD);
     let pad_style = Style::default().bg(palette.bg);
-    for (col, entries) in columns.iter().enumerate() {
-        for (row, (key, label)) in entries.iter().enumerate().take(show) {
-            let y = area.y + row as u16;
-            let x = area.x + (col * (col_w + HELP_GAP)) as u16;
-            let end = x + col_w as u16;
-            let mut cursor = paint_str(buf, x, y, end, key, key_style);
-            let label_at = x + crate::docs::KEY_WIDTH as u16 + 1;
-            while cursor < label_at.min(end) {
-                paint_char(buf, cursor, y, ' ', pad_style);
-                cursor += 1;
+    let right = area.x + area.width;
+    for (row, line) in lines.iter().enumerate().take(rows_fit as usize) {
+        let y = area.y + row as u16;
+        match line {
+            crate::docs::HelpLine::Heading(title) => {
+                paint_str(buf, area.x, y, right, title, heading_style);
             }
-            if label_at < end {
-                paint_str(buf, label_at, y, end, label, label_style);
+            crate::docs::HelpLine::Keys(cells) => {
+                for (col, (key, label)) in cells.iter().enumerate() {
+                    let x = area.x + (col * (col_w + HELP_GAP)) as u16;
+                    let end = (x + col_w as u16).min(right);
+                    let mut cursor = paint_str(buf, x, y, end, key, key_style);
+                    let label_at = x + crate::docs::KEY_WIDTH as u16 + 1;
+                    while cursor < label_at.min(end) {
+                        paint_char(buf, cursor, y, ' ', pad_style);
+                        cursor += 1;
+                    }
+                    if label_at < end {
+                        paint_str(buf, label_at, y, end, label, label_style);
+                    }
+                }
             }
         }
     }
@@ -2121,8 +2129,8 @@ mod tests {
         app.keys("?");
         let buffer = render(&mut app, 80, 40);
         let rows = lines(&buffer);
-        assert!(rows.iter().any(|row| row.contains("conj")));
-        assert!(rows.iter().any(|row| row.contains("antilog")));
+        assert!(rows.iter().any(|row| row.contains("negate")));
+        assert!(rows.iter().any(|row| row.contains("Arithmetic")));
         assert!(rows.iter().any(|row| row.contains("Shortcuts")));
         assert!(rows.iter().any(|row| row.contains("esc close")));
         let frame_y = rows
@@ -2298,13 +2306,13 @@ mod tests {
         let mut app = App::new();
         app.keys("?");
         let rows = lines(&render(&mut app, 90, 40));
-        assert!(rows.iter().any(|row| row.contains("1/3")));
-        assert!(
-            rows.iter().any(|row| {
-                row.contains("ret") && row.contains("inverse") && row.contains("conj")
-            }),
-            "three columns share the first row"
-        );
+        assert!(rows.iter().any(|row| row.contains("1/5")));
+        // A heading, then three keys to a row.
+        let stack = rows.iter().position(|row| row.contains("Stack")).unwrap();
+        let first = &rows[stack + 1];
+        assert!(first.contains("ret") && first.contains("pop") && first.contains("swap"));
+        assert!(rows.iter().any(|row| row.contains("Arithmetic")));
+        assert!(rows.iter().any(|row| row.contains("scroll")));
         assert!(rows.iter().any(|row| row.contains("tab next")));
         let footer = rows.iter().find(|row| row.contains("esc close")).unwrap();
         assert!(!footer.contains("quit"));
@@ -2314,42 +2322,50 @@ mod tests {
         app.press(Key::Tab);
         assert!(app.help_open());
         let rows = lines(&render(&mut app, 90, 40));
-        assert!(rows.iter().any(|row| row.contains("2/3")));
-        let stirling1 = rows
+        assert!(rows.iter().any(|row| row.contains("2/5")));
+        let rounding = rows
             .iter()
-            .position(|row| row.contains("stirling1"))
+            .position(|row| row.contains("Rounding"))
             .unwrap();
-        let stirling2 = rows
-            .iter()
-            .position(|row| row.contains("stirling2"))
-            .unwrap();
-        assert_eq!(stirling2, stirling1 + 1, "Stirling numbers stay together");
-        // The longest label of the last column is not cut at the border.
-        let row = rows.iter().find(|row| row.contains("transpose")).unwrap();
-        let label_end = row.find("transpose").unwrap() + "transpose".len();
+        assert!(rows[rounding + 1].contains("floor") && rows[rounding + 1].contains("ceil"));
+        assert!(rows.iter().any(|row| row.contains("ftrunc")));
+        assert!(rows.iter().any(|row| row.contains("antilog")));
+
+        app.press(Key::Tab);
+        let rows = lines(&render(&mut app, 90, 40));
+        assert!(rows.iter().any(|row| row.contains("3/5")));
+        let row = rows.iter().find(|row| row.contains("stirling1")).unwrap();
+        assert!(row.contains("stirling2"), "Stirling numbers share a row");
+
+        app.press(Key::Tab);
+        let rows = lines(&render(&mut app, 90, 40));
+        assert!(rows.iter().any(|row| row.contains("4/5")));
+        // The longest label of the last cell is not cut at the border.
+        let row = rows.iter().find(|row| row.contains("nthprime")).unwrap();
+        let label_end = row.find("nthprime").unwrap() + "nthprime".len();
         let border = row.rfind('│').unwrap();
         assert!(row[label_end..border].chars().all(|c| c == ' '));
         assert!(rows.iter().any(|row| row.contains("identity")));
-        assert!(rows.iter().any(|row| row.contains("shuffle")));
-        assert!(rows.iter().any(|row| row.contains("scroll")));
+        assert!(rows.iter().any(|row| row.contains("trail")));
 
-        // The third page: modes and display.
+        // The last page: precision, modes, and display.
         app.press(Key::Tab);
         let text = screen(&mut app, 90, 40);
-        assert!(text.contains("3/3"));
+        assert!(text.contains("5/5"));
+        assert!(text.contains("Modes"));
         assert!(text.contains("fractions"));
         assert!(text.contains("prec"));
         assert!(text.contains("radix"));
 
-        app.press(Key::ShiftTab);
-        app.press(Key::ShiftTab);
+        // Tab wraps to the first page, and Shift-Tab back to the last.
+        app.press(Key::Tab);
         let text = screen(&mut app, 90, 40);
-        assert!(text.contains("1/3"));
+        assert!(text.contains("1/5"));
         assert!(text.contains("undo"));
 
         app.press(Key::ShiftTab);
         let text = screen(&mut app, 90, 40);
-        assert!(text.contains("3/3"));
+        assert!(text.contains("5/5"));
 
         app.press(Key::Char('x'));
         assert!(!app.help_open());
