@@ -326,6 +326,33 @@ const BINDINGS: &[Binding] = &[
         catalog: true,
     },
     Binding {
+        keys: "s 0-9",
+        name: "storeq",
+        summary: "copy the top into q0 to q9",
+        body: "s and a digit copies the top into q0 through q9 and leaves it on the stack: s 3 stores q3. It is s s 3 in two keys.",
+        bar: None,
+        mode: None,
+        catalog: true,
+    },
+    Binding {
+        keys: "t 0-9",
+        name: "intoq",
+        summary: "pop the top into q0 to q9",
+        body: "t and a digit pops the top into q0 through q9: t 0 pops into q0, and r 0 brings it back as often as needed. It is s t 0 in two keys. 10 v x t 0 r 0 3 V M ^ r 0 2 V M ^ - is x^3 - x^2 for x of 1 to 10.",
+        bar: None,
+        mode: None,
+        catalog: true,
+    },
+    Binding {
+        keys: "r 0-9",
+        name: "recallq",
+        summary: "push q0 to q9",
+        body: "r and a digit pushes q0 through q9, which s, t, s s, or s t stored. It is s r 0 in two keys.",
+        bar: None,
+        mode: None,
+        catalog: true,
+    },
+    Binding {
         keys: "s s",
         name: "store",
         summary: "copy the top into a variable",
@@ -1211,7 +1238,9 @@ pub(crate) const HELP: &[HelpGroup] = &[
     },
     HelpGroup {
         title: "Storage and trail",
-        keys: &["s s", "s t", "s r", "s u", "s l", "t y"],
+        keys: &[
+            "s s", "s t", "s r", "s 0-9", "t 0-9", "r 0-9", "s u", "s l", "t y",
+        ],
         new_page: false,
     },
     HelpGroup {

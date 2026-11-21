@@ -130,6 +130,136 @@ and `P` pushes pi, so the last two lines are the sine of 45 degrees and
 the sine of pi/4. `ec --version` prints the version. A failed calculation
 prints the message on stderr and exits 1.
 
+### Examples
+
+A few calculations that put the keys together. Each runs as shown with
+`ec -e`, and the tests check every one.
+
+**Solve x² ≡ 3 (mod 11).** Square every residue and look for the 3s:
+
+```sh
+$ ec -e '1M11 10 v x * 2 V M ^'
+[1 mod 11, 4 mod 11, 9 mod 11, 5 mod 11, 3 mod 11, 3 mod 11, 5 mod 11, 9 mod 11, 4 mod 11, 1 mod 11]
+```
+
+`10 v x` is `[1, 2, ..., 10]`, and `1M11 *` makes each element a form
+modulo 11. `V M ^` squares them one by one; a plain `^` would take the dot
+product. The 3s are fifth and sixth, so x ≡ 5 and x ≡ 6.
+
+The same with plain numbers: square first, then take each square modulo
+11, since `%` goes element by element too:
+
+```sh
+$ ec -e '10 v x 2 V M ^ 11 %'
+[1, 4, 9, 5, 3, 3, 5, 9, 4, 1]
+```
+
+**A toy RSA key.** With the primes 61 and 53, n is 3233. The private
+exponent is the inverse of 17 modulo the totient, and decrypting undoes
+encrypting:
+
+```sh
+$ ec -e '3233 k f'
+[53, 61]
+$ ec -e '3233 k t'
+3120
+$ ec -e '17 3120 k i'
+2753
+$ ec -e '65M3233 17 ^'
+2790 mod 3233
+$ ec -e '2790M3233 2753 ^'
+65 mod 3233
+```
+
+**Fermat's little theorem.** 101 is prime, so 2^100 is 1 modulo 101:
+
+```sh
+$ ec -e '2M101 100 ^'
+1 mod 101
+```
+
+**Factor a number and multiply it back.** `V R *` folds `*` over the factors:
+
+```sh
+$ ec -e '2023 k f'
+[7, 17, 17]
+$ ec -e '2023 k f V R *'
+2023
+```
+
+**The first ten primes.** `H k n` is the nth prime, and it goes element by
+element:
+
+```sh
+$ ec -e '10 v x H k n'
+[2, 3, 5, 7, 11, 13, 17, 19, 23, 29]
+```
+
+**The gaps between primes.** Take the primes one place along, subtract
+the primes element by element, and take 1 off to count the numbers
+between each pair. A 1 is a pair of twin primes:
+
+```sh
+$ ec -e '10 v x 1 + H k n 10 v x H k n - 1 -'
+[0, 1, 1, 3, 1, 3, 1, 3, 5, 1]
+```
+
+**Sums.** The sum of 1 to 100, and of their squares (`I Q` of a vector is
+its dot product with itself):
+
+```sh
+$ ec -e '100 v x V R +'
+5050
+$ ec -e '100 v x I Q'
+338350
+```
+
+**Counting.** The tickets of a 6-from-49 lottery, and the digits of 100!
+(its integer log plus one):
+
+```sh
+$ ec -e '49 6 k c'
+13983816
+$ ec -e '100 ! 10 f I 1 +'
+158
+```
+
+**Two equations.** x + 2y = 5 and 3x + 4y = 6, as `b A /`, in floats and
+then in fractions:
+
+```sh
+$ ec -e '[5, 6] [[1, 2], [3, 4]] /'
+[-4, 4.5]
+$ ec -e 'm f [5, 6] [[1, 2], [3, 4]] /'
+[-4, 9:2]
+```
+
+**Pairs.** `2 v p` packs two vectors into the rows of a matrix, and `v t`
+turns the rows into columns, so each row is a pair:
+
+```sh
+$ ec -e '[5, 4, 3, 2, 1] [-1, -2, -3, -4, -5] 2 v p v t'
+[[5, -1], [4, -2], [3, -3], [2, -4], [1, -5]]
+```
+
+**Digits.** Pi to 50 digits, and (1 + 1/n)^n on its way to e:
+
+```sh
+$ ec -e '50 p P'
+3.1415926535897932384626433832795028841971693993751
+$ ec -e '1.000001 1000000 ^'
+2.71828046932
+```
+
+**Bases.** Hex in, hex out, and a byte in binary:
+
+```sh
+$ ec -e '16#FF 1 + d 6'
+16#100
+$ ec -e '255 d 2'
+2#11111111
+```
+
 ## Supported operations
 
 - Exact integers and fractions (`2^100`, `3:4`), decimal floats, and
@@ -156,8 +286,11 @@ prints the message on stderr and exits 1.
   prime (`1000000 H k n` is `15485863`).
 - Random numbers: integers of a range, floats, normal samples, a random
   element, and picks without repeats.
-- Stored variables, and the HP 35s physics constants, plus Earth, the Moon,
-  the Sun, and the astronomical unit.
+- Stored variables: `s s` copies the top into a variable and leaves it,
+  `s t` moves it there, and `s r` pushes it back. A digit names `q0` to
+  `q9` in two keys: `s 0` copies, `t 0` moves, and `r 0` recalls.
+- The HP 35s physics constants, plus Earth, the Moon, the Sun, and the
+  astronomical unit.
 - Display and entry in any radix from 2 to 36, with two's complement for a
   chosen word size and grouped digits.
 - Undo and redo of the stack and variables.

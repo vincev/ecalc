@@ -123,6 +123,7 @@ or `exact_case` when you add its key.
 - `src/app.rs` — key mapping. Test this without a tty.
 - `src/ui.rs`, `src/main.rs` — arguments (`clap`) and the ratatui screen.
 - `tests/reference.rs` — random comparison with PARI/GP and Emacs Calc, ignored by default.
+- `tests/readme.rs` — runs every `$ ec -e '...'` line of the README (the Shell section and the Examples) and compares the line after it. An example that changes output fails `cargo test`, so add new examples in that form.
 
 ## Number rules
 
