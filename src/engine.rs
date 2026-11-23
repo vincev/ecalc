@@ -422,6 +422,16 @@ impl Engine {
         self.binop(value::modulo);
     }
 
+    /// `H \`: `[a \ b, a % b]`, as PARI/GP's `divrem`.
+    pub fn divrem(&mut self) {
+        self.binop(|a, b, mode| {
+            Ok(Value::Vector(vec![
+                value::idiv(a, b, mode)?,
+                value::modulo(a, b, mode)?,
+            ]))
+        });
+    }
+
     pub fn gcd(&mut self) {
         self.binop(comb::gcd);
     }

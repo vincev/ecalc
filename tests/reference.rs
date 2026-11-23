@@ -242,6 +242,8 @@ fn exact_case(rng: &mut Rng) -> ExactCase {
         "rmod",
         "fidiv",
         "fmod",
+        "divrem",
+        "rdivrem",
         "inverse",
         "modpow",
         "floor",
@@ -436,6 +438,33 @@ fn exact_case(rng: &mut Rng) -> ExactCase {
                     small.then(|| format!("({a}) % ({b})")),
                 )
             }
+        }
+        // `H \\` is `[a \\ b, a % b]`. PARI/GP's own divrem rounds the
+        // quotient another way for a negative divisor, so build it from floor.
+        "divrem" => {
+            let a = any_integer(rng);
+            let b = match any_integer(rng) {
+                0 => 7,
+                b => b,
+            };
+            let small = a.abs() < 10i128.pow(15) && b.abs() < 10i128.pow(15);
+            case(
+                format!("{} {} H \\", keys(a), keys(b)),
+                Some(format!(
+                    "[floor(({a})/({b})), ({a})-({b})*floor(({a})/({b}))]"
+                )),
+                small.then(|| format!("[({a}) \\ ({b}), ({a}) % ({b})]")),
+            )
+        }
+        "rdivrem" => {
+            let ((a, b), (c, d)) = (fraction(rng), fraction(rng));
+            let (x, y) = (format!("({a}/{b})"), format!("({c}/{d})"));
+            let (cx, cy) = (format!("({a}:{b})"), format!("({c}:{d})"));
+            case(
+                format!("{}:{b} {}:{d} H \\", keys(a), keys(c)),
+                Some(format!("[floor({x}/{y}), {x}-{y}*floor({x}/{y})]")),
+                Some(format!("[{cx} \\ {cy}, {cx} % {cy}]")),
+            )
         }
         "ridiv" | "rmod" => {
             let ((a, b), (c, d)) = (fraction(rng), fraction(rng));

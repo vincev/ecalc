@@ -446,7 +446,7 @@ const BINDINGS: &[Binding] = &[
         keys: "\\",
         name: "idiv",
         summary: "integer quotient",
-        body: "\\ divides and keeps the integer quotient, toward minus infinity. 10 \\ 3 is 3, and -5 \\ 3 is -2. An integer or a fraction divides exactly; a float rounds at the current precision.",
+        body: "\\ divides and keeps the integer quotient, toward minus infinity. 10 \\ 3 is 3, and -5 \\ 3 is -2. An integer or a fraction divides exactly; a float rounds at the current precision. H \\ gives the quotient and the remainder together.",
         bar: None,
         mode: None,
         catalog: true,
@@ -528,6 +528,15 @@ const BINDINGS: &[Binding] = &[
         name: "mod",
         summary: "remainder",
         body: "% is the remainder from integer division toward minus infinity. 10 % 3 is 1, and -5 % 3 is 1. An integer or a fraction is exact; a float rounds at the current precision.",
+        bar: None,
+        mode: None,
+        catalog: true,
+    },
+    Binding {
+        keys: "H \\",
+        name: "divrem",
+        summary: "quotient and remainder",
+        body: "H \\ gives the integer quotient and the remainder as one vector, [a \\ b, a % b], as PARI/GP's divrem: 17 5 H \\ is [3, 2], and -17 5 H \\ is [-4, 3], since the quotient goes toward minus infinity. So a = b q + r. v u puts q and r on the stack. A vector goes element by element, giving a vector of pairs.",
         bar: None,
         mode: None,
         catalog: true,
@@ -1185,7 +1194,7 @@ pub(crate) const HELP: &[HelpGroup] = &[
     HelpGroup {
         title: "Arithmetic",
         keys: &[
-            "+", "-", "*", "/", "^", "I ^", "\\", "%", "n", "&", "Q", "I Q", "A",
+            "+", "-", "*", "/", "^", "I ^", "\\", "%", "H \\", "n", "&", "Q", "I Q", "A",
         ],
         new_page: false,
     },

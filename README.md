@@ -187,6 +187,19 @@ $ ec -e '2023 k f V R *'
 2023
 ```
 
+**Quotient and remainder.** `H \` gives both, as `[q, r]`: a million
+seconds is 11 days and 49600 seconds, and 49600 seconds is 13 hours and
+46 minutes and 40 seconds:
+
+```sh
+$ ec -e '1000000 86400 H \'
+[11, 49600]
+$ ec -e '49600 3600 H \'
+[13, 2800]
+$ ec -e '2800 60 H \'
+[46, 40]
+```
+
 **The first ten primes.** `H k n` is the nth prime, and it goes element by
 element:
 
@@ -273,7 +286,8 @@ $ ec -e '255 d 2'
   forms: product, inverse, integer powers, linear systems, determinant,
   trace, transpose, and the cross product.
 - Precision in significant digits, 12 by default.
-- Powers, roots, integer division, and remainder. `12 \ 12:7` is `7`.
+- Powers, roots, integer division, and remainder. `12 \ 12:7` is `7`, and
+  `H \` gives the quotient and the remainder together: `17 5 H \` is `[3, 2]`.
 - Floor `F`, ceiling `I F`, round `R` (a half away from zero, as in Calc: `-2.5 R` is `-3`), and truncate `I R`, exact for every input; `H` gives the result as a float.
 - Sine, cosine, and tangent, with inverses and hyperbolic forms. Angles
   start in degrees.

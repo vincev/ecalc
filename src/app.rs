@@ -1317,7 +1317,13 @@ impl App {
                     self.run(Engine::power);
                 }
             }
-            '\\' => self.run(Engine::idiv),
+            '\\' => {
+                if self.hyperbolic {
+                    self.run(Engine::divrem);
+                } else {
+                    self.run(Engine::idiv);
+                }
+            }
             '%' => self.run(Engine::modulo),
             ':' => self.run(Engine::div_fraction),
             '!' => self.run(Engine::factorial),
@@ -1806,6 +1812,34 @@ mod tests {
         let mut app = App::new();
         app.keys("F");
         assert_eq!(app.engine().message(), "too few arguments");
+    }
+
+    #[test]
+    fn divrem_pairs_quotient_and_remainder() {
+        let top = |keys: &str| {
+            let mut app = App::new();
+            app.keys(keys);
+            app.top_string()
+                .unwrap_or_else(|| panic!("{keys}: {}", app.engine().message()))
+        };
+        // `[a \ b, a % b]`, the quotient toward minus infinity, as Emacs
+        // Calc's idiv and mod and PARI/GP's divrem for a positive divisor.
+        for (keys, want) in [
+            ("17 5H\\", "[3, 2]"),
+            ("_17 5H\\", "[-4, 3]"),
+            ("17 _5H\\", "[-4, -3]"),
+            ("7:2 1:3H\\", "[10, 1:6]"),
+            ("[17, 18] 5H\\", "[[3, 2], [3, 3]]"),
+            ("17 5H\\vu", "2"),
+        ] {
+            assert_eq!(top(keys), want, "{keys}");
+        }
+        let mut app = App::new();
+        app.keys("17 0H\\");
+        assert_eq!(app.engine().message(), "division by zero");
+        let mut app = App::new();
+        app.keys("3M7 2H\\");
+        assert_eq!(app.engine().message(), "not for modulo forms");
     }
 
     #[test]
