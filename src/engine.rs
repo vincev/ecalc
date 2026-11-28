@@ -256,6 +256,18 @@ impl Engine {
         self.succeed();
     }
 
+    /// `C-l`: drop the whole stack, as Calc's `C-u 0 DEL`. One undo brings
+    /// it back. The variables stay.
+    pub fn clear_stack(&mut self) {
+        if self.stack.is_empty() {
+            self.show("the stack is empty");
+            return;
+        }
+        self.checkpoint();
+        self.stack.clear();
+        self.succeed();
+    }
+
     pub fn swap(&mut self) {
         let n = self.stack.len();
         if n < 2 {

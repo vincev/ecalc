@@ -625,6 +625,11 @@ impl App {
                 }
             }
             Key::Ctrl('r') | Key::Ctrl('R') => self.run(Engine::redo),
+            Key::Ctrl('l') | Key::Ctrl('L') => {
+                // Clear all: the number being typed goes too.
+                self.entry.clear();
+                self.run(Engine::clear_stack);
+            }
             Key::Ctrl(_) => self.run(Engine::unknown_key),
             Key::Up | Key::Down | Key::Left | Key::Right | Key::Home | Key::End | Key::Esc => {}
         }
@@ -1812,6 +1817,28 @@ mod tests {
         let mut app = App::new();
         app.keys("F");
         assert_eq!(app.engine().message(), "too few arguments");
+    }
+
+    #[test]
+    fn ctrl_l_clears_the_stack_and_undo_restores_it() {
+        let mut app = App::new();
+        app.keys("1 2 3 4");
+        app.press(Key::Ctrl('l'));
+        assert!(app.engine().stack().is_empty());
+        assert_eq!(app.entry.as_str(), "");
+        app.keys("u");
+        assert_eq!(app.engine().stack().len(), 3);
+        assert_eq!(app.top_string().as_deref(), Some("3"));
+        app.press(Key::Ctrl('r'));
+        assert!(app.engine().stack().is_empty());
+        app.press(Key::Ctrl('l'));
+        assert_eq!(app.engine().message(), "the stack is empty");
+        // The variables stay.
+        let mut app = App::new();
+        app.keys("5 s1");
+        app.press(Key::Ctrl('l'));
+        app.keys("r1");
+        assert_eq!(app.top_string().as_deref(), Some("5"));
     }
 
     #[test]
@@ -3993,6 +4020,7 @@ mod tests {
     #[test]
     fn binding_words_are_single_keys() {
         assert_eq!(binding_keys("C-r"), vec![Key::Ctrl('r')]);
+        assert_eq!(binding_keys("C-l"), vec![Key::Ctrl('l')]);
         assert_eq!(binding_keys("S-Tab"), vec![Key::ShiftTab]);
         assert_eq!(binding_keys("ret"), vec![Key::Enter]);
         assert_eq!(binding_keys("del"), vec![Key::Backspace]);
@@ -4020,6 +4048,8 @@ mod tests {
             }
             let (key, tail) = if let Some(tail) = rest.strip_prefix("C-r") {
                 (Key::Ctrl('r'), tail)
+            } else if let Some(tail) = rest.strip_prefix("C-l") {
+                (Key::Ctrl('l'), tail)
             } else if let Some(tail) = rest.strip_prefix("S-Tab") {
                 (Key::ShiftTab, tail)
             } else if let Some(tail) = rest.strip_prefix('←') {

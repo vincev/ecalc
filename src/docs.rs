@@ -65,6 +65,15 @@ const BINDINGS: &[Binding] = &[
         catalog: true,
     },
     Binding {
+        keys: "C-l",
+        name: "clear",
+        summary: "clear the stack",
+        body: "C-l drops every value on the stack, and the number being typed, as Calc's C-u 0 DEL. The variables stay. u brings the stack back.",
+        bar: None,
+        mode: None,
+        catalog: true,
+    },
+    Binding {
         keys: "C-r",
         name: "redo",
         summary: "undo an undo",
@@ -1183,7 +1192,7 @@ pub(crate) struct HelpGroup {
 pub(crate) const HELP: &[HelpGroup] = &[
     HelpGroup {
         title: "Stack",
-        keys: &["ret", "del", "tab", "S-Tab", "u", "C-r", "Esc", "←→"],
+        keys: &["ret", "del", "tab", "S-Tab", "u", "C-r", "C-l", "Esc", "←→"],
         new_page: false,
     },
     HelpGroup {

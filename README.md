@@ -21,7 +21,7 @@ ec
 ```
 
 Quit with `q`. Type the numbers first, then the operation. Space or Enter
-pushes.
+pushes, DEL pops, and `C-l` clears the whole stack (`u` brings it back).
 
 ```
 0.1 0.2 +  -> 0.3
@@ -307,7 +307,7 @@ $ ec -e '255 d 2'
   astronomical unit.
 - Display and entry in any radix from 2 to 36, with two's complement for a
   chosen word size and grouped digits.
-- Undo and redo of the stack and variables.
+- Undo and redo of the stack and variables, and `C-l` to clear the stack.
 - A trail of every number typed and every result, with the command that
   made it. `t y` opens it: type to filter by command or digits, and Enter
   pushes the selected value back onto the stack.
